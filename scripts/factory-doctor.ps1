@@ -93,7 +93,8 @@ try {
     $agentRowsText = (& $ClaudeCommand agents --json --all 2>&1 | Out-String).Trim()
     $agentViewOk = $LASTEXITCODE -eq 0
     if ($agentViewOk) {
-        $agentRows = if ($agentRowsText) { @($agentRowsText | ConvertFrom-Json) } else { @() }
+        $parsedAgentRows = if ($agentRowsText) { $agentRowsText | ConvertFrom-Json } else { @() }
+        $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
         $agentViewDetail = "$($agentRows.Count) known background session(s)"
     } else {
         $agentViewDetail = $agentRowsText

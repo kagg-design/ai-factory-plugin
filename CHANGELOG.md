@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Renamed the product and internal plugin namespace from Asana Factory to Claude Factory.
+- Fixed Claude Code 2.1.218 background launches by ignoring benign stderr warnings,
+  removing the unsupported `--bg --session-id` combination, and reconciling the
+  current `sessionId/status/name/cwd` agent schema.
 - Made `-Repository` optional; `start-factory` now defaults to the current directory.
 - Exposed the public command as `/factory` through a bundled standalone skill loaded
   by `start-factory.ps1`; no personal or target-repository files are installed.

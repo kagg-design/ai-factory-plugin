@@ -21,7 +21,8 @@ $agentRows = @()
 try {
     $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -eq 0 -and $agentsText) {
-        $agentRows = @($agentsText | ConvertFrom-Json)
+        $parsedAgentRows = $agentsText | ConvertFrom-Json
+        $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
     }
 } catch {
     $agentRows = @()
@@ -29,6 +30,7 @@ try {
 
 $mutex = $null
 $changes = New-Object System.Collections.Generic.List[object]
+$metadataChanged = $false
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
@@ -41,17 +43,40 @@ try {
         $before = [string]$task.status
         $taskId = [string]$task.id
         $safeTaskId = ConvertTo-FactorySafeName -Value $taskId
-        $sessionRow = @($agentRows | Where-Object {
-            $rowSessionId = if ($null -ne $_.PSObject.Properties["sessionId"]) { [string]$_.sessionId } else { "" }
-            [string]$_.id -eq [string]$task.backgroundSession.id -or
-            (
-                [string]$task.backgroundSession.sessionId -and
-                $rowSessionId -eq [string]$task.backgroundSession.sessionId
-            )
-        }) | Select-Object -First 1
+        $sessionRow = $null
+        foreach ($candidateSessionRow in @($agentRows)) {
+            $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
+            $rowSessionId = if ($null -ne $candidateSessionRow.PSObject.Properties["sessionId"]) { [string]$candidateSessionRow.sessionId } else { "" }
+            $rowName = if ($null -ne $candidateSessionRow.PSObject.Properties["name"]) { [string]$candidateSessionRow.name } else { "" }
+            $rowCwd = if ($null -ne $candidateSessionRow.PSObject.Properties["cwd"]) { [string]$candidateSessionRow.cwd } else { "" }
+            $expectedSessionId = [string]$task.backgroundSession.sessionId
+            $expectedName = [string]$task.backgroundSession.name
+            $expectedCwd = [string]$task.worktree
+
+            $matchesSession =
+                ($rowId -and $rowId -eq [string]$task.backgroundSession.id) -or
+                ($rowSessionId -and $expectedSessionId -and $rowSessionId -eq $expectedSessionId) -or
+                (
+                    $rowName -and $expectedName -and $rowName -eq $expectedName -and
+                    $rowCwd -and $expectedCwd -and
+                    $rowCwd.TrimEnd("\").Equals($expectedCwd.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
+                )
+            if ($matchesSession) {
+                $sessionRow = $candidateSessionRow
+                break
+            }
+        }
 
         if ($null -ne $sessionRow) {
-            Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value ([string]$sessionRow.state)
+            $metadataChanged = $true
+            $rowState = if ($null -ne $sessionRow.PSObject.Properties["state"] -and [string]$sessionRow.state) {
+                [string]$sessionRow.state
+            } elseif ($null -ne $sessionRow.PSObject.Properties["status"] -and [string]$sessionRow.status) {
+                [string]$sessionRow.status
+            } else {
+                [string]$task.backgroundSession.state
+            }
+            Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value $rowState
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastSeenAt" -Value (Get-FactoryUtcTimestamp)
             if ($null -ne $sessionRow.PSObject.Properties["sessionId"] -and [string]$sessionRow.sessionId) {
                 Set-FactoryProperty -Target $task.backgroundSession -Name "sessionId" -Value ([string]$sessionRow.sessionId)
@@ -185,7 +210,7 @@ try {
             }
             Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value ([string]$resultEvent.capturedAt)
         } elseif ($null -ne $sessionRow) {
-            $sessionState = [string]$sessionRow.state
+            $sessionState = [string]$task.backgroundSession.state
             if ($sessionState -eq "working" -and [string]$task.status -in @("starting", "planning", "awaiting-input")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value $(if ([string]$task.startMode -eq "interactive") { "planning" } else { "running" })
             } elseif ($sessionState -eq "blocked" -and [string]$task.status -in @("starting", "planning", "running")) {
@@ -221,13 +246,14 @@ try {
         }
     }
 
-    if ($changes.Count -gt 0) {
+    if ($changes.Count -gt 0 -or $metadataChanged) {
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     }
 
     [ordered]@{
         changed = $changes.Count
+        metadataChanged = $metadataChanged
         transitions = @($changes | ForEach-Object { $_ })
         sessionsSeen = $agentRows.Count
     } | ConvertTo-Json -Depth 20

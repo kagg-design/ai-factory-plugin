@@ -26,7 +26,6 @@ $task = $null
 $attempt = 1
 $branch = $null
 $worktree = $null
-$sessionUuid = [Guid]::NewGuid().ToString()
 $sessionName = $null
 $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
 $eventDirectory = Join-Path $context.eventsPath $safeTaskId
@@ -201,7 +200,7 @@ $payloadJson
         mode = $Mode
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)
-        sessionId = $sessionUuid
+        sessionId = $null
         backgroundId = $null
         name = $sessionName
         eventDirectory = $eventDirectory
@@ -219,8 +218,7 @@ $payloadJson
         "--agent", "factory:worker",
         "--bg",
         "--name", $sessionName,
-        "--permission-mode", $permissionMode,
-        "--session-id", $sessionUuid
+        "--permission-mode", $permissionMode
     )
 
     $workerModel = if (
@@ -240,10 +238,16 @@ $payloadJson
     $claudeArguments += $prompt
 
     Push-Location $worktree
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
+        # Claude Code can emit non-fatal compatibility warnings on stderr while
+        # returning exit code 0. Capture them without turning them into a
+        # terminating PowerShell error; the native exit code remains decisive.
+        $ErrorActionPreference = "Continue"
         $launchLines = @(& $ClaudeCommand @claudeArguments 2>&1 | ForEach-Object { [string]$_ })
         $launchExitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
         Pop-Location
     }
     $launchOutput = $launchLines -join [Environment]::NewLine
@@ -276,7 +280,7 @@ $payloadJson
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         $session = [ordered]@{
             id = $backgroundId
-            sessionId = $sessionUuid
+            sessionId = $null
             name = $sessionName
             state = "working"
             startedAt = $now

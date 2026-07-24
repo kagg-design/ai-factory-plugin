@@ -43,6 +43,7 @@ try {
 
     $workerLauncherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Raw
     Assert-True ($workerLauncherSource.Contains('"factory:worker"')) "Worker launcher uses the wrong plugin namespace."
+    Assert-True (-not $workerLauncherSource.Contains('"--session-id"')) "Worker launcher still passes the unsupported background session ID."
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
@@ -62,16 +63,24 @@ try {
     & git -C $repository push -u origin develop 1> $null
     & git -C $repository push -u origin master 1> $null
 
+    $fakeSessionId = "11111111-2222-4333-8444-555555555555"
     $fakeSource = @"
 @echo off
+setlocal EnableDelayedExpansion
 if "%~1"=="--version" (
   echo 2.1.218 ^(Claude Code^)
   exit /b 0
 )
 if "%~1"=="agents" (
-  echo [{"id":"test1234","state":"done","kind":"background","cwd":"C:\\tmp","startedAt":1}]
+  set "JSON_CWD=%CLAUDE_FACTORY_TEST_AGENT_CWD:\=\\%"
+  echo [{"sessionId":"$fakeSessionId","status":"working","kind":"background","name":"factory-test-task-test-task","cwd":"!JSON_CWD!","startedAt":1}]
   exit /b 0
 )
+if "%~1"=="mcp" (
+  echo asana: connected
+  exit /b 0
+)
+echo Warning: benign background-launch warning 1>&2
 echo backgrounded - test1234 - factory-test-task
 echo claude attach test1234
 exit /b 0
@@ -156,7 +165,17 @@ exit /b 0
     $launch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "test-task" -Mode "auto" -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Assert-Equal "test1234" ([string]$launch.backgroundSession.id) "Background ID was not captured."
+    $launchMetadata = Get-Content -LiteralPath (Join-Path $context.sessionsPath "test-task.json") -Raw | ConvertFrom-Json
+    Assert-True ([string]$launchMetadata.launchOutput -match 'benign background-launch warning') "Benign stderr warning was not captured."
+    Assert-True (-not [string]$launch.backgroundSession.sessionId) "Launcher recorded a session UUID that Claude did not accept."
     Assert-True (Test-Path -LiteralPath $launch.worktree) "Worker worktree was not created."
+
+    $env:CLAUDE_FACTORY_TEST_AGENT_CWD = [string]$launch.worktree
+    $sessionReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    $sessionState = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    Assert-Equal $fakeSessionId ([string]$sessionState.tasks[0].backgroundSession.sessionId) "Current Claude agents schema was not reconciled."
+    Assert-Equal "working" ([string]$sessionState.tasks[0].backgroundSession.state) "Current Claude status field was not captured."
 
     $workerContext = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $launch.worktree) |
         ConvertFrom-Json
@@ -191,7 +210,7 @@ exit /b 0
     }
     $message = "FACTORY_RESULT`n" + ($result | ConvertTo-Json -Depth 20)
     $hookInput = [ordered]@{
-        session_id = [string]$launch.backgroundSession.sessionId
+        session_id = $fakeSessionId
         transcript_path = (Join-Path $testRoot "transcript.jsonl")
         cwd = [string]$launch.worktree
         hook_event_name = "Stop"
@@ -230,6 +249,7 @@ exit /b 0
     Write-Host "All factory runtime tests passed." -ForegroundColor Green
 } finally {
     Remove-Item Env:\CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
     if ($KeepTemp) {
         Write-Host "Kept test directory: $testRoot" -ForegroundColor Yellow
     } elseif (
