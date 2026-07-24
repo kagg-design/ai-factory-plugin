@@ -1,6 +1,6 @@
 ---
-name: factory-tick
-description: Reconcile conversational background worker sessions, integrate one explicitly approved commit, and refill the Asana Factory queue.
+name: tick
+description: Reconcile conversational background worker sessions, integrate one explicitly approved commit, and refill the Claude Factory queue.
 argument-hint: ""
 user-invocable: true
 allowed-tools:
@@ -16,7 +16,7 @@ allowed-tools:
   - CronDelete
 ---
 
-Advance the Asana Factory by one safe orchestration cycle. Speak in Russian.
+Advance Claude Factory by one safe orchestration cycle. Speak in Russian.
 Do not emit repetitive no-op commentary when nothing changed.
 
 ## Load and reconcile
@@ -148,7 +148,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scrip
 ```
 
 Launch one session per task. Each call creates or safely reuses the external
-worktree, starts `claude --bg --agent asana:asana-fix-worker`, saves both the
+worktree, starts `claude --bg --agent factory:worker`, saves both the
 short background ID and full session UUID, and returns immediately. Stop
 filling capacity on the first launch failure so repeated errors do not fan out.
 
@@ -167,7 +167,7 @@ If only `awaiting-input`, `awaiting-review`, `held`, `rejected`, `blocked`,
 `failed`, `review`, or `done` remain:
 
 - set `active: false`;
-- delete the matching `/asana:factory-tick` cron job;
+- delete the matching `/factory:tick` cron job;
 - clear `cronJobId`;
 - preserve every session, commit, branch, worktree, and transcript.
 

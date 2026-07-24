@@ -35,7 +35,7 @@ $manifestOk = $false
 $manifestDetail = "missing"
 try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $manifestOk = [string]$manifest.name -eq "asana"
+    $manifestOk = [string]$manifest.name -eq "factory"
     $manifestDetail = "$($manifest.name) v$($manifest.version)"
 } catch {
     $manifestDetail = $_.Exception.Message
@@ -69,7 +69,7 @@ foreach ($line in @(& git -C $context.repositoryRoot worktree list --porcelain 2
 Add-DoctorCheck -Name "worktreeRegistry" -Passed $true -Severity "info" -Detail "$($registeredFactoryWorktrees.Count) factory worktree(s)"
 
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
-$sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeAsanaFactorySession-$safeProjectKey")
+$sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")
 $factorySessionActive = $false
 try {
     try {

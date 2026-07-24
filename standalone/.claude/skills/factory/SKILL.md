@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Start conversational or automatic Asana worker sessions, manage their persistent queue, review exact commits, and control integration.
+description: Start conversational or automatic task worker sessions, manage their persistent queue, review exact commits, and control integration.
 argument-hint: "start [--auto] <URLs> | status | doctor | concurrency [N] | chat <id> | transcript <id> | inspect <id> | review <id> | go <id> | hold <id> | rework <id> [instructions] | reject <id> | pause | resume | retry <id> | stop"
 disable-model-invocation: true
 allowed-tools:
@@ -11,13 +11,13 @@ allowed-tools:
   - Grep
   - Bash
   - PowerShell
-  - Skill(asana:factory-tick)
+  - Skill(factory:tick)
   - CronCreate
   - CronList
   - CronDelete
 ---
 
-Manage the Asana Factory for the current Git repository. Speak to the user in
+Manage Claude Factory for the current Git repository. Speak to the user in
 Russian and keep operational messages compact. Never put plugin files in the
 target repository.
 
@@ -26,7 +26,7 @@ target repository.
 Run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/project-context.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Initialize
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/project-context.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Initialize
 ```
 
 Parse the JSON and read `configPath` and `statePath`. Runtime files are outside
@@ -36,7 +36,7 @@ bundled script, use the script instead of editing state or config manually.
 Before `status`, `inspect`, `transcript`, `review`, or any decision command, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
 This imports hook events, Claude background-session state, transcript paths,
@@ -49,7 +49,7 @@ and validated Git results into factory state.
 `start` without `--auto` is interactive:
 
 ```text
-/asana:factory start <URL>
+/factory start <URL>
 ```
 
 The worker first inspects the task read-only, emits `FACTORY_PLAN`, and waits
@@ -57,7 +57,7 @@ for the user in its own chat before editing. `start --auto` begins implementatio
 immediately:
 
 ```text
-/asana:factory start --auto <URL>
+/factory start --auto <URL>
 ```
 
 For backward compatibility, bare Asana URLs without `start` mean
@@ -109,7 +109,7 @@ For every URL:
 
 Write state atomically beside `statePath`. Set `active: true` and
 `paused: false`, ensure the scheduler exists, and invoke
-`/asana:factory-tick` immediately. Do not wait for workers to finish.
+`/factory:tick` immediately. Do not wait for workers to finish.
 
 Re-read state after the tick and show, for every launched task:
 
@@ -136,21 +136,21 @@ commands. Do not launch or integrate solely for `status`.
 Run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/factory-doctor.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/factory-doctor.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
 Report Claude version, plugin manifest, repository and remote branches, private
 runtime JSON, factory session lock, worktree registry, Agent View, scheduler,
-and Asana connector warning. The skill invocation itself proves the plugin is
-loaded in the current session. Doctor is diagnostic and must not launch,
-integrate, push, or clean anything.
+and Asana connector warning. The launcher supplies both the public skill and its
+companion plugin. Doctor is diagnostic and must not launch, integrate, push, or
+clean anything.
 
 ### `concurrency [N]`
 
 Without `N`, show the current and maximum configured concurrency. With `N`, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/set-concurrency.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Value N
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/set-concurrency.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Value N
 ```
 
 If the limit increased and queued work exists, reactivate the scheduler and
@@ -207,7 +207,7 @@ current commit SHA.
 Run the appropriate action through:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action ACTION -TaskId TASK_ID
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action ACTION -TaskId TASK_ID
 ```
 
 For `rework`, pass the optional text with `-Instructions`. Because a top-level
@@ -247,7 +247,7 @@ when the user explicitly asks to abort them.
 Use `CronList` first. There must be at most one recurring job whose prompt is:
 
 ```text
-/asana:factory-tick
+/factory:tick
 ```
 
 Use `config.pollCron` and persist its job ID. When no tasks are queued, working,

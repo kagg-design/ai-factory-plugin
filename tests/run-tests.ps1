@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
-$testRoot = Join-Path "C:\tmp" "claude-asana-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
+$testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
 $runtime = Join-Path $testRoot "runtime"
@@ -24,6 +24,26 @@ function Assert-True {
 }
 
 try {
+    $pluginManifest = Get-Content -LiteralPath (Join-Path $pluginRoot ".claude-plugin\plugin.json") -Raw | ConvertFrom-Json
+    Assert-Equal "factory" ([string]$pluginManifest.name) "Plugin namespace is not source-neutral."
+
+    $bundleManifest = Get-Content -LiteralPath (Join-Path $pluginRoot "MANIFEST.json") -Raw | ConvertFrom-Json
+    Assert-Equal "/factory" ([string]$bundleManifest.command) "Public command is not unnamespaced."
+    foreach ($relativeFile in @($bundleManifest.files)) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
+    }
+
+    $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
+    Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
+    Assert-True ($publicSkill.Contains("Skill(factory:tick)")) "The public skill does not reference the internal tick."
+
+    $launcherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "start-factory.ps1") -Raw
+    Assert-True ($launcherSource.Contains('[string]$Repository = (Get-Location).Path')) "Launcher does not default to the current directory."
+    Assert-True ($launcherSource.Contains('"--add-dir", $standaloneRoot')) "Launcher does not load the /factory standalone skill."
+
+    $workerLauncherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Raw
+    Assert-True ($workerLauncherSource.Contains('"factory:worker"')) "Worker launcher uses the wrong plugin namespace."
+
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
     & git init $repository 1> $null
@@ -52,7 +72,7 @@ if "%~1"=="agents" (
   echo [{"id":"test1234","state":"done","kind":"background","cwd":"C:\\tmp","startedAt":1}]
   exit /b 0
 )
-echo backgrounded - test1234 - asana-test-task
+echo backgrounded - test1234 - factory-test-task
 echo claude attach test1234
 exit /b 0
 "@
@@ -215,7 +235,7 @@ exit /b 0
     } elseif (
         (Test-Path -LiteralPath $testRoot) -and
         ([IO.Path]::GetFullPath($testRoot)).StartsWith(
-            [IO.Path]::GetFullPath("C:\tmp\claude-asana-plugin-tests-"),
+            [IO.Path]::GetFullPath("C:\tmp\claude-factory-plugin-tests-"),
             [StringComparison]::OrdinalIgnoreCase
         )
     ) {

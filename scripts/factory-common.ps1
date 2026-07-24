@@ -76,7 +76,7 @@ function Enter-FactoryMutex {
     )
 
     $safeKey = $ProjectKey -replace '[^A-Za-z0-9_.-]', '-'
-    $mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeAsanaFactory-$safeKey")
+    $mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactory-$safeKey")
     try {
         if (-not $mutex.WaitOne($TimeoutMilliseconds)) {
             throw "Timed out waiting for the factory state lock for '$ProjectKey'."

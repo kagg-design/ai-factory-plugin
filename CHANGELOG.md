@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Renamed the product and internal plugin namespace from Asana Factory to Claude Factory.
+- Made `-Repository` optional; `start-factory` now defaults to the current directory.
+- Exposed the public command as `/factory` through a bundled standalone skill loaded
+  by `start-factory.ps1`; no personal or target-repository files are installed.
+- Renamed internal components to `factory:worker` and `/factory:tick`.
+- Kept Asana as the current intake adapter pending the source-adapter redesign.
+
 ## 3.0.0
 
 - Replaced one-shot worker subagents with first-class Claude Code background

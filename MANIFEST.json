@@ -1,13 +1,13 @@
 {
-  "name": "claude-asana-plugin",
+  "name": "claude-factory-plugin",
   "version": "3.0.0",
-  "loading": "session-only --plugin-dir",
+  "loading": "session-only --plugin-dir plus --add-dir",
   "target_repository_files_created": false,
-  "command": "/asana:factory",
+  "command": "/factory",
   "files": [
     ".claude-plugin/plugin.json",
     ".gitignore",
-    "agents/asana-fix-worker.md",
+    "agents/worker.md",
     "CHANGELOG.md",
     "cleanup-project.ps1",
     "config.default.json",
@@ -30,8 +30,8 @@
     "scripts/task-action.ps1",
     "scripts/worker-git-guard.ps1",
     "show-project-paths.ps1",
-    "skills/factory-tick/SKILL.md",
-    "skills/factory/SKILL.md",
+    "skills/tick/SKILL.md",
+    "standalone/.claude/skills/factory/SKILL.md",
     "start-factory.ps1",
     "tests/run-tests.ps1"
   ]

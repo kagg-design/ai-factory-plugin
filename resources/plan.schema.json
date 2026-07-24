@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Asana Factory Interactive Plan",
+  "title": "Claude Factory Interactive Plan",
   "type": "object",
   "required": ["taskId", "understanding", "plan", "questions", "readyToImplement"],
   "properties": {

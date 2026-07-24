@@ -1,13 +1,16 @@
-# Claude Asana Factory
+# Claude Factory
 
-Claude Asana Factory is a removable Claude Code plugin that turns Asana tasks
-into a persistent development queue:
+Claude Factory is a removable Claude Code orchestration package that currently
+turns Asana tasks into a persistent development queue:
 
 ```text
 Asana → queue → background worker sessions → external Git worktrees
       → tests → one task commit → human review
       → serialized integration → push → cleanup
 ```
+
+Asana remains the only intake adapter in this revision. The public command and
+runtime identities are now source-neutral so more adapters can be added next.
 
 The plugin is loaded only for a dedicated factory session. It is never copied
 into the target repository and does not change the repository's `.claude`
@@ -30,10 +33,20 @@ claude --version
 
 ## Start the factory
 
-From the plugin directory:
+Add the plugin directory to `PATH`, then run the launcher from the target Git
+repository:
 
 ```powershell
-.\start-factory.ps1 -Repository D:\Projects\MotiveHR
+cd D:\Projects\MotiveHR
+start-factory
+```
+
+When `-Repository` is omitted, the current directory is used and resolved to
+its primary Git worktree. An explicit path remains available when launching
+from elsewhere:
+
+```powershell
+start-factory -Repository D:\Projects\MotiveHR
 ```
 
 The launcher:
@@ -43,7 +56,8 @@ The launcher:
 3. creates the external factory worktree root;
 4. acquires a per-repository process lock;
 5. changes to the target repository;
-6. starts Claude Code with this plugin loaded through `--plugin-dir`.
+6. starts Claude Code with hooks and workers loaded through `--plugin-dir`;
+7. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
 
 It does not add a task, create a task commit, merge, or push by itself.
 
@@ -55,19 +69,19 @@ can run separate factory sessions at the same time.
 Open the resume picker in the correct repository context:
 
 ```powershell
-.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Resume
+start-factory -Resume
 ```
 
 Continue the repository's most recent conversation:
 
 ```powershell
-.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Continue
+start-factory -Continue
 ```
 
 Choose the lead and inherited worker model:
 
 ```powershell
-.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Model sonnet
+start-factory -Model sonnet
 ```
 
 `-Resume` and `-Continue` are mutually exclusive.
@@ -81,7 +95,7 @@ worktree.
 ### Interactive start
 
 ```text
-/asana:factory start <Asana URL>
+/factory start <Asana URL>
 ```
 
 The worker reads the task and relevant code without editing, returns a
@@ -91,7 +105,7 @@ then tell it to begin.
 ### Automatic start
 
 ```text
-/asana:factory start --auto <Asana URL>
+/factory start --auto <Asana URL>
 ```
 
 The worker begins implementation immediately. This mode is intended for clear,
@@ -100,7 +114,7 @@ small tasks that normally need no clarification.
 Bare URLs remain a compatibility alias for automatic mode:
 
 ```text
-/asana:factory <Asana URL> <Asana URL>
+/factory <Asana URL> <Asana URL>
 ```
 
 Both modes remain interruptible.
@@ -131,11 +145,11 @@ While attached:
 The factory also prints these commands:
 
 ```text
-/asana:factory chat <task-id>
-/asana:factory transcript <task-id>
+/factory chat <task-id>
+/factory transcript <task-id>
 ```
 
-Worker sessions are named `asana-<task-id>-<title>`, so they are easy to find
+Worker sessions are named `factory-<task-id>-<title>`, so they are easy to find
 in Agent View.
 
 ## Human review gate
@@ -146,21 +160,21 @@ automatically.
 Review the requirements, transcript, tests, and exact commit:
 
 ```text
-/asana:factory review <task-id>
+/factory review <task-id>
 ```
 
 Approve the exact clean worker SHA:
 
 ```text
-/asana:factory go <task-id>
+/factory go <task-id>
 ```
 
 Other decisions:
 
 ```text
-/asana:factory hold <task-id>
-/asana:factory reject <task-id>
-/asana:factory rework <task-id> "Keep the old endpoint compatible"
+/factory hold <task-id>
+/factory reject <task-id>
+/factory rework <task-id> "Keep the old endpoint compatible"
 ```
 
 `rework` preserves the same conversation and prints the attach command plus
@@ -185,13 +199,13 @@ The default limit is three active workers:
 Show the current limit:
 
 ```text
-/asana:factory concurrency
+/factory concurrency
 ```
 
 Change it while the queue is running:
 
 ```text
-/asana:factory concurrency 5
+/factory concurrency 5
 ```
 
 Increasing from three to five lets the next tick start up to two additional
@@ -204,23 +218,23 @@ running; the scheduler simply waits before starting more.
 ## Commands
 
 ```text
-/asana:factory start <URLs>
-/asana:factory start --auto <URLs>
-/asana:factory status
-/asana:factory doctor
-/asana:factory concurrency [N]
-/asana:factory chat <task-id>
-/asana:factory transcript <task-id>
-/asana:factory inspect <task-id>
-/asana:factory review <task-id>
-/asana:factory go <task-id>
-/asana:factory hold <task-id>
-/asana:factory rework <task-id> [instructions]
-/asana:factory reject <task-id>
-/asana:factory retry <task-id>
-/asana:factory pause
-/asana:factory resume
-/asana:factory stop
+/factory start <URLs>
+/factory start --auto <URLs>
+/factory status
+/factory doctor
+/factory concurrency [N]
+/factory chat <task-id>
+/factory transcript <task-id>
+/factory inspect <task-id>
+/factory review <task-id>
+/factory go <task-id>
+/factory hold <task-id>
+/factory rework <task-id> [instructions]
+/factory reject <task-id>
+/factory retry <task-id>
+/factory pause
+/factory resume
+/factory stop
 ```
 
 When the queue contains only tasks waiting for input or review, the recurring
@@ -361,4 +375,4 @@ only after manual inspection.
 
 After each repository is safely cleaned, deleting the plugin directory removes
 the factory completely. Normal Claude Code sessions launched without
-`--plugin-dir` never see `/asana:factory`.
+`start-factory` never see `/factory`.

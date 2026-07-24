@@ -1,12 +1,13 @@
 {
-  "name": "asana",
+  "name": "factory",
   "version": "3.0.0",
-  "description": "A removable Claude Code plugin for conversational or automatic Asana workers in isolated Git worktrees with explicit human-reviewed integration.",
+  "description": "A removable Claude Code plugin for conversational or automatic task workers in isolated Git worktrees with explicit human-reviewed integration.",
   "author": {
     "name": "Igor"
   },
   "keywords": [
-    "asana",
+    "factory",
+    "orchestration",
     "background-agents",
     "worktree",
     "queue",
