@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Asana Factory Interactive Plan",
+  "type": "object",
+  "required": ["taskId", "understanding", "plan", "questions", "readyToImplement"],
+  "properties": {
+    "taskId": {"type": "string"},
+    "understanding": {"type": "string"},
+    "plan": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "questions": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "readyToImplement": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}

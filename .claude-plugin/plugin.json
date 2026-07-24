@@ -1,12 +1,13 @@
 {
   "name": "asana",
-  "version": "2.1.0",
-  "description": "A removable Claude Code plugin for asynchronous Asana-driven fixes using parallel Git worktrees and serialized integration.",
+  "version": "3.0.0",
+  "description": "A removable Claude Code plugin for conversational or automatic Asana workers in isolated Git worktrees with explicit human-reviewed integration.",
   "author": {
     "name": "Igor"
   },
   "keywords": [
     "asana",
+    "background-agents",
     "worktree",
     "queue",
     "automation",

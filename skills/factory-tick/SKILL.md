@@ -1,6 +1,6 @@
 ---
 name: factory-tick
-description: Reconcile workers, integrate one completed task, promote it, clean it up, and refill the asynchronous Asana Factory queue.
+description: Reconcile conversational background worker sessions, integrate one explicitly approved commit, and refill the Asana Factory queue.
 argument-hint: ""
 user-invocable: true
 allowed-tools:
@@ -11,15 +11,15 @@ allowed-tools:
   - Grep
   - Bash
   - PowerShell
-  - Agent(asana:asana-fix-worker)
   - CronCreate
   - CronList
   - CronDelete
 ---
 
-Advance the Asana Factory by one safe orchestration cycle. Speak in Russian and finish with one compact queue summary.
+Advance the Asana Factory by one safe orchestration cycle. Speak in Russian.
+Do not emit repetitive no-op commentary when nothing changed.
 
-## Load private context
+## Load and reconcile
 
 Run:
 
@@ -27,136 +27,149 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/project-context.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Initialize
 ```
 
-Read the returned `configPath`, `statePath`, `worktreeRoot`, and `resultSchemaPath`. These are outside the repository. Write state atomically and use UTC ISO-8601 timestamps.
+Read `configPath` and `statePath`, then run:
 
-If state is inactive, delete a stale matching cron job and stop. If paused, launch and integrate nothing.
-
-Use only these task states:
-
-```text
-queued
-running
-ready
-integrating
-production
-done
-blocked
-failed
-review
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
-Never launch a second worker for a task with a live agent ID, retained worktree, or usable commit.
+Re-read state. Use these v3 states:
 
-## 1. Reconcile workers
+```text
+queued starting planning awaiting-input running awaiting-review approved
+integrating production done held rejected blocked failed review
+```
 
-For every `running` task:
+Never relaunch a task that retains a background session ID, usable worktree, or
+validated commit.
 
-- inspect the stored background agent/task ID;
-- retrieve completion output when available;
-- parse JSON after `FACTORY_RESULT`;
-- validate against `resultSchemaPath`;
-- independently verify branch, commit, reachability, worktree mapping, clean worktree, changed files, and reported tests.
+If state is inactive, delete a stale matching cron job and stop. If paused,
+launch and integrate nothing.
 
-Transitions:
+## 1. Integrate at most one explicitly approved task
 
-- valid `completed` result â†’ `ready`;
-- worker `blocked` â†’ `blocked`;
-- worker `failed` or invalid result â†’ `failed`;
-- still working â†’ remain `running`.
+Never integrate `awaiting-review`, `held`, or legacy `ready`. Select only the
+oldest `approved` task.
 
-After a restart, reconstruct cautiously from Git if task UI state is missing. Never relaunch solely because `/tasks` no longer shows an old agent.
+Before changing status, require all of:
 
-## 2. Integrate at most one ready task
+- `approval.commit` exactly equals `task.commit`;
+- worker worktree exists and is clean;
+- worker worktree `HEAD` exactly equals `approval.commit`;
+- the approved commit is valid and reachable from the worker branch.
 
-Integration is strictly serialized. Select the oldest `ready` task and set it to `integrating`.
+If any check fails, clear approval, return the task to `awaiting-review`, and
+explain the exact mismatch. Merge the approved SHA, not a moving branch name.
 
-Use a reusable worktree under the returned external `worktreeRoot`:
+Set a valid task to `integrating`. Use:
 
 ```text
 <worktreeRoot>/factory-integrator
 ```
 
-with local branch `factory/integrator`. Create it from the fresh configured remote development branch when absent. If present, require a clean tree, fetch, and reset it to the current remote development branch. Never operate on the user's main checkout.
+with local branch `factory/integrator`, based on a freshly fetched configured
+remote development branch. Never use or reset the user's main checkout.
+Record the exact remote development SHA used as base and merge the immutable
+approved commit with `--no-ff`.
 
-Record the exact remote development SHA used as the base. Merge the worker branch with `--no-ff`; use its commit only if the branch is unavailable.
+Resolve only obvious mechanical conflicts. Otherwise abort the merge, restore
+the integrator base, and mark `review`.
 
-Resolve only obvious mechanical conflicts. Otherwise abort and mark `review`.
+### Integration tests and development push
 
-### Integration tests
+Run `integrationTestCommands`. If empty, infer canonical full checks once from
+repository docs and CI files and store them in private state. Every required
+command must exit 0.
 
-Use `integrationTestCommands`. If empty, infer canonical full checks once from `CLAUDE.md`, README, CI workflows, `composer.json`, `package.json`, Makefile, or task-runner files and save them in state.
+Immediately before push, fetch development again. If its remote SHA moved,
+rebuild the integration on the new tip and rerun all tests. Push only:
 
-All required commands must exit 0. On failure, preserve useful logs and the worker worktree, reset the integrator to its base, mark `failed`, and do not push.
+```text
+HEAD:<developmentBranch>
+```
 
-### Development push
+Never force-push. Verify the approved task commit is reachable from the remote
+development branch. If automatic development push is disabled, set `review`
+and preserve all work.
 
-Immediately before push:
+## 2. Production promotion
 
-1. fetch the development branch again;
-2. compare its SHA with the recorded base;
-3. if it moved, rebuild on the new tip and rerun all integration tests;
-4. push only `HEAD:<developmentBranch>`;
-5. never force-push.
-
-Fetch and verify the task change is reachable from the remote development branch. If automatic development push is disabled, mark `review`.
-
-## 3. Production promotion
-
-After development succeeds, set the task to `production`.
-
-Use a separate reusable external worktree:
+After development succeeds, set `production` and use:
 
 ```text
 <worktreeRoot>/factory-release
 ```
 
-with branch `factory/release`, reset to the current remote production branch.
+with branch `factory/release`, reset only inside that reusable external
+worktree to the fresh remote production branch.
 
-### merge-develop mode
+For `merge-develop`, merge remote development with `--no-ff`. Honor
+`allowUnrelatedDevelopCommitsToProduction`. For `task-only`, promote only this
+task's tested integration and exclude unrelated development commits.
 
-Fetch both branches and merge remote development into release with `--no-ff`. When `allowUnrelatedDevelopCommitsToProduction` is false, block if production..development contains unrelated non-factory commits.
+Run all `releaseTestCommands`, inferring and saving canonical commands once
+when empty. Before push, fetch development and production again. If tested
+inputs moved, rebuild and retest. Push only `HEAD:<productionBranch>`, never
+force. Verify the task commit is reachable from all required remote branches.
+If automatic promotion is disabled, set `review`.
 
-### task-only mode
+## 3. Asana writes and cleanup
 
-Promote only this task's integrated merge or commit and exclude unrelated development work. Record exact promoted SHAs.
+Perform only Asana writes explicitly enabled in config. Never mark the task
+complete before production verification.
 
-### Release tests and push
+After remote verification:
 
-Use `releaseTestCommands`; if empty, infer and save canonical commands as above. All commands must exit 0.
+1. Preserve the transcript path, last assistant message, session UUID, and
+   result in state.
+2. Stop the background row if still live.
+3. Verify the worker worktree is clean and its commit reachable from all
+   required remotes.
+4. Remove the worker worktree, delete its local `factory-worker/*` branch, and
+   prune worktree metadata.
+5. Set the task to `done`.
 
-Before push, fetch production and development again and verify the tested inputs did not move. If they moved, rebuild and retest. Push only `HEAD:<productionBranch>`, never force.
+Never delete uncommitted work or an unreachable commit.
 
-Verify the task change is reachable from both configured remote branches. If automatic production promotion is disabled, set `review` after development.
+## 4. Fill dynamic capacity
 
-## 4. Asana writes
+Active capacity is the number of tasks in:
 
-Only perform Asana writes explicitly enabled in configuration. Never complete a task before production verification. Report factual commit and test information only.
+```text
+starting planning running
+```
 
-## 5. Cleanup
+`awaiting-input` and `awaiting-review` sessions are idle and do not consume a
+launch slot. While active capacity is below `config.concurrency`, select the
+oldest `queued` task and run:
 
-Only after remote verification:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/start-worker-session.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId "TASK_ID" -Mode "TASK_START_MODE"
+```
 
-1. verify the worker worktree is clean;
-2. verify its commit is reachable from all required remote branches;
-3. remove the worker worktree with `git worktree remove`;
-4. delete its local `factory-worker/*` branch;
-5. run `git worktree prune`;
-6. set the task to `done`.
+Launch one session per task. Each call creates or safely reuses the external
+worktree, starts `claude --bg --agent asana:asana-fix-worker`, saves both the
+short background ID and full session UUID, and returns immediately. Stop
+filling capacity on the first launch failure so repeated errors do not fan out.
 
-Never delete uncommitted work or an unreachable commit. Keep integrator and release worktrees while work remains. Remove them when fully idle only if clean.
+A lower concurrency never kills existing workers. An increase takes effect in
+this loop immediately.
 
-## 6. Fill capacity
+## 5. Quiet idle behavior
 
-If not paused, count `running` tasks. While below `concurrency`, launch the oldest `queued` tasks as separate background `asana:asana-fix-worker` subagents.
+Keep the scheduler only while at least one task is:
 
-Pass one complete normalized JSON payload per worker containing task ID, URL, title, brief, acceptance criteria, source notes, Git branch configuration, and required checks. Require `FACTORY_RESULT`.
+```text
+queued starting planning running approved integrating production
+```
 
-Persist the returned agent/task ID immediately and set the task to `running`. Launch independent workers in one parallel Agent batch when possible. Never pass multiple Asana tasks to one worker.
+If only `awaiting-input`, `awaiting-review`, `held`, `rejected`, `blocked`,
+`failed`, `review`, or `done` remain:
 
-The plugin's WorktreeCreate hook places each worker in an external sibling worktree and creates a `factory-worker/*` branch from the configured remote development branch.
+- set `active: false`;
+- delete the matching `/asana:factory-tick` cron job;
+- clear `cronJobId`;
+- preserve every session, commit, branch, worktree, and transcript.
 
-## 7. Idle
-
-The factory is idle only when no task is `queued`, `running`, `ready`, `integrating`, or `production`.
-
-When idle, set `active: false`, delete the matching recurring `/asana:factory-tick` job, clear `cronJobId`, preserve blocked/failed/review tasks, and report final counts. When only workers are running, save state, report one line, and end the tick without spinning.
+New tasks, `go`, `resume`, or a concurrency increase restart it. When nothing
+changed, finish silently; otherwise report one compact queue summary.

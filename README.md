@@ -1,103 +1,34 @@
 # Claude Asana Factory
 
-A self-contained, removable Claude Code plugin for running a continuous queue of Asana development tasks.
+Claude Asana Factory is a removable Claude Code plugin that turns Asana tasks
+into a persistent development queue:
 
-It is intentionally **not copied into the target repository**. The repository does not receive skills, agents, hooks, README files, or Claude settings.
-
-## What it does
-
-- Accepts one or more Asana task URLs.
-- Keeps a persistent per-repository queue.
-- Runs several independent fixes in parallel.
-- Creates a separate Git worktree and branch for every worker.
-- Reads task details through the configured Asana connector.
-- Requires focused tests, lint/static analysis, and one final commit.
-- Integrates completed tasks into `develop` one at a time.
-- Runs integration tests and pushes `develop`.
-- Optionally promotes `develop` to `master`, runs release tests, and pushes `master`.
-- Removes worker worktrees only after remote verification.
-- Accepts more Asana URLs while existing tasks are still running.
-
-## Why this version is removable
-
-The plugin is loaded only by the supplied launcher:
-
-```powershell
-claude --plugin-dir <this-folder>
+```text
+Asana → queue → background worker sessions → external Git worktrees
+      → tests → one task commit → human review
+      → serialized integration → push → cleanup
 ```
 
-It is not installed globally and it does not modify:
-
-- `<repository>/.claude/`
-- `<repository>/.gitignore`
-- `<repository>/CLAUDE.md`
-- user-level Claude settings
-
-To stop using it, exit the factory session and stop launching Claude through `start-factory.ps1`.
-
-To remove it completely:
-
-1. Run `cleanup-project.ps1` for every repository used by the factory.
-2. Delete this plugin folder.
-
-Normal Claude Code sessions remain unchanged.
+The plugin is loaded only for a dedicated factory session. It is never copied
+into the target repository and does not change the repository's `.claude`
+directory, `CLAUDE.md`, or `.gitignore`.
 
 ## Requirements
 
-- Windows PowerShell 5.1 or PowerShell 7.
-- Git.
-- Claude Code 2.1.208 or newer is recommended.
-- An authenticated Asana connector available in Claude Code.
-- Remote branches named `develop` and `master`, unless changed in the private project configuration.
+- Windows PowerShell 5.1 or PowerShell 7
+- Git
+- Claude Code 2.1.139 or newer; the current Agent View release is recommended
+- an authenticated Asana connector available to Claude Code
+- remote development and production branches (`develop` and `master` by
+  default)
 
-## Folder layout
-
-Extract the plugin anywhere outside the repository, for example:
-
-```text
-D:\Tools\claude-asana-plugin\
-```
-
-Target repositories remain separate:
-
-```text
-D:\Projects\MotiveHR\
-D:\Projects\AnotherProject\
-```
-
-Worker worktrees are created outside the repository:
-
-```text
-D:\Projects\.claude-factory-worktrees\
-    MotiveHR-a1b2c3d4\
-        worker-bright-oak-a1b2c3\
-        factory-integrator\
-        factory-release\
-```
-
-There is no nested `.claude/worktrees` tree and no recursive directory structure.
-
-## What `start-factory.ps1` does
-
-Run it from the extracted plugin directory:
+Check Claude Code before starting:
 
 ```powershell
-.\start-factory.ps1 -Repository D:\Projects\MotiveHR
+claude --version
 ```
 
-The script performs these steps:
-
-1. Resolves the supplied path to the actual Git repository root.
-2. Sets `CLAUDE_FACTORY_HOME` to this plugin folder's private `runtime` directory.
-3. Creates or reuses a repository-specific runtime directory identified by the repository name and a short hash of its full path.
-4. Creates the private `config.json`, `state.json`, and external worktree root when they do not yet exist.
-5. Prints the repository, configuration, state, and worktree paths before Claude starts.
-6. Changes the current directory to the repository root.
-7. Starts a dedicated Claude Code process with this plugin loaded through `--plugin-dir`, `auto` permission mode, and Remote Control enabled under the supplied session name.
-
-It does **not** copy anything into the repository, create a worker task, merge code, or push branches by itself. After Claude opens, add tasks with `/asana:factory ...` or resume an existing queue with `/asana:factory resume`.
-
-## Start
+## Start the factory
 
 From the plugin directory:
 
@@ -107,69 +38,245 @@ From the plugin directory:
 
 The launcher:
 
-- initializes private per-repository configuration and state;
-- changes to the repository root;
-- starts a dedicated Claude Code session with this plugin only;
-- enables Remote Control;
-- does not install or copy the plugin into the repository.
+1. resolves the repository's primary Git worktree;
+2. creates or migrates private per-repository config and state;
+3. creates the external factory worktree root;
+4. acquires a per-repository process lock;
+5. changes to the target repository;
+6. starts Claude Code with this plugin loaded through `--plugin-dir`.
 
-Check the Asana connector:
+It does not add a task, create a task commit, merge, or push by itself.
 
-```text
-/mcp
-```
+Only one factory lead session can run for a repository. Different repositories
+can run separate factory sessions at the same time.
 
-Add tasks:
+### Resume and model selection
 
-```text
-/asana:factory https://app.asana.com/0/.../... https://app.asana.com/0/.../...
-```
-
-Add more tasks later with the same command.
-
-## Commands
-
-```text
-/asana:factory status
-/asana:factory pause
-/asana:factory resume
-/asana:factory retry <task-id>
-/asana:factory inspect <task-id>
-/asana:factory stop
-```
-
-The skill is namespaced because it comes from a plugin. It cannot collide with an existing `/factory` skill.
-
-## Configuration
-
-Show the per-repository paths:
+Open the resume picker in the correct repository context:
 
 ```powershell
-.\show-project-paths.ps1 -Repository D:\Projects\MotiveHR
+.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Resume
 ```
 
-Open the private configuration:
+Continue the repository's most recent conversation:
 
 ```powershell
-.\edit-project-config.ps1 -Repository D:\Projects\MotiveHR
+.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Continue
 ```
 
-The configuration is stored under this plugin package's `runtime` directory, not in the repository.
+Choose the lead and inherited worker model:
 
-Important defaults:
+```powershell
+.\start-factory.ps1 -Repository D:\Projects\MotiveHR -Model sonnet
+```
+
+`-Resume` and `-Continue` are mutually exclusive.
+
+## Start modes
+
+Every worker is a full Claude Code background session, not a one-shot
+subagent. It has its own persistent conversation, branch, and external
+worktree.
+
+### Interactive start
+
+```text
+/asana:factory start <Asana URL>
+```
+
+The worker reads the task and relevant code without editing, returns a
+`FACTORY_PLAN`, and waits. Open its conversation, discuss or change the plan,
+then tell it to begin.
+
+### Automatic start
+
+```text
+/asana:factory start --auto <Asana URL>
+```
+
+The worker begins implementation immediately. This mode is intended for clear,
+small tasks that normally need no clarification.
+
+Bare URLs remain a compatibility alias for automatic mode:
+
+```text
+/asana:factory <Asana URL> <Asana URL>
+```
+
+Both modes remain interruptible.
+
+## Enter and steer a worker conversation
+
+Open Agent View:
+
+```powershell
+claude agents
+```
+
+Or press `←` from an attached Claude Code session. Select a worker and press
+Enter to enter its full conversation.
+
+To attach directly from another terminal:
+
+```powershell
+claude attach <background-id>
+```
+
+While attached:
+
+- `Esc` or `Ctrl+C` interrupts the current response or tool call;
+- type the correction and press Enter;
+- `←` on an empty prompt detaches back to Agent View without stopping work.
+
+The factory also prints these commands:
+
+```text
+/asana:factory chat <task-id>
+/asana:factory transcript <task-id>
+```
+
+Worker sessions are named `asana-<task-id>-<title>`, so they are easy to find
+in Agent View.
+
+## Human review gate
+
+A successful worker ends in `awaiting-review`. It is never integrated
+automatically.
+
+Review the requirements, transcript, tests, and exact commit:
+
+```text
+/asana:factory review <task-id>
+```
+
+Approve the exact clean worker SHA:
+
+```text
+/asana:factory go <task-id>
+```
+
+Other decisions:
+
+```text
+/asana:factory hold <task-id>
+/asana:factory reject <task-id>
+/asana:factory rework <task-id> "Keep the old endpoint compatible"
+```
+
+`rework` preserves the same conversation and prints the attach command plus
+the text to paste. A full background session is independent, so the factory
+does not pretend it can inject keystrokes into the live TUI.
+
+If the worktree HEAD changes after approval, integration stops and requires a
+fresh review. The integrator merges the immutable approved SHA, not a moving
+branch name.
+
+## Dynamic concurrency
+
+The default limit is three active workers:
 
 ```json
 {
   "concurrency": 3,
-  "developmentBranch": "develop",
-  "productionBranch": "master",
+  "maxConcurrency": 20
+}
+```
+
+Show the current limit:
+
+```text
+/asana:factory concurrency
+```
+
+Change it while the queue is running:
+
+```text
+/asana:factory concurrency 5
+```
+
+Increasing from three to five lets the next tick start up to two additional
+queued workers immediately. Decreasing the limit never kills workers already
+running; the scheduler simply waits before starting more.
+
+`planning`, `starting`, and `running` tasks consume active capacity.
+`awaiting-input` and `awaiting-review` sessions are idle and do not.
+
+## Commands
+
+```text
+/asana:factory start <URLs>
+/asana:factory start --auto <URLs>
+/asana:factory status
+/asana:factory doctor
+/asana:factory concurrency [N]
+/asana:factory chat <task-id>
+/asana:factory transcript <task-id>
+/asana:factory inspect <task-id>
+/asana:factory review <task-id>
+/asana:factory go <task-id>
+/asana:factory hold <task-id>
+/asana:factory rework <task-id> [instructions]
+/asana:factory reject <task-id>
+/asana:factory retry <task-id>
+/asana:factory pause
+/asana:factory resume
+/asana:factory stop
+```
+
+When the queue contains only tasks waiting for input or review, the recurring
+tick is removed so it does not print no-op messages. Adding a task, approving
+one, resuming, or increasing concurrency recreates it.
+
+## Worktree isolation
+
+Factory worktrees are siblings of the repository:
+
+```text
+D:\Projects\.claude-factory-worktrees\
+└── MotiveHR-a1b2c3d4\
+    ├── worker-121234567-a1\
+    ├── factory-integrator\
+    └── factory-release\
+```
+
+Worker branches use:
+
+```text
+factory-worker/<task-id>-a<attempt>
+```
+
+Each background session starts inside its already registered linked worktree,
+so Claude Code does not create a nested `.claude/worktrees` checkout. A
+PreToolUse hook denies push, merge, rebase, shared-branch checkout, and
+worktree deletion from worker branches.
+
+Workers may edit, test, and create one final task commit. Only the serialized
+factory integrator may merge or push.
+
+## Integration
+
+Approved tasks are integrated one at a time in `factory-integrator`. The
+factory:
+
+1. fetches the current remote development branch;
+2. merges the approved SHA;
+3. runs integration tests;
+4. fetches again and rebuilds if the remote moved;
+5. pushes without force;
+6. promotes in the separate `factory-release` worktree;
+7. runs release tests and verifies remote reachability;
+8. cleans the worker only after verification.
+
+`merge-develop` promotes the complete current development branch:
+
+```json
+{
   "productionMode": "merge-develop",
   "allowUnrelatedDevelopCommitsToProduction": true
 }
 ```
 
-`merge-develop` promotes the complete current `develop` branch to `master`.
-Use `task-only` to promote only the factory task:
+Use `task-only` when production must receive only the approved factory task:
 
 ```json
 {
@@ -178,7 +285,7 @@ Use `task-only` to promote only the factory task:
 }
 ```
 
-For deterministic test execution, specify commands explicitly:
+Set canonical project checks explicitly when possible:
 
 ```json
 {
@@ -193,56 +300,65 @@ For deterministic test execution, specify commands explicitly:
 }
 ```
 
-When the arrays are empty, Claude infers canonical commands from repository documentation and CI files, then stores the resolved commands in private project state.
+## Private state
 
-## Worktree isolation
+Show the paths for one repository:
 
-The plugin replaces Claude Code's default worktree location for this dedicated session. Worker worktrees are created as siblings of the repository under `.claude-factory-worktrees`.
-
-Each worker branch is prefixed with:
-
-```text
-factory-worker/
+```powershell
+.\show-project-paths.ps1 -Repository D:\Projects\MotiveHR
 ```
 
-A plugin hook blocks worker branches from pushing, merging, rebasing, deleting worktrees, or switching to shared branches. Integration remains the orchestrator's responsibility.
+Open its config:
 
-The custom worktree hook also copies configured ignored files such as `.env` when they exist and are ignored by Git.
+```powershell
+.\edit-project-config.ps1 -Repository D:\Projects\MotiveHR
+```
 
-The custom `WorktreeCreate` hook affects all worktree-isolated agents in this dedicated factory session. Do not use this session for unrelated worktree workflows. Use a normal Claude Code session for ordinary interactive development.
+Private data is stored under:
 
-## What `cleanup-project.ps1` does
+```text
+<plugin>\runtime\projects\<repository-name>-<path-hash>\
+```
 
-Run it only after the factory is stopped and completed work has been reviewed:
+It includes config, queue state, background-session metadata, captured Stop
+events, transcript paths, and resolved test commands. Existing v2 config and
+state are migrated by adding missing v3 fields; repository-specific settings
+are preserved.
+
+## Tests
+
+Run the local PowerShell runtime suite:
+
+```powershell
+.\tests\run-tests.ps1
+```
+
+The suite uses a temporary local Git remote and a fake Claude CLI. It does not
+call a model, Asana, or a real project remote. It verifies external worktree
+creation, background-session metadata, Stop-hook capture, the review gate,
+exact-SHA approval, linked-worktree project identity, and dynamic concurrency.
+
+## Safe cleanup
+
+Stop and review the factory first:
 
 ```powershell
 .\cleanup-project.ps1 -Repository D:\Projects\MotiveHR
 ```
 
-Without `-Force`, the script is deliberately conservative:
+Without `-Force`, cleanup refuses to remove registered factory worktrees.
+This preserves active sessions, uncommitted changes, and commits that still
+need review.
 
-1. Resolves the same private runtime and worktree paths used by the launcher.
-2. Reads Git's registered worktree list.
-3. Stops with an error if factory worktrees are still registered, so active or recoverable work is not removed accidentally.
-4. Prunes stale Git worktree metadata.
-5. Removes the repository's empty external factory worktree directory when safe.
-6. Removes the repository-specific private configuration, queue state, resolved test commands, and task history from the plugin's `runtime/projects` directory.
-7. Removes the shared `.claude-factory-worktrees` container only when it has become empty.
-
-It does **not** delete the target repository, ordinary branches, remote branches, pushed commits, or the plugin itself.
-
-`-Force` tells the script to forcibly unregister and remove factory worktrees and recursively remove their runtime directory. Use it only after manually checking for uncommitted or otherwise valuable work:
+Emergency cleanup:
 
 ```powershell
 .\cleanup-project.ps1 -Repository D:\Projects\MotiveHR -Force
 ```
 
-Deleting the plugin folder after cleanup removes the plugin completely. A normal Claude Code session was never modified.
+`-Force` may remove registered worktrees and their uncommitted changes. Use it
+only after manual inspection.
 
-## Operational notes
-
-- Keep the dedicated Claude Code process running while work is in progress.
-- The queue survives session restarts because state is stored under `runtime/projects` in this plugin package.
-- Resume by running `start-factory.ps1` again and then `/asana:factory resume`.
-- Background agents can be inspected with `/tasks`.
-- A normal Claude Code session launched without `--plugin-dir` does not see this plugin.
+After each repository is safely cleaned, deleting the plugin directory removes
+the factory completely. Normal Claude Code sessions launched without
+`--plugin-dir` never see `/asana:factory`.

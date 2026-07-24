@@ -1,10 +1,13 @@
 {
-  "version": 2,
+  "version": 3,
   "active": false,
   "paused": false,
   "cronJobId": null,
   "createdAt": null,
   "updatedAt": null,
-  "resolvedCommands": {"integration": [], "release": []},
+  "resolvedCommands": {
+    "integration": [],
+    "release": []
+  },
   "tasks": []
 }

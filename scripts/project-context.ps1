@@ -4,12 +4,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repoInput = (Resolve-Path $Repository).Path
-$repoRoot = (& git -C $repoInput rev-parse --show-toplevel 2>$null).Trim()
-if (-not $repoRoot) { throw "Not inside a Git repository: $repoInput" }
-$repoRoot = [IO.Path]::GetFullPath($repoRoot)
-
 $pluginRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "factory-common.ps1")
+
+$repoInput = (Resolve-Path $Repository).Path
+$currentWorktree = (& git -C $repoInput rev-parse --show-toplevel 2>$null).Trim()
+if (-not $currentWorktree) { throw "Not inside a Git repository: $repoInput" }
+$currentWorktree = [IO.Path]::GetFullPath($currentWorktree)
+
+$worktreeLines = @(& git -C $currentWorktree worktree list --porcelain 2>$null)
+$mainWorktreeLine = $worktreeLines | Where-Object { $_ -like "worktree *" } | Select-Object -First 1
+$repoRoot = if ($mainWorktreeLine) {
+    [IO.Path]::GetFullPath($mainWorktreeLine.Substring(9))
+} else {
+    $currentWorktree
+}
+
 $runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
     [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
 } else {
@@ -32,17 +42,52 @@ $projectKey = "$safeRepoName-$hash"
 $projectData = Join-Path (Join-Path $runtimeHome "projects") $projectKey
 $configPath = Join-Path $projectData "config.json"
 $statePath = Join-Path $projectData "state.json"
+$sessionsPath = Join-Path $projectData "sessions"
+$eventsPath = Join-Path $projectData "events"
 $worktreeContainer = Join-Path (Split-Path $repoRoot -Parent) ".claude-factory-worktrees"
 $worktreeRoot = Join-Path $worktreeContainer $projectKey
 
 if ($Initialize) {
     New-Item -ItemType Directory -Path $projectData -Force | Out-Null
+    New-Item -ItemType Directory -Path $sessionsPath -Force | Out-Null
+    New-Item -ItemType Directory -Path $eventsPath -Force | Out-Null
     New-Item -ItemType Directory -Path $worktreeRoot -Force | Out-Null
-    if (-not (Test-Path $configPath)) {
+
+    if (-not (Test-Path -LiteralPath $configPath)) {
         Copy-Item (Join-Path $pluginRoot "config.default.json") $configPath
+    } else {
+        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        $configDefaults = Get-Content -LiteralPath (Join-Path $pluginRoot "config.default.json") -Raw | ConvertFrom-Json
+        Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
+        Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
+        Write-FactoryJsonAtomic -Path $configPath -Value $config
     }
-    if (-not (Test-Path $statePath)) {
+
+    if (-not (Test-Path -LiteralPath $statePath)) {
         Copy-Item (Join-Path $pluginRoot "resources\state.template.json") $statePath
+    } else {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $stateDefaults = Get-Content -LiteralPath (Join-Path $pluginRoot "resources\state.template.json") -Raw | ConvertFrom-Json
+        Add-MissingFactoryProperties -Target $state -Defaults $stateDefaults
+        Set-FactoryProperty -Target $state -Name "version" -Value $stateDefaults.version
+
+        foreach ($task in @($state.tasks)) {
+            foreach ($property in @{
+                startMode = "auto"
+                backgroundSession = $null
+                plan = $null
+                review = $null
+                approval = $null
+                reworkRequestedAt = $null
+                resultRecordedAt = $null
+                pendingInstructions = $null
+            }.GetEnumerator()) {
+                if ($null -eq $task.PSObject.Properties[$property.Key]) {
+                    $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
+                }
+            }
+        }
+        Write-FactoryJsonAtomic -Path $statePath -Value $state
     }
 }
 
@@ -50,11 +95,15 @@ if ($Initialize) {
     pluginRoot = $pluginRoot
     runtimeHome = $runtimeHome
     repositoryRoot = $repoRoot
+    currentWorktree = $currentWorktree
     projectKey = $projectKey
     projectData = $projectData
     configPath = $configPath
     statePath = $statePath
+    sessionsPath = $sessionsPath
+    eventsPath = $eventsPath
     worktreeContainer = $worktreeContainer
     worktreeRoot = $worktreeRoot
     resultSchemaPath = (Join-Path $pluginRoot "resources\result.schema.json")
+    planSchemaPath = (Join-Path $pluginRoot "resources\plan.schema.json")
 } | ConvertTo-Json -Depth 5
