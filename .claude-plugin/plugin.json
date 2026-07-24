@@ -1,0 +1,16 @@
+{
+  "name": "asana",
+  "version": "2.1.0",
+  "description": "A removable Claude Code plugin for asynchronous Asana-driven fixes using parallel Git worktrees and serialized integration.",
+  "author": {
+    "name": "Igor"
+  },
+  "keywords": [
+    "asana",
+    "worktree",
+    "queue",
+    "automation",
+    "git"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Asana Factory Worker Result",
+  "type": "object",
+  "required": ["status", "taskId", "branch", "commit", "worktree", "changedFiles", "tests", "notes", "blockingReason"],
+  "properties": {
+    "status": {"enum": ["completed", "blocked", "failed"]},
+    "taskId": {"type": "string"},
+    "branch": {"type": "string"},
+    "commit": {"type": "string"},
+    "worktree": {"type": "string"},
+    "changedFiles": {"type": "array", "items": {"type": "string"}},
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "status", "summary"],
+        "properties": {
+          "command": {"type": "string"},
+          "status": {"enum": ["passed", "failed", "skipped"]},
+          "summary": {"type": "string"}
+        }
+      }
+    },
+    "notes": {"type": "string"},
+    "blockingReason": {"type": "string"}
+  }
+}

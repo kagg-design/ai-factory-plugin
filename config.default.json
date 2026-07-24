@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "remote": "origin",
+  "developmentBranch": "develop",
+  "productionBranch": "master",
+  "concurrency": 3,
+  "maxAttempts": 2,
+  "pollCron": "*/2 * * * *",
+  "autoPushDevelopment": true,
+  "autoPromoteToProduction": true,
+  "productionMode": "merge-develop",
+  "allowUnrelatedDevelopCommitsToProduction": true,
+  "integrationTestCommands": [],
+  "releaseTestCommands": [],
+  "copyIgnoredFiles": [".env", ".env.local", ".env.testing"],
+  "workerRequiredChecks": [
+    "Run tests directly relevant to the changed behavior",
+    "Run the nearest available lint or static-analysis command",
+    "Add or update regression tests when practical"
+  ],
+  "asana": {
+    "postStartComment": false,
+    "postCompletionComment": false,
+    "markCompleteAfterProduction": false
+  }
+}

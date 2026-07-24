@@ -1,0 +1,27 @@
+{
+  "name": "claude-asana-plugin",
+  "version": "2.1.0",
+  "loading": "session-only --plugin-dir",
+  "target_repository_files_created": false,
+  "command": "/asana:factory",
+  "files": [
+    ".claude-plugin/plugin.json",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "agents/asana-fix-worker.md",
+    "cleanup-project.ps1",
+    "config.default.json",
+    "edit-project-config.ps1",
+    "hooks/hooks.json",
+    "resources/result.schema.json",
+    "resources/state.template.json",
+    "scripts/create-worktree.ps1",
+    "scripts/project-context.ps1",
+    "scripts/worker-git-guard.ps1",
+    "show-project-paths.ps1",
+    "skills/factory-tick/SKILL.md",
+    "skills/factory/SKILL.md",
+    "start-factory.ps1"
+  ]
+}
