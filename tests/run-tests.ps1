@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $pluginRoot "scripts\factory-common.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -24,10 +25,10 @@ function Assert-True {
 }
 
 try {
-    $pluginManifest = Get-Content -LiteralPath (Join-Path $pluginRoot ".claude-plugin\plugin.json") -Raw | ConvertFrom-Json
+    $pluginManifest = Read-FactoryJson -Path (Join-Path $pluginRoot ".claude-plugin\plugin.json")
     Assert-Equal "factory" ([string]$pluginManifest.name) "Plugin namespace is not source-neutral."
 
-    $bundleManifest = Get-Content -LiteralPath (Join-Path $pluginRoot "MANIFEST.json") -Raw | ConvertFrom-Json
+    $bundleManifest = Read-FactoryJson -Path (Join-Path $pluginRoot "MANIFEST.json")
     Assert-Equal "/factory" ([string]$bundleManifest.command) "Public command is not unnamespaced."
     foreach ($relativeFile in @($bundleManifest.files)) {
         Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
@@ -64,6 +65,7 @@ try {
     & git -C $repository push -u origin master 1> $null
 
     $fakeSessionId = "11111111-2222-4333-8444-555555555555"
+    $ansiEscape = [char]27
     $fakeSource = @"
 @echo off
 setlocal EnableDelayedExpansion
@@ -72,6 +74,10 @@ if "%~1"=="--version" (
   exit /b 0
 )
 if "%~1"=="agents" (
+  if "%CLAUDE_FACTORY_TEST_NO_AGENTS%"=="1" (
+    echo []
+    exit /b 0
+  )
   set "JSON_CWD=%CLAUDE_FACTORY_TEST_AGENT_CWD:\=\\%"
   echo [{"sessionId":"$fakeSessionId","status":"working","kind":"background","name":"factory-test-task-test-task","cwd":"!JSON_CWD!","startedAt":1}]
   exit /b 0
@@ -81,7 +87,7 @@ if "%~1"=="mcp" (
   exit /b 0
 )
 echo Warning: benign background-launch warning 1>&2
-echo backgrounded - test1234 - factory-test-task
+echo backgrounded - $($ansiEscape)[36mtest1234$($ansiEscape)[0m - factory-test-task
 echo claude attach test1234
 exit /b 0
 "@
@@ -94,18 +100,17 @@ exit /b 0
     $env:CLAUDE_FACTORY_HOME = $runtime
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 3 ((Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json).version) "Config migration failed."
-    Assert-Equal 3 ((Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json).version) "State migration failed."
+    Assert-Equal 3 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 3 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
 
-    . (Join-Path $pluginRoot "scripts\factory-common.ps1")
-    $legacyConfig = Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json
+    $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
     $legacyConfig.autoPushDevelopment = $false
     $legacyConfig.PSObject.Properties.Remove("maxConcurrency")
     $legacyConfig.PSObject.Properties.Remove("defaultStartMode")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
-    $migratedConfig = Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json
+    $migratedConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 3 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
@@ -144,28 +149,30 @@ exit /b 0
                 reworkRequestedAt = $null
                 pendingInstructions = $null
                 error = $null
+                planRecordedAt = $null
+                resultRecordedAt = $null
                 createdAt = $now
                 updatedAt = $now
             }
         )
     }
-    . (Join-Path $pluginRoot "scripts\factory-common.ps1")
     $state.version = 2
-    foreach ($propertyName in @("startMode", "backgroundSession", "plan", "review", "approval", "reworkRequestedAt", "resultRecordedAt", "pendingInstructions")) {
+    foreach ($propertyName in @("startMode", "backgroundSession", "plan", "review", "approval", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
         $state.tasks[0].PSObject.Properties.Remove($propertyName)
     }
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
-    $migratedState = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $migratedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 3 ([int]$migratedState.version) "Legacy state version was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
+    Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["planRecordedAt"]) "Legacy task plan timestamp field was not added."
 
 
     $launch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "test-task" -Mode "auto" -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Assert-Equal "test1234" ([string]$launch.backgroundSession.id) "Background ID was not captured."
-    $launchMetadata = Get-Content -LiteralPath (Join-Path $context.sessionsPath "test-task.json") -Raw | ConvertFrom-Json
+    $launchMetadata = Read-FactoryJson -Path (Join-Path $context.sessionsPath "test-task.json")
     Assert-True ([string]$launchMetadata.launchOutput -match 'benign background-launch warning') "Benign stderr warning was not captured."
     Assert-True (-not [string]$launch.backgroundSession.sessionId) "Launcher recorded a session UUID that Claude did not accept."
     Assert-True (Test-Path -LiteralPath $launch.worktree) "Worker worktree was not created."
@@ -173,9 +180,62 @@ exit /b 0
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = [string]$launch.worktree
     $sessionReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
-    $sessionState = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $sessionState = Read-FactoryJson -Path $context.statePath
     Assert-Equal $fakeSessionId ([string]$sessionState.tasks[0].backgroundSession.sessionId) "Current Claude agents schema was not reconciled."
     Assert-Equal "working" ([string]$sessionState.tasks[0].backgroundSession.state) "Current Claude status field was not captured."
+    $planText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0J/RgNC+0LLQtdGA0LrQsCDigJQg0YLQtdGB0YIg4oCiIG9r"))
+    $planTextBytes = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($planText))
+    $planCapturedAt = [DateTime]::UtcNow.AddMinutes(-1).ToString("o")
+    $planEvent = [ordered]@{
+        version = 1
+        taskId = "test-task"
+        kind = "plan"
+        capturedAt = $planCapturedAt
+        transcriptPath = (Join-Path $testRoot "plan-transcript.jsonl")
+        lastAssistantMessage = "FACTORY_PLAN"
+        payload = [ordered]@{
+            taskId = "test-task"
+            understanding = $planText
+            plan = @("Keep the text intact")
+            questions = @()
+            readyToImplement = $true
+        }
+    }
+    $planEventPath = Join-Path (Join-Path $context.eventsPath "test-task") "latest-plan.json"
+    Write-FactoryJsonAtomic -Path $planEventPath -Value $planEvent
+
+    $planState = Read-FactoryJson -Path $context.statePath
+    $planState.tasks[0].startMode = "interactive"
+    $planState.tasks[0].status = "planning"
+    $planState.tasks[0].plan = $null
+    $planState.tasks[0].planRecordedAt = $null
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $planState
+
+    $env:CLAUDE_FACTORY_TEST_NO_AGENTS = "1"
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $recordedPlanState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "awaiting-input" ([string]$recordedPlanState.tasks[0].status) "Current interactive plan was not recorded."
+    Assert-Equal $planCapturedAt ([string]$recordedPlanState.tasks[0].planRecordedAt) "Plan capture timestamp was not recorded."
+    Assert-Equal $planText ([string]$recordedPlanState.tasks[0].plan.understanding) "Non-ASCII plan text did not round-trip."
+
+    $recordedPlanState.tasks[0].status = "planning"
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $recordedPlanState
+    $stalePlanReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $stalePlanState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal 0 ([int]$stalePlanReconcile.changed) "An already-recorded plan caused another transition."
+    Assert-Equal "planning" ([string]$stalePlanState.tasks[0].status) "An already-recorded plan forced the task back to awaiting input."
+
+    $initialStateSize = (Get-Item -LiteralPath $context.statePath).Length
+    for ($reconcilePass = 0; $reconcilePass -lt 5; $reconcilePass++) {
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    }
+    $finalStateSize = (Get-Item -LiteralPath $context.statePath).Length
+    $roundTrippedState = Read-FactoryJson -Path $context.statePath
+    $roundTrippedPlanBytes = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$roundTrippedState.tasks[0].plan.understanding))
+    Assert-Equal $initialStateSize $finalStateSize "Repeated reconciles grew state.json."
+    Assert-Equal $planTextBytes $roundTrippedPlanBytes "Repeated reconciles changed the UTF-8 plan bytes."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_NO_AGENTS -ErrorAction SilentlyContinue
+
 
     $workerContext = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $launch.worktree) |
         ConvertFrom-Json
@@ -223,7 +283,7 @@ exit /b 0
         ConvertFrom-Json
     Assert-True ($reconcile.changed -ge 1) "Reconciliation recorded no transition."
 
-    $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $state = Read-FactoryJson -Path $context.statePath
     $task = $state.tasks[0]
     Assert-Equal "awaiting-review" ([string]$task.status) "Completed worker bypassed or missed the review gate."
     Assert-Equal $commit ([string]$task.commit) "Validated commit was not recorded."
@@ -235,7 +295,7 @@ exit /b 0
     Assert-Equal $commit ([string]$decision.approvedCommit) "Approval did not pin the exact commit."
 
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
-    $stateAfterSecondReconcile = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $stateAfterSecondReconcile = Read-FactoryJson -Path $context.statePath
     Assert-Equal "approved" ([string]$stateAfterSecondReconcile.tasks[0].status) "Reconciliation invalidated an unchanged approval."
 
     $concurrency = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\set-concurrency.ps1") -Repository $repository -Value 5) |
@@ -250,6 +310,7 @@ exit /b 0
 } finally {
     Remove-Item Env:\CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_NO_AGENTS -ErrorAction SilentlyContinue
     if ($KeepTemp) {
         Write-Host "Kept test directory: $testRoot" -ForegroundColor Yellow
     } elseif (

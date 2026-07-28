@@ -1,5 +1,12 @@
 Set-StrictMode -Version 2.0
 
+function Read-FactoryJson {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    return [IO.File]::ReadAllText($Path, $utf8) | ConvertFrom-Json
+}
+
 function Write-FactoryJsonAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -17,7 +24,7 @@ function Write-FactoryJsonAtomic {
     [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $utf8)
 
     try {
-        Get-Content -LiteralPath $temporaryPath -Raw | ConvertFrom-Json | Out-Null
+        Read-FactoryJson -Path $temporaryPath | Out-Null
         Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
     } finally {
         if (Test-Path -LiteralPath $temporaryPath) {

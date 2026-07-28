@@ -4,10 +4,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "factory-common.ps1")
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
-$config = Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json
-$state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
+$state = Read-FactoryJson -Path $context.statePath
 $checks = New-Object System.Collections.Generic.List[object]
 
 function Add-DoctorCheck {
@@ -34,7 +35,7 @@ $manifestPath = Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
 $manifestOk = $false
 $manifestDetail = "missing"
 try {
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $manifest = Read-FactoryJson -Path $manifestPath
     $manifestOk = [string]$manifest.name -eq "factory"
     $manifestDetail = "$($manifest.name) v$($manifest.version)"
 } catch {

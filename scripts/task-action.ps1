@@ -13,7 +13,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
 $mutex = $null
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-    $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
     $now = Get-FactoryUtcTimestamp
 

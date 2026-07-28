@@ -11,7 +11,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
 $mutex = $null
 try {
     $mutex = Enter-FactoryMutex -ProjectKey "$($context.projectKey)-config"
-    $config = Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json
+    $config = Read-FactoryJson -Path $context.configPath
     $maximum = if ($null -ne $config.maxConcurrency) { [int]$config.maxConcurrency } else { 20 }
     if ($Value -lt 1 -or $Value -gt $maximum) {
         throw "Concurrency must be between 1 and $maximum; received $Value."

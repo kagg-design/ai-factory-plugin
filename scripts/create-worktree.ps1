@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "factory-common.ps1")
 $inputJson = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $name = [string]$inputJson.name
 $cwd = [string]$inputJson.cwd
@@ -7,7 +8,7 @@ if (-not $cwd) { throw "WorktreeCreate input does not contain cwd." }
 
 $contextJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $cwd -Initialize
 $context = $contextJson | ConvertFrom-Json
-$config = Get-Content $context.configPath -Raw | ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
 
 $safeName = ($name -replace '[^A-Za-z0-9._-]', '-').Trim('-')
 if (-not $safeName) { $safeName = "worker" }

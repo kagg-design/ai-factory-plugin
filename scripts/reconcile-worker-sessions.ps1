@@ -33,7 +33,7 @@ $changes = New-Object System.Collections.Generic.List[object]
 $metadataChanged = $false
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-    $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $state = Read-FactoryJson -Path $context.statePath
 
     foreach ($task in @($state.tasks)) {
         if ($null -eq $task.backgroundSession -or -not [string]$task.backgroundSession.id) {
@@ -91,7 +91,7 @@ try {
         $resultPath = Join-Path $eventDirectory "latest-result.json"
         $planPath = Join-Path $eventDirectory "latest-plan.json"
         $latestEvent = if (Test-Path -LiteralPath $latestPath) {
-            Get-Content -LiteralPath $latestPath -Raw | ConvertFrom-Json
+            Read-FactoryJson -Path $latestPath
         } else {
             $null
         }
@@ -101,12 +101,22 @@ try {
         }
 
         $planEvent = if (Test-Path -LiteralPath $planPath) {
-            Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+            Read-FactoryJson -Path $planPath
         } else {
             $null
         }
+        $planIsCurrent = $null -ne $planEvent
+        $planRecordedAt = if ($null -ne $task.PSObject.Properties["planRecordedAt"]) { [string]$task.planRecordedAt } else { "" }
+        if ($planIsCurrent -and $planRecordedAt) {
+            $planIsCurrent = [DateTime]::Parse([string]$planEvent.capturedAt).ToUniversalTime() -gt
+                [DateTime]::Parse($planRecordedAt).ToUniversalTime()
+        }
+        if ($planIsCurrent -and [string]$task.reworkRequestedAt) {
+            $planIsCurrent = [DateTime]::Parse([string]$planEvent.capturedAt).ToUniversalTime() -gt
+                [DateTime]::Parse([string]$task.reworkRequestedAt).ToUniversalTime()
+        }
         if (
-            $null -ne $planEvent -and
+            $planIsCurrent -and
             [string]$task.startMode -eq "interactive" -and
             [string]$task.status -in @("starting", "planning", "running")
         ) {
@@ -118,10 +128,11 @@ try {
                 Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
                 Set-FactoryProperty -Target $task -Name "error" -Value $null
             }
+            Set-FactoryProperty -Target $task -Name "planRecordedAt" -Value ([string]$planEvent.capturedAt)
         }
 
         $resultEvent = if (Test-Path -LiteralPath $resultPath) {
-            Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+            Read-FactoryJson -Path $resultPath
         } else {
             $null
         }

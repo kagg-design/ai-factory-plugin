@@ -18,7 +18,7 @@ if (-not $ClaudeCommand) {
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
-$config = Get-Content -LiteralPath $context.configPath -Raw | ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
 $now = Get-FactoryUtcTimestamp
 $safeTaskId = ConvertTo-FactorySafeName -Value $TaskId
 $mutex = $null
@@ -32,7 +32,7 @@ $eventDirectory = Join-Path $context.eventsPath $safeTaskId
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-    $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
 
     if (
@@ -256,12 +256,13 @@ $payloadJson
     }
 
     $backgroundId = $null
-    $backgroundMatch = [regex]::Match($launchOutput, '(?im)^\s*backgrounded\s+\W+\s*([A-Za-z0-9_-]+)')
+    $launchOutputWithoutAnsi = $launchOutput -replace "\x1b\[[0-9;]*[A-Za-z]", ""
+    $backgroundMatch = [regex]::Match($launchOutputWithoutAnsi, '(?im)^\s*backgrounded\s+\W+\s*([A-Za-z0-9_-]+)')
     if ($backgroundMatch.Success) {
         $backgroundId = $backgroundMatch.Groups[1].Value
     }
     if (-not $backgroundId) {
-        $attachMatch = [regex]::Match($launchOutput, '(?im)claude\s+attach\s+([A-Za-z0-9_-]+)')
+        $attachMatch = [regex]::Match($launchOutputWithoutAnsi, '(?im)claude\s+attach\s+([A-Za-z0-9_-]+)')
         if ($attachMatch.Success) {
             $backgroundId = $attachMatch.Groups[1].Value
         }
@@ -276,7 +277,7 @@ $payloadJson
 
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     try {
-        $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+        $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         $session = [ordered]@{
             id = $backgroundId
@@ -313,7 +314,7 @@ $payloadJson
     $mutex = $null
     try {
         $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-        $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+        $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         Set-FactoryProperty -Target $task -Name "status" -Value "failed"
         Set-FactoryProperty -Target $task -Name "error" -Value $failure

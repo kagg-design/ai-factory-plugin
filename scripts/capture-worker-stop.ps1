@@ -15,7 +15,7 @@ try {
         ConvertFrom-Json
     if (-not (Test-Path -LiteralPath $context.statePath)) { exit 0 }
 
-    $state = Get-Content -LiteralPath $context.statePath -Raw | ConvertFrom-Json
+    $state = Read-FactoryJson -Path $context.statePath
     $sessionId = [string]$inputJson.session_id
     $taskMatches = @($state.tasks | Where-Object {
         [string]$_.branch -eq $branch -or
@@ -102,7 +102,7 @@ try {
 
     $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
     if (Test-Path -LiteralPath $metadataPath) {
-        $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+        $metadata = Read-FactoryJson -Path $metadataPath
         Set-FactoryProperty -Target $metadata -Name "transcriptPath" -Value $transcriptPath
         Set-FactoryProperty -Target $metadata -Name "lastAssistantMessage" -Value $message
         Set-FactoryProperty -Target $metadata -Name "lastEventAt" -Value $capturedAt

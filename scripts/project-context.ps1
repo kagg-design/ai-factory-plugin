@@ -56,8 +56,8 @@ if ($Initialize) {
     if (-not (Test-Path -LiteralPath $configPath)) {
         Copy-Item (Join-Path $pluginRoot "config.default.json") $configPath
     } else {
-        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-        $configDefaults = Get-Content -LiteralPath (Join-Path $pluginRoot "config.default.json") -Raw | ConvertFrom-Json
+        $config = Read-FactoryJson -Path $configPath
+        $configDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "config.default.json")
         Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
         Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
         Write-FactoryJsonAtomic -Path $configPath -Value $config
@@ -66,8 +66,8 @@ if ($Initialize) {
     if (-not (Test-Path -LiteralPath $statePath)) {
         Copy-Item (Join-Path $pluginRoot "resources\state.template.json") $statePath
     } else {
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        $stateDefaults = Get-Content -LiteralPath (Join-Path $pluginRoot "resources\state.template.json") -Raw | ConvertFrom-Json
+        $state = Read-FactoryJson -Path $statePath
+        $stateDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "resources\state.template.json")
         Add-MissingFactoryProperties -Target $state -Defaults $stateDefaults
         Set-FactoryProperty -Target $state -Name "version" -Value $stateDefaults.version
 
@@ -79,6 +79,7 @@ if ($Initialize) {
                 review = $null
                 approval = $null
                 reworkRequestedAt = $null
+                planRecordedAt = $null
                 resultRecordedAt = $null
                 pendingInstructions = $null
             }.GetEnumerator()) {
