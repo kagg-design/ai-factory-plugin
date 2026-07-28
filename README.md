@@ -57,12 +57,19 @@ The launcher:
 4. acquires a per-repository process lock;
 5. changes to the target repository;
 6. starts Claude Code with hooks and workers loaded through `--plugin-dir`;
-7. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
+7. names the lead session `Claude Factory Orchestrator`;
+8. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
 
 It does not add a task, create a task commit, merge, or push by itself.
 
 Only one factory lead session can run for a repository. Different repositories
 can run separate factory sessions at the same time.
+
+Override the lead session name when needed:
+
+```powershell
+start-factory -Name "MotiveHR Factory Orchestrator"
+```
 
 ### Resume and model selection
 

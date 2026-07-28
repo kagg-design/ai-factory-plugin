@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Repository = (Get-Location).Path,
-    [string]$Name = "Claude Factory",
+    [string]$Name = "Claude Factory Orchestrator",
     [switch]$Resume,
     [switch]$Continue,
     [string]$Model = ""
@@ -47,6 +47,7 @@ try {
         "--plugin-dir", $pluginRoot,
         "--add-dir", $standaloneRoot,
         "--permission-mode", "auto",
+        "--name", $Name,
         "--remote-control", $Name
     )
     if ($Model) {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Named the lead Claude Code session `Claude Factory Orchestrator` so it is easy
+  to find in session and resume lists.
 - Renamed the product and internal plugin namespace from Asana Factory to Claude Factory.
 - Fixed Claude Code 2.1.218 background launches by ignoring benign stderr warnings,
   removing the unsupported `--bg --session-id` combination, and reconciling the
