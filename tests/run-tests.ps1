@@ -53,12 +53,16 @@ try {
     $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
     Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
     Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
+    $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
+    Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
+    Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
     & git init $repository 1> $null
     & git -C $repository config user.email "factory-tests@example.test"
     & git -C $repository config user.name "Factory Tests"
+    & git -C $repository config commit.gpgsign false
     [IO.File]::WriteAllText(
         (Join-Path $repository "README.md"),
         "initial`n",
@@ -298,6 +302,38 @@ exit /b 0
     Assert-Equal "awaiting-review" ([string]$task.status) "Completed worker bypassed or missed the review gate."
     Assert-Equal $commit ([string]$task.commit) "Validated commit was not recorded."
     Assert-True (-not [string]$task.approval) "Task was approved automatically."
+
+    $syncState = Read-FactoryJson -Path $context.statePath
+    $syncState.tasks[0].backgroundSession.state = "done"
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $syncState
+    [IO.File]::WriteAllText(
+        (Join-Path $repository "BASE.md"),
+        "new development base`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    & git -C $repository add BASE.md
+    & git -C $repository commit -m "chore: advance development" 1> $null
+    & git -C $repository push origin develop 1> $null
+    $sync = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "test-task" -Action prepare) |
+        ConvertFrom-Json
+    Assert-Equal "syncing" ([string]$sync.status) "Task sync did not require fresh validation."
+    Assert-True ([string]$sync.commit -ne $commit) "Task sync did not replace the old commit SHA."
+    Assert-True (Test-Path -LiteralPath (Join-Path $launch.worktree "BASE.md")) "Worker worktree did not receive the latest development base."
+    $commit = [string]$sync.commit
+    $syncReportPath = Join-Path $context.sessionsPath "test-task.sync-tests.json"
+    Write-FactoryJsonAtomic -Path $syncReportPath -Value ([pscustomobject]@{
+        tests = @([pscustomobject]@{
+            command = "git diff --check"
+            status = "passed"
+            summary = "No whitespace errors."
+        })
+        notes = "Synchronized test fixture."
+    })
+    $syncFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "test-task" -Action finalize -TestsPath $syncReportPath) |
+        ConvertFrom-Json
+    Assert-Equal "awaiting-review" ([string]$syncFinal.status) "Task sync did not return to review."
+    Assert-Equal $commit ([string]$syncFinal.commit) "Task sync finalized the wrong commit."
+    Assert-True (-not (Test-Path -LiteralPath $syncReportPath)) "Task sync did not remove its temporary test report."
 
     $decision = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "test-task") |
         ConvertFrom-Json

@@ -39,7 +39,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scrip
 Re-read state. Use these v3 states:
 
 ```text
-queued starting planning awaiting-input running awaiting-review approved
+queued starting planning awaiting-input running syncing awaiting-review approved
 integrating production done held rejected blocked failed review
 ```
 
@@ -166,8 +166,8 @@ Keep the scheduler only while at least one task is:
 queued starting planning running approved integrating production
 ```
 
-If only `awaiting-input`, `awaiting-review`, `held`, `rejected`, `blocked`,
-`failed`, `review`, or `done` remain:
+If only `awaiting-input`, `syncing`, `awaiting-review`, `held`, `rejected`,
+`blocked`, `failed`, `review`, or `done` remain:
 
 - set `active: false`;
 - delete the matching `/factory:tick` cron job;

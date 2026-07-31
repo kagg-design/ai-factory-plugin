@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `/factory sync <task-id>` to rebase one validated task commit onto the
+  latest configured development branch in its existing worker worktree, rerun
+  checks, and record a new reviewable SHA without creating a preview worktree.
+- Added the recoverable `syncing` state so interrupted validation cannot be approved.
 - Added `/factory cleanup <task-id>` for verified removal of completed worker
   worktrees and local branches, including Windows long-path residue handling.
 - Added `/factory add [--auto] <URLs>` as an explicit compatibility alias for

@@ -265,6 +265,7 @@ running; the scheduler simply waits before starting more.
 /factory chat <task-id>
 /factory transcript <task-id>
 /factory inspect <task-id>
+/factory sync <task-id>
 /factory review <task-id>
 /factory go <task-id>
 /factory hold <task-id>
@@ -280,6 +281,14 @@ running; the scheduler simply waits before starting more.
 When the queue contains only tasks waiting for input or review, the recurring
 tick is removed so it does not print no-op messages. Adding a task, approving
 one, resuming, or increasing concurrency recreates it.
+
+`sync` updates the existing clean worker worktree before review. It fetches the
+configured remote development branch, rebases the one task commit onto it,
+reruns appropriate checks through the orchestrator, records the new SHA and
+test results, and returns the task to `awaiting-review`. It does not create a
+second preview worktree. Conflicts are aborted without changing the original
+branch, and an interrupted validation remains `syncing` and cannot be approved
+until `/factory sync <task-id>` successfully resumes and finalizes it.
 
 `cleanup` is intentionally strict. It reconciles the task first, refuses
 active sessions and dirty worktrees, refreshes the configured remote branches,

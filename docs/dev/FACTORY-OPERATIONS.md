@@ -148,6 +148,7 @@ active factory tasks.
 | `planning`        | worker is inspecting the task                 | wait for its plan                   |
 | `awaiting-input`  | worker needs a reply                          | open its conversation               |
 | `running`         | implementation or tests are in progress       | monitor or steer                    |
+| `syncing`         | task was rebased and checks must be recorded  | rerun `/factory sync <id>`          |
 | `awaiting-review` | a validated commit is ready                   | `/factory review <id>`              |
 | `approved`        | the exact SHA was approved                    | scheduler begins integration        |
 | `integrating`     | development merge and checks are running      | do not interfere                    |
@@ -264,6 +265,33 @@ Other decisions:
 
 `rework` retains the conversation and worktree. The orchestrator prints the
 instructions to paste into the worker conversation.
+
+### Synchronizing before review
+
+Refresh the same worker worktree against the latest configured development
+branch:
+
+```text
+/factory sync 1216632072822682
+```
+
+The command fetches `remote/developmentBranch`, rebases the single task commit
+onto it, reruns appropriate focused tests and lint/static-analysis checks, and
+records the new commit SHA before returning the task to `awaiting-review`.
+There is no separate preview worktree: inspect and run the application from the
+existing worker path returned by `/factory inspect <task-id>`.
+
+Synchronization requires a clean, idle task in `awaiting-review` or `held`.
+The task SHA changes, so prior review and approval are cleared. Rebase conflicts
+are aborted and reported without modifying the original branch. If validation
+is interrupted after a successful rebase, the task remains `syncing`, cannot be
+approved, and the same `/factory sync <task-id>` resumes its checks.
+
+The source branch is configured per repository:
+
+```json
+{"remote": "origin", "developmentBranch": "develop"}
+```
 
 ### Cleaning up one task
 

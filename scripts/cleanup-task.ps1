@@ -73,7 +73,7 @@ try {
 
     if ([string]$task.status -in @(
         "queued", "starting", "planning", "running", "approved",
-        "integrating", "production"
+        "integrating", "production", "syncing"
     )) {
         throw "Task '$TaskId' is '$($task.status)' and cannot be cleaned up while active."
     }
