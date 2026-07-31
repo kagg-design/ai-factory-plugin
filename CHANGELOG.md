@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `/factory cleanup <task-id>` for verified removal of completed worker
+  worktrees and local branches, including Windows long-path residue handling.
+- Added `/factory add [--auto] <URLs>` as an explicit compatibility alias for
+  adding tasks; bare URLs remain an automatic-start compatibility form.
 - Added the per-repository `conversationLanguage` setting for orchestrator,
   scheduler, and newly launched worker conversations while keeping code, logs,
   commands, source quotations, and project documentation unchanged.

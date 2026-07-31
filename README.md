@@ -143,6 +143,13 @@ then tell it to begin.
 The worker begins implementation immediately. This mode is intended for clear,
 small tasks that normally need no clarification.
 
+`add` is an explicit alias for `start` and supports the same modes:
+
+```text
+/factory add <Asana URL>
+/factory add --auto <Asana URL>
+```
+
 Bare URLs remain a compatibility alias for automatic mode:
 
 ```text
@@ -263,6 +270,7 @@ running; the scheduler simply waits before starting more.
 /factory hold <task-id>
 /factory rework <task-id> [instructions]
 /factory reject <task-id>
+/factory cleanup <task-id>
 /factory retry <task-id>
 /factory pause
 /factory resume
@@ -272,6 +280,17 @@ running; the scheduler simply waits before starting more.
 When the queue contains only tasks waiting for input or review, the recurring
 tick is removed so it does not print no-op messages. Adding a task, approving
 one, resuming, or increasing concurrency recreates it.
+
+`cleanup` is intentionally strict. It reconciles the task first, refuses
+active sessions and dirty worktrees, refreshes the configured remote branches,
+and requires the recorded commit to be reachable from both development and
+production before deleting the worker worktree and local `factory-worker/*`
+branch. It keeps the transcript and result in private state and marks the task
+`done`. It also uses Git long-path support and finishes removal of verified
+clean residue left by Windows.
+
+`reject` alone does not delete artifacts; use `cleanup` only after the commit
+is safely published or otherwise retained.
 
 ## Worktree isolation
 

@@ -1,7 +1,7 @@
 ---
 name: factory
 description: Start conversational or automatic task worker sessions, manage their persistent queue, review exact commits, and control integration.
-argument-hint: "start [--auto] <URLs> | status | doctor | concurrency [N] | chat <id> | transcript <id> | inspect <id> | review <id> | go <id> | hold <id> | rework <id> [instructions] | reject <id> | pause | resume | retry <id> | stop"
+argument-hint: "start|add [--auto] <URLs> | status | doctor | concurrency [N] | chat <id> | transcript <id> | inspect <id> | review <id> | go <id> | hold <id> | rework <id> [instructions] | reject <id> | cleanup <id> | pause | resume | retry <id> | stop"
 disable-model-invocation: true
 allowed-tools:
   - Read
@@ -36,7 +36,8 @@ or source material merely to match this setting. Runtime files are outside the
 target repository. Use UTC ISO-8601 timestamps. When a command below has a
 bundled script, use the script instead of editing state or config manually.
 
-Before `status`, `inspect`, `transcript`, `review`, or any decision command, run:
+Before `status`, `inspect`, `transcript`, `review`, `cleanup`, or any decision
+command, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
@@ -47,13 +48,16 @@ and validated Git results into factory state.
 
 ## Commands
 
-### `start [--auto] <Asana URLs...>`
+### `start|add [--auto] <Asana URLs...>`
 
 `start` without `--auto` is interactive:
 
 ```text
 /factory start <URL>
 ```
+
+`add` is an explicit compatibility alias for `start` and follows the same
+interactive or `--auto` behavior.
 
 The worker first inspects the task read-only, emits `FACTORY_PLAN`, and waits
 for the user in its own chat before editing. `start --auto` begins implementation
@@ -221,6 +225,27 @@ its live TUI. Print the attach command and the exact text for the user to paste.
 reactivates the scheduler, and invokes the tick. A later HEAD change invalidates
 integration. `hold` and `reject` preserve the worktree, commit, transcript, and
 session until explicit cleanup.
+
+### `cleanup <task-id>`
+
+Reconcile first, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/cleanup-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID
+```
+
+Cleanup is a destructive artifact-removal command with strict safeguards. It
+must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
+branches, moved worker branches, missing commits, and commits not reachable
+from both configured remote development and production branches. It removes
+only the task's external worker worktree and local `factory-worker/*` branch.
+Preserve transcript and result metadata in private state and report the task as
+`done`.
+
+Git long-path support is enabled by the bundled script. If Git verified the
+worktree clean and unregistered it but Windows left files behind, the script
+finishes removal of that verified clean residue. Never emulate cleanup by
+editing state directly.
 
 ### `pause`
 

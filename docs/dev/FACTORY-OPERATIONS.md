@@ -201,6 +201,13 @@ Add a task that requires plan review:
 /factory start <Asana URL>
 ```
 
+`add` is an explicit alias with the same behavior:
+
+```text
+/factory add <Asana URL>
+/factory add --auto <Asana URL>
+```
+
 The worker reads the task and relevant code without editing, emits a
 `FACTORY_PLAN`, moves to `awaiting-input`, and waits in its own conversation.
 
@@ -257,6 +264,25 @@ Other decisions:
 
 `rework` retains the conversation and worktree. The orchestrator prints the
 instructions to paste into the worker conversation.
+
+### Cleaning up one task
+
+After a task commit is safely present in both configured remote branches,
+remove its worker artifacts from the orchestrator:
+
+```text
+/factory cleanup 1216722772084729
+```
+
+Cleanup reconciles the task, refuses active sessions and dirty worktrees,
+refreshes the remote development and production branches, verifies that the
+recorded commit is reachable from both, removes the worker worktree and local
+worker branch, preserves the transcript and result, and marks the task `done`.
+
+The command enables Git long-path handling and removes verified clean residue
+that Windows may leave behind. It never removes an unpublished recorded
+commit. `reject` only changes task state and deliberately retains artifacts;
+it does not replace `cleanup`.
 
 ## 11. Pause, stop, and recovery
 

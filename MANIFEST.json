@@ -20,6 +20,7 @@
     "resources/result.schema.json",
     "resources/state.template.json",
     "scripts/capture-worker-stop.ps1",
+    "scripts/cleanup-task.ps1",
     "scripts/create-worktree.ps1",
     "scripts/factory-common.ps1",
     "scripts/factory-doctor.ps1",

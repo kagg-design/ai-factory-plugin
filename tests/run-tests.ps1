@@ -50,6 +50,10 @@ try {
     Assert-True (-not $workerLauncherSource.Contains('"--session-id"')) "Worker launcher still passes the unsupported background session ID."
     Assert-True ($workerLauncherSource.Contains("conversationLanguage = [string]`$config.conversationLanguage")) "Worker payload does not include the configured conversation language."
 
+    $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
+    Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
+    Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
+
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
     & git init $repository 1> $null
@@ -118,7 +122,7 @@ exit /b 0
     $migratedConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 3 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
-    Assert-Equal "Russian" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
+    Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
 
     $now = [DateTime]::UtcNow.ToString("o")
@@ -308,6 +312,24 @@ exit /b 0
         ConvertFrom-Json
     Assert-Equal 3 ([int]$concurrency.previous) "Unexpected initial concurrency."
     Assert-Equal 5 ([int]$concurrency.current) "Concurrency did not update."
+
+    $held = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action hold -TaskId "test-task") |
+        ConvertFrom-Json
+    Assert-Equal "held" ([string]$held.status) "Approved task could not be held before cleanup."
+    & git -C $launch.worktree push origin HEAD:develop HEAD:master 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to publish cleanup fixture commit." }
+    $cleanupState = Read-FactoryJson -Path $context.statePath
+    $cleanupState.tasks[0].backgroundSession.state = "done"
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupState
+
+    $cleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task") |
+        ConvertFrom-Json
+    Assert-Equal "done" ([string]$cleanup.status) "Task cleanup did not mark the task done."
+    Assert-True (-not (Test-Path -LiteralPath $launch.worktree)) "Task cleanup did not remove the worker worktree."
+    $remainingWorkerBranch = @(& git -C $repository branch --list ([string]$launch.branch))
+    Assert-Equal 0 $remainingWorkerBranch.Count "Task cleanup did not remove the local worker branch."
+    $cleanedState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "done" ([string]$cleanedState.tasks[0].status) "Task cleanup state was not persisted."
 
     $doctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-True ([bool]$doctor.healthy) "Factory doctor reported required failures in the valid fixture."
