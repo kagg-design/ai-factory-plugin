@@ -82,6 +82,24 @@ dispatcher, not the orchestrator prompt.
 If `/factory status` is entered directly in Agent View, Claude may dispatch a
 new agent for it. Return to the orchestrator and run the command there.
 
+### Command help
+
+The slash-command hint is deliberately short so it fits in the terminal:
+
+```text
+/factory help
+```
+
+This prints a one-screen overview grouped into adding work, opening tasks,
+review decisions, and orchestration controls. For details about one command:
+
+```text
+/factory help sync
+/factory help cleanup
+```
+
+Help is read-only and never executes the command it describes.
+
 ## 4. Reading `/factory status`
 
 Example:

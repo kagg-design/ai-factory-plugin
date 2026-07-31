@@ -1,7 +1,7 @@
 ---
 name: factory
 description: Start conversational or automatic task worker sessions, manage their persistent queue, review exact commits, and control integration.
-argument-hint: "start|add [--auto] <URLs> | status | doctor | concurrency [N] | chat <id> | transcript <id> | inspect <id> | sync <id> | review <id> | go <id> | hold <id> | rework <id> [instructions] | reject <id> | cleanup <id> | pause | resume | retry <id> | stop"
+argument-hint: "help | <command>"
 disable-model-invocation: true
 allowed-tools:
   - Read
@@ -47,6 +47,56 @@ This imports hook events, Claude background-session state, transcript paths,
 and validated Git results into factory state.
 
 ## Commands
+
+### `help [command]`
+
+Help is read-only. Do not reconcile sessions, inspect Git, or mutate state just
+to answer it. Without a command name, show this compact grouped summary in the
+configured conversation language:
+
+```text
+Add work
+  start|add <URL>          plan first, then wait
+  start|add --auto <URL>   implement immediately
+
+Open and understand
+  status                   queue summary
+  chat <id>                open worker conversation
+  inspect <id>             full task details
+  transcript <id>          worker conversation summary
+
+Prepare and decide
+  sync <id>                update worktree from development
+  review <id>              review exact commit
+  go <id>                  approve and integrate
+  rework <id> [text]       return work to the worker
+  hold|reject <id>         retain without integration
+  cleanup <id>             remove published worker artifacts
+
+Control
+  retry <id>               retry blocked/failed task
+  concurrency [N]          show or change worker limit
+  pause|resume|stop        control orchestration
+  doctor                   diagnose factory setup
+
+Details: /factory help <command>
+```
+
+Keep the summary within one normal terminal screen. Do not append queue status,
+scheduler details, implementation notes, or every alias unless the user asks.
+
+With a command name, explain only that command using its canonical section in
+this skill. Include:
+
+- exact syntax and a short example;
+- valid task states or prerequisites when relevant;
+- whether it is read-only or changes state/Git;
+- the most important safety behavior;
+- the usual next command.
+
+Accept aliases such as `add` for `start` and explain the canonical form. If the
+name is unknown, say so and show the compact grouped summary. Never execute the
+command while explaining it.
 
 ### `start|add [--auto] <Asana URLs...>`
 

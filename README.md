@@ -257,6 +257,7 @@ running; the scheduler simply waits before starting more.
 ## Commands
 
 ```text
+/factory help [command]
 /factory start <URLs>
 /factory start --auto <URLs>
 /factory status
@@ -277,6 +278,11 @@ running; the scheduler simply waits before starting more.
 /factory resume
 /factory stop
 ```
+
+The slash-command hint is intentionally short. Use `/factory help` for a
+one-screen grouped overview or `/factory help <command>` for syntax,
+prerequisites, side effects, safety behavior, and the usual next step for one
+command.
 
 When the queue contains only tasks waiting for input or review, the recurring
 tick is removed so it does not print no-op messages. Adding a task, approving

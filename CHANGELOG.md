@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `/factory help [command]` with compact grouped guidance and per-command
+  details, and replaced the overflowing slash-command argument hint with the
+  short `help | <command>` form.
 - Added `/factory sync <task-id>` to rebase one validated task commit onto the
   latest configured development branch in its existing worker worktree, rerun
   checks, and record a new reviewable SHA without creating a preview worktree.
