@@ -43,26 +43,36 @@ try {
         $before = [string]$task.status
         $taskId = [string]$task.id
         $safeTaskId = ConvertTo-FactorySafeName -Value $taskId
+        # Identity match wins over the name+cwd fallback, in two passes. A relaunched task
+        # leaves the previous session listed under the SAME name and worktree, so a single
+        # first-match loop can bind a live worker's task to the dead attempt's row and then
+        # "reconcile" a working session into held.
         $sessionRow = $null
-        foreach ($candidateSessionRow in @($agentRows)) {
-            $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
-            $rowSessionId = if ($null -ne $candidateSessionRow.PSObject.Properties["sessionId"]) { [string]$candidateSessionRow.sessionId } else { "" }
-            $rowName = if ($null -ne $candidateSessionRow.PSObject.Properties["name"]) { [string]$candidateSessionRow.name } else { "" }
-            $rowCwd = if ($null -ne $candidateSessionRow.PSObject.Properties["cwd"]) { [string]$candidateSessionRow.cwd } else { "" }
-            $expectedSessionId = [string]$task.backgroundSession.sessionId
-            $expectedName = [string]$task.backgroundSession.name
-            $expectedCwd = [string]$task.worktree
+        foreach ($pass in @("backgroundId", "sessionId", "shape")) {
+            foreach ($candidateSessionRow in @($agentRows)) {
+                $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
+                $rowSessionId = if ($null -ne $candidateSessionRow.PSObject.Properties["sessionId"]) { [string]$candidateSessionRow.sessionId } else { "" }
+                $rowName = if ($null -ne $candidateSessionRow.PSObject.Properties["name"]) { [string]$candidateSessionRow.name } else { "" }
+                $rowCwd = if ($null -ne $candidateSessionRow.PSObject.Properties["cwd"]) { [string]$candidateSessionRow.cwd } else { "" }
+                $expectedSessionId = [string]$task.backgroundSession.sessionId
+                $expectedName = [string]$task.backgroundSession.name
+                $expectedCwd = [string]$task.worktree
 
-            $matchesSession =
-                ($rowId -and $rowId -eq [string]$task.backgroundSession.id) -or
-                ($rowSessionId -and $expectedSessionId -and $rowSessionId -eq $expectedSessionId) -or
-                (
+                $matchesSession = if ($pass -eq "backgroundId") {
+                    $rowId -and $rowId -eq [string]$task.backgroundSession.id
+                } elseif ($pass -eq "sessionId") {
+                    $rowSessionId -and $expectedSessionId -and $rowSessionId -eq $expectedSessionId
+                } else {
                     $rowName -and $expectedName -and $rowName -eq $expectedName -and
                     $rowCwd -and $expectedCwd -and
                     $rowCwd.TrimEnd("\").Equals($expectedCwd.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
-                )
-            if ($matchesSession) {
-                $sessionRow = $candidateSessionRow
+                }
+                if ($matchesSession) {
+                    $sessionRow = $candidateSessionRow
+                    break
+                }
+            }
+            if ($null -ne $sessionRow) {
                 break
             }
         }
@@ -78,10 +88,27 @@ try {
             }
             Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value $rowState
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastSeenAt" -Value (Get-FactoryUtcTimestamp)
-            if ($null -ne $sessionRow.PSObject.Properties["sessionId"] -and [string]$sessionRow.sessionId) {
+            # Only adopt a UUID from a row that IS this background session (or when nothing is
+            # recorded yet). A name+cwd match can land on a previous attempt's row, and writing
+            # its UUID here would permanently pin the task to the dead session.
+            $storedSessionId = [string]$task.backgroundSession.sessionId
+            $rowMatchesBackgroundId = (
+                $null -ne $sessionRow.PSObject.Properties["id"] -and
+                [string]$sessionRow.id -eq [string]$task.backgroundSession.id
+            )
+            $rowMatchesStoredSessionId = (
+                $storedSessionId -and
+                $null -ne $sessionRow.PSObject.Properties["sessionId"] -and
+                [string]$sessionRow.sessionId -eq $storedSessionId
+            )
+            $rowIsAuthoritative = $rowMatchesBackgroundId -or $rowMatchesStoredSessionId
+            if (
+                $null -ne $sessionRow.PSObject.Properties["sessionId"] -and [string]$sessionRow.sessionId -and
+                $rowMatchesBackgroundId
+            ) {
                 Set-FactoryProperty -Target $task.backgroundSession -Name "sessionId" -Value ([string]$sessionRow.sessionId)
             }
-            if ($null -ne $sessionRow.PSObject.Properties["name"] -and [string]$sessionRow.name) {
+            if ($rowIsAuthoritative -and $null -ne $sessionRow.PSObject.Properties["name"] -and [string]$sessionRow.name) {
                 Set-FactoryProperty -Target $task.backgroundSession -Name "name" -Value ([string]$sessionRow.name)
             }
         }
@@ -95,7 +122,14 @@ try {
         } else {
             $null
         }
-        if ($null -ne $latestEvent) {
+        $expectedEventSessionId = [string]$task.backgroundSession.sessionId
+        $latestEventIsCurrent = (
+            $null -ne $latestEvent -and
+            $expectedEventSessionId -and
+            $null -ne $latestEvent.PSObject.Properties["sessionId"] -and
+            [string]$latestEvent.sessionId -eq $expectedEventSessionId
+        )
+        if ($latestEventIsCurrent) {
             Set-FactoryProperty -Target $task.backgroundSession -Name "transcriptPath" -Value ([string]$latestEvent.transcriptPath)
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastAssistantMessage" -Value ([string]$latestEvent.lastAssistantMessage)
         }
@@ -105,7 +139,12 @@ try {
         } else {
             $null
         }
-        $planIsCurrent = $null -ne $planEvent
+        $planIsCurrent = (
+            $null -ne $planEvent -and
+            $expectedEventSessionId -and
+            $null -ne $planEvent.PSObject.Properties["sessionId"] -and
+            [string]$planEvent.sessionId -eq $expectedEventSessionId
+        )
         $planRecordedAt = if ($null -ne $task.PSObject.Properties["planRecordedAt"]) { [string]$task.planRecordedAt } else { "" }
         if ($planIsCurrent -and $planRecordedAt) {
             $planIsCurrent = [DateTime]::Parse([string]$planEvent.capturedAt).ToUniversalTime() -gt
@@ -136,7 +175,12 @@ try {
         } else {
             $null
         }
-        $resultIsCurrent = $null -ne $resultEvent
+        $resultIsCurrent = (
+            $null -ne $resultEvent -and
+            $expectedEventSessionId -and
+            $null -ne $resultEvent.PSObject.Properties["sessionId"] -and
+            [string]$resultEvent.sessionId -eq $expectedEventSessionId
+        )
         $recordedAt = if ($null -ne $task.PSObject.Properties["resultRecordedAt"]) { [string]$task.resultRecordedAt } else { "" }
         if ($resultIsCurrent -and $recordedAt) {
             $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
@@ -231,10 +275,12 @@ try {
                 Set-FactoryProperty -Target $task -Name "error" -Value "Claude background session failed before a valid FACTORY_RESULT was captured."
             } elseif ($sessionState -eq "stopped" -and [string]$task.status -notin @("awaiting-review", "approved", "done")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "held"
+                Set-FactoryProperty -Target $task -Name "holdReason" -Value "background session stopped without a FACTORY_RESULT"
+                Set-FactoryProperty -Target $task -Name "error" -Value "Background session stopped without a FACTORY_RESULT. Use /factory retry or /factory answer."
             } elseif (
                 $sessionState -eq "done" -and
                 [string]$task.status -in @("starting", "planning", "running") -and
-                $null -eq $latestEvent
+                -not $latestEventIsCurrent
             ) {
                 if ([string]$task.startMode -eq "interactive") {
                     Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"

@@ -39,6 +39,37 @@ function Get-FactoryRegisteredWorktreePaths {
     return @($paths)
 }
 
+function Remove-FactoryReparsePointsInTree {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = [IO.Path]::GetFullPath($Path)
+    $removed = New-Object System.Collections.Generic.List[string]
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+            $itemPath = [IO.Path]::GetFullPath($item.FullName)
+            if (-not (Test-FactoryPathInsideRoot -Path $itemPath -Root $root)) {
+                throw "Refusing to inspect cleanup entry outside worker root: $itemPath"
+            }
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                # Delete the link itself. Never recurse into or delete its resolved target,
+                # which may intentionally live outside the worker worktree.
+                if ($item.PSIsContainer) {
+                    [IO.Directory]::Delete($itemPath, $false)
+                } else {
+                    [IO.File]::Delete($itemPath)
+                }
+                $removed.Add($itemPath)
+            } elseif ($item.PSIsContainer) {
+                $pending.Push($itemPath)
+            }
+        }
+    }
+    return @($removed)
+}
+
 function Remove-FactoryLongPathDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -65,6 +96,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
 $mutex = $null
+$removedReparsePoints = @()
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -166,6 +198,8 @@ try {
             throw "Worker worktree has uncommitted changes. Cleanup refuses to remove it."
         }
 
+        $removedReparsePoints = @(Remove-FactoryReparsePointsInTree -Path $worktree)
+
         & git -c core.longpaths=true -C $repositoryRoot worktree remove $worktree
         $removeExitCode = $LASTEXITCODE
         $stillRegistered = @(
@@ -223,6 +257,7 @@ try {
         commit = $commit
         removedWorktree = $removedWorktree
         deletedBranch = $deletedBranch
+        removedReparsePoints = @($removedReparsePoints)
         preservedSession = if ($null -ne $task.backgroundSession) {
             [string]$task.backgroundSession.id
         } else {

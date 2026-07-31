@@ -67,6 +67,7 @@ Open and understand
 
 Prepare and decide
   sync <id>                update worktree from development
+  answer <id>              record decisions and relaunch
   review <id>              review exact commit
   go <id>                  approve and integrate
   rework <id> [text]       return work to the worker
@@ -74,7 +75,7 @@ Prepare and decide
   cleanup <id>             remove published worker artifacts
 
 Control
-  retry <id>               retry blocked/failed task
+  retry <id>               retry blocked/failed/machine-held task
   concurrency [N]          show or change worker limit
   pause|resume|stop        control orchestration
   doctor                   diagnose factory setup
@@ -325,6 +326,22 @@ reactivates the scheduler, and invokes the tick. A later HEAD change invalidates
 integration. `hold` and `reject` preserve the worktree, commit, transcript, and
 session until explicit cleanup.
 
+### `answer <task-id> (--text TEXT|--file PATH) [--interactive]`
+
+Record decisions for a stopped, blocked, or awaiting-input worker with the
+bundled script:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/answer-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Text TEXT -Mode auto
+```
+
+Use `-File PATH` instead of `-Text TEXT` for a decision document. Add
+`-Mode interactive` only when the user wants another planning stop. The script
+writes or refreshes the ignored `FACTORY-DECISIONS.md` in the retained worker
+worktree, replaces one brief pointer, stops the prior background row, and queues
+exactly one new attempt. Repeating the same answer is idempotent. Ensure the
+scheduler exists and invoke the tick after the script succeeds.
+
 ### `cleanup <task-id>`
 
 Reconcile first, then run:
@@ -358,10 +375,12 @@ the tick. This resumes orchestration, not a specific worker conversation.
 
 ### `retry <task-id>`
 
-Only retry `blocked` or `failed`. Do not create a second worker while the old
-background session is working. Stop a failed/stopped old background row when
-needed, clear its background-session/result/error fields, keep a valid retained
-branch/worktree, set `queued`, respect `maxAttempts`, reactivate, and tick.
+Run `task-action.ps1 -Action retry`. It accepts `blocked`, `failed`, and `held`
+only when `holdReason` identifies a background session that stopped without a
+`FACTORY_RESULT`. It refuses tasks with a validated result/commit or a missing
+worktree, clears obsolete session/error fields, retains the branch/worktree,
+and queues the task. Ensure the scheduler exists and tick afterward. A manual
+`hold` is never retryable through this path.
 
 ### `stop`
 

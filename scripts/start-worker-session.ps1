@@ -28,7 +28,9 @@ $branch = $null
 $worktree = $null
 $sessionName = $null
 $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
+$promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
 $eventDirectory = Join-Path $context.eventsPath $safeTaskId
+$previousFactoryPromptPath = $env:CLAUDE_FACTORY_PROMPT_PATH
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -53,9 +55,12 @@ try {
     $previousAttempts = if ($null -ne $task.attempts) { [int]$task.attempts } else { 0 }
     $attempt = if ([string]$task.status -eq "starting" -and $previousAttempts -gt 0) {
         $previousAttempts
+    } elseif ($task.attemptPrepared -eq $true -and $previousAttempts -gt 0) {
+        $previousAttempts
     } else {
         $previousAttempts + 1
     }
+    $promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
 
     $branch = if ([string]$task.branch) {
         [string]$task.branch
@@ -80,6 +85,7 @@ try {
     Set-FactoryProperty -Target $task -Name "worktree" -Value ([IO.Path]::GetFullPath($worktree))
     Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
     Set-FactoryProperty -Target $task -Name "error" -Value $null
+    Set-FactoryProperty -Target $task -Name "attemptPrepared" -Value $false
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -201,6 +207,10 @@ FACTORY_TASK
 $payloadJson
 "@
 
+    $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($promptPath, $prompt, $utf8WithoutBom)
+    $promptSha256 = (Get-FileHash -LiteralPath $promptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
     $metadata = [ordered]@{
         taskId = $TaskId
         mode = $Mode
@@ -210,6 +220,8 @@ $payloadJson
         backgroundId = $null
         name = $sessionName
         eventDirectory = $eventDirectory
+        promptPath = $promptPath
+        promptSha256 = $promptSha256
         startedAt = $now
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
@@ -241,7 +253,10 @@ $payloadJson
     if ([string]$config.workerEffort) {
         $claudeArguments += @("--effort", [string]$config.workerEffort)
     }
-    $claudeArguments += $prompt
+    $shortPrompt = "FACTORY_PROMPT_FILE=$promptPath"
+    if ($shortPrompt -match '[\r\n"'']') { throw "Factory prompt pointer contains unsafe command-line characters." }
+    $claudeArguments += $shortPrompt
+    $env:CLAUDE_FACTORY_PROMPT_PATH = $promptPath
 
     Push-Location $worktree
     $previousErrorActionPreference = $ErrorActionPreference
@@ -260,6 +275,14 @@ $payloadJson
     if ($launchExitCode -ne 0) {
         throw "Claude background launch failed with exit code ${launchExitCode}: $launchOutput"
     }
+    if ($launchOutput -match '(?i)(no\s+(?:such\s+)?agent|agent\s+[^\r\n]*not\s+found|using\s+(?:the\s+)?default\s+(?:agent|template)|falling\s+back[^\r\n]*(?:agent|template))') {
+        $warningOutput = $launchOutput -replace "\x1b\[[0-9;]*[A-Za-z]", ""
+        $warningBackgroundMatch = [regex]::Match($warningOutput, '(?im)^\s*backgrounded\s+\W+\s*([A-Za-z0-9_-]+)')
+        if ($warningBackgroundMatch.Success) {
+            & $ClaudeCommand stop $warningBackgroundMatch.Groups[1].Value 1> $null 2> $null
+        }
+        throw "Claude did not resolve the required factory:worker agent: $launchOutput"
+    }
 
     $backgroundId = $null
     $launchOutputWithoutAnsi = $launchOutput -replace "\x1b\[[0-9;]*[A-Za-z]", ""
@@ -277,7 +300,34 @@ $payloadJson
         throw "Claude started without a parseable background session ID: $launchOutput"
     }
 
+    $authoritativeRow = $null
+    try {
+        $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $agentsText) {
+            $parsedAgentRows = $agentsText | ConvertFrom-Json
+            foreach ($candidate in @($parsedAgentRows | ForEach-Object { $_ })) {
+                if ($null -ne $candidate.PSObject.Properties["id"] -and [string]$candidate.id -eq $backgroundId) {
+                    $authoritativeRow = $candidate
+                    break
+                }
+            }
+        }
+    } catch {
+        $authoritativeRow = $null
+    }
+    $sessionId = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.sessionId) { [string]$authoritativeRow.sessionId } else { $null }
+    $resolvedSessionName = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.name) { [string]$authoritativeRow.name } else { $sessionName }
+    $transcriptPath = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.transcriptPath) { [string]$authoritativeRow.transcriptPath } else { $null }
+    $lastAssistantMessage = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.lastAssistantMessage) { [string]$authoritativeRow.lastAssistantMessage } else { $null }
+    $resolvedState = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["state"] -and [string]$authoritativeRow.state) {
+        [string]$authoritativeRow.state
+    } elseif ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["status"] -and [string]$authoritativeRow.status) {
+        [string]$authoritativeRow.status
+    } else { "working" }
+
     $metadata.backgroundId = $backgroundId
+    $metadata.sessionId = $sessionId
+    $metadata.name = $resolvedSessionName
     $metadata.launchOutput = $launchOutput
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
@@ -287,13 +337,13 @@ $payloadJson
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         $session = [ordered]@{
             id = $backgroundId
-            sessionId = $null
-            name = $sessionName
-            state = "working"
+            sessionId = $sessionId
+            name = $resolvedSessionName
+            state = $resolvedState
             startedAt = $now
             lastSeenAt = $now
-            transcriptPath = $null
-            lastAssistantMessage = $null
+            transcriptPath = $transcriptPath
+            lastAssistantMessage = $lastAssistantMessage
             attachCommand = "claude attach $backgroundId"
         }
         Set-FactoryProperty -Target $task -Name "backgroundSession" -Value ([PSCustomObject]$session)
@@ -331,4 +381,10 @@ $payloadJson
         Exit-FactoryMutex -Mutex $mutex
     }
     throw
+} finally {
+    if ($null -eq $previousFactoryPromptPath) {
+        Remove-Item Env:\CLAUDE_FACTORY_PROMPT_PATH -ErrorAction SilentlyContinue
+    } else {
+        $env:CLAUDE_FACTORY_PROMPT_PATH = $previousFactoryPromptPath
+    }
 }

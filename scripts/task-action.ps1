@@ -1,12 +1,16 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework")][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry")][string]$Action,
     [Parameter(Mandatory = $true)][string]$TaskId,
-    [string]$Instructions = ""
+    [string]$Instructions = "",
+    [string]$ClaudeCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+if (-not $ClaudeCommand) {
+    $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) { $env:CLAUDE_FACTORY_CLAUDE_COMMAND } else { "claude" }
+}
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 
@@ -55,6 +59,7 @@ try {
             }
             Set-FactoryProperty -Target $task -Name "approval" -Value $null
             Set-FactoryProperty -Target $task -Name "status" -Value "held"
+            Set-FactoryProperty -Target $task -Name "holdReason" -Value "held by operator"
         }
         "reject" {
             if ([string]$task.status -eq "done") {
@@ -72,6 +77,39 @@ try {
             Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
             Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $now
             Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $Instructions
+        }
+        "retry" {
+            $machineHoldReason = "background session stopped without a FACTORY_RESULT"
+            $retryable = [string]$task.status -in @("blocked", "failed") -or (
+                [string]$task.status -eq "held" -and [string]$task.holdReason -eq $machineHoldReason
+            )
+            if (-not $retryable) { throw "Task '$TaskId' is not in a retryable machine state." }
+            if ([string]$task.commit -or $null -ne $task.workerResult) {
+                throw "Task '$TaskId' has a validated result or commit and cannot be retried."
+            }
+            if (-not [string]$task.worktree -or -not (Test-Path -LiteralPath ([string]$task.worktree))) {
+                throw "Task '$TaskId' has no usable retained worktree."
+            }
+            $oldBackgroundId = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.id } else { "" }
+            $oldBackgroundState = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.state } else { "" }
+            if ($oldBackgroundState -eq "working") {
+                throw "Task '$TaskId' still has a working background session."
+            }
+            if ($oldBackgroundId -and $oldBackgroundState -notin @("stopped", "done", "failed")) {
+                & $ClaudeCommand stop $oldBackgroundId 1> $null 2> $null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to stop old background session '$oldBackgroundId'."
+                }
+            }
+            Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
+            Set-FactoryProperty -Target $task -Name "agentId" -Value $null
+            Set-FactoryProperty -Target $task -Name "plan" -Value $null
+            Set-FactoryProperty -Target $task -Name "approval" -Value $null
+            Set-FactoryProperty -Target $task -Name "error" -Value $null
+            Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+            Set-FactoryProperty -Target $task -Name "status" -Value "queued"
+            Set-FactoryProperty -Target $state -Name "active" -Value $true
+            Set-FactoryProperty -Target $state -Name "paused" -Value $false
         }
     }
 

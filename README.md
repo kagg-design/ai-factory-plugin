@@ -268,6 +268,7 @@ running; the scheduler simply waits before starting more.
 /factory inspect <task-id>
 /factory sync <task-id>
 /factory review <task-id>
+/factory answer <task-id> --text "decision"
 /factory go <task-id>
 /factory hold <task-id>
 /factory rework <task-id> [instructions]
@@ -306,6 +307,16 @@ clean residue left by Windows.
 
 `reject` alone does not delete artifacts; use `cleanup` only after the commit
 is safely published or otherwise retained.
+
+Worker launch prompts are persisted as UTF-8 files in the private runtime and
+the background process receives only a short file pointer. Reconciliation binds
+identity-bearing metadata only through the background ID or full session UUID,
+so an older same-name Agent View row cannot replace the live attempt.
+
+A session that stops without `FACTORY_RESULT` is machine-held and can be resumed
+with `retry`, or supplied durable decisions with `answer`. `answer` refreshes an
+ignored `FACTORY-DECISIONS.md` in the retained worktree and queues one attempt.
+Manual holds remain distinct and are not automatically retryable.
 
 ## Worktree isolation
 

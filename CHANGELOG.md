@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Persisted each full worker launch prompt as a private UTF-8 runtime file and
+  replaced the native command-line payload with a short file pointer.
+- Hardened session reconciliation against stale same-name Agent View rows and
+  made launch record the authoritative full session UUID when available.
+- Added recoverable machine-held sessions, `/factory answer`, and an idempotent
+  durable decisions file for relaunching retained worker worktrees.
+- Made missing `factory:worker` agent warnings fail closed instead of silently
+  running the default template.
+- Hardened cleanup so junctions and other reparse points are unlinked without
+  traversing external targets.
 
 - Added `/factory help [command]` with compact grouped guidance and per-command
   details, and replaced the overflowing slash-command argument hint with the

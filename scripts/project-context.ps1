@@ -82,6 +82,9 @@ if ($Initialize) {
                 planRecordedAt = $null
                 resultRecordedAt = $null
                 pendingInstructions = $null
+                holdReason = $null
+                attemptPrepared = $false
+                answerHash = $null
             }.GetEnumerator()) {
                 if ($null -eq $task.PSObject.Properties[$property.Key]) {
                     $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value

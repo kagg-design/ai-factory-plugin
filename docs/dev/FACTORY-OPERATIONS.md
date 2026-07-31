@@ -359,6 +359,26 @@ After restarting the computer or Claude Code, start the factory without
 /factory resume
 ```
 
+If a background session stops without a valid `FACTORY_RESULT`, reconciliation
+sets `held` with a machine `holdReason`. Continue the retained worktree with:
+
+```text
+/factory retry <task-id>
+```
+
+A manual hold has a different reason and is not accepted by `retry`. Retry also
+refuses a missing worktree or a task that already has a validated commit/result.
+
+To make decisions durable before relaunching a worker:
+
+```text
+/factory answer <task-id> --text "decision text"
+/factory answer <task-id> --file D:\path\decisions.md
+```
+
+This writes the ignored `FACTORY-DECISIONS.md` inside the retained worktree,
+stops the previous background row, and queues one new attempt. Repeating the
+same answer refreshes the file without duplicating the pointer or attempt.
 ## 12. Diagnostics
 
 ```text
