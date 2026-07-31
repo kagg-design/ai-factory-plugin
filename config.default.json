@@ -18,7 +18,11 @@
   "allowUnrelatedDevelopCommitsToProduction": true,
   "integrationTestCommands": [],
   "releaseTestCommands": [],
-  "copyIgnoredFiles": [".env", ".env.local", ".env.testing"],
+  "copyIgnoredFiles": [
+    ".env",
+    ".env.local",
+    ".env.testing"
+  ],
   "workerRequiredChecks": [
     "Run tests directly relevant to the changed behavior",
     "Run the nearest available lint or static-analysis command",
