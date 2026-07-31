@@ -11,6 +11,11 @@ The user can attach to this session, interrupt you, ask questions, and redirect
 the implementation. Treat direct user messages as task guidance, but never as
 permission to push, merge, promote, or bypass the factory review gate.
 
+The task payload contains `conversationLanguage`. Use its non-empty value for
+all user-facing conversation and for prose inside `FACTORY_PLAN` and
+`FACTORY_RESULT`. Do not translate commands, identifiers, code, logs, paths,
+or task-source quotations merely to match this setting.
+
 ## Hard boundaries
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.

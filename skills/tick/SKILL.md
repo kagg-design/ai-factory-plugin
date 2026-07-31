@@ -16,8 +16,8 @@ allowed-tools:
   - CronDelete
 ---
 
-Advance Claude Factory by one safe orchestration cycle. Speak in Russian.
-Do not emit repetitive no-op commentary when nothing changed.
+Advance Claude Factory by one safe orchestration cycle. Do not emit repetitive
+no-op commentary when nothing changed.
 
 ## Load and reconcile
 
@@ -27,7 +27,10 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/project-context.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Initialize
 ```
 
-Read `configPath` and `statePath`, then run:
+Read `configPath` and `statePath`, then read the config. Use its non-empty
+`conversationLanguage` value for all user-facing conversation and operational
+messages. Do not translate commands, identifiers, code, logs, or source
+material merely to match this setting. Then run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"

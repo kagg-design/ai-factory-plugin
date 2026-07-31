@@ -17,8 +17,8 @@ allowed-tools:
   - CronDelete
 ---
 
-Manage Claude Factory for the current Git repository. Speak to the user in
-Russian and keep operational messages compact. Never put plugin files in the
+Manage Claude Factory for the current Git repository. Keep operational
+messages compact. Never put plugin files in the
 target repository.
 
 ## Load and migrate private context
@@ -29,8 +29,11 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/project-context.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Initialize
 ```
 
-Parse the JSON and read `configPath` and `statePath`. Runtime files are outside
-the target repository. Use UTC ISO-8601 timestamps. When a command below has a
+Parse the JSON and read `configPath` and `statePath`. Read the config and use
+its non-empty `conversationLanguage` value for all user-facing conversation
+and operational messages. Do not translate commands, identifiers, code, logs,
+or source material merely to match this setting. Runtime files are outside the
+target repository. Use UTC ISO-8601 timestamps. When a command below has a
 bundled script, use the script instead of editing state or config manually.
 
 Before `status`, `inspect`, `transcript`, `review`, or any decision command, run:

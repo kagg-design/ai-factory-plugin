@@ -37,6 +37,7 @@ try {
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
     Assert-True ($publicSkill.Contains("Skill(factory:tick)")) "The public skill does not reference the internal tick."
+    Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
 
     $launcherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "start-factory.ps1") -Raw
     Assert-True ($launcherSource.Contains('[string]$Repository = (Get-Location).Path')) "Launcher does not default to the current directory."
@@ -47,6 +48,7 @@ try {
     $workerLauncherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Raw
     Assert-True ($workerLauncherSource.Contains('"factory:worker"')) "Worker launcher uses the wrong plugin namespace."
     Assert-True (-not $workerLauncherSource.Contains('"--session-id"')) "Worker launcher still passes the unsupported background session ID."
+    Assert-True ($workerLauncherSource.Contains("conversationLanguage = [string]`$config.conversationLanguage")) "Worker payload does not include the configured conversation language."
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
@@ -110,11 +112,13 @@ exit /b 0
     $legacyConfig.autoPushDevelopment = $false
     $legacyConfig.PSObject.Properties.Remove("maxConcurrency")
     $legacyConfig.PSObject.Properties.Remove("defaultStartMode")
+    $legacyConfig.PSObject.Properties.Remove("conversationLanguage")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 3 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
+    Assert-Equal "Russian" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
 
     $now = [DateTime]::UtcNow.ToString("o")

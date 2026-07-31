@@ -79,6 +79,10 @@ Open the resume picker in the correct repository context:
 start-factory -Resume
 ```
 
+For normal factory startup, omit both resume flags. `-Continue` selects the
+newest conversation in the repository and may therefore resume an unrelated
+scheduled task or development conversation.
+
 Continue the repository's most recent conversation:
 
 ```powershell
@@ -92,6 +96,27 @@ start-factory -Model sonnet
 ```
 
 `-Resume` and `-Continue` are mutually exclusive.
+
+### Conversation language
+
+Set the language used for orchestrator, scheduler, and worker conversation in
+the private per-repository config:
+
+```json
+{
+  "conversationLanguage": "Russian"
+}
+```
+
+Open the correct config with:
+
+```powershell
+.\edit-project-config.ps1 -Repository D:\Projects\MotiveHR
+```
+
+The setting applies to subsequent orchestrator commands and scheduler ticks.
+New workers receive it in their trusted task payload. Existing worker sessions
+retain the instructions with which they were launched.
 
 ## Start modes
 

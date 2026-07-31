@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added the per-repository `conversationLanguage` setting for orchestrator,
+  scheduler, and newly launched worker conversations while keeping code, logs,
+  commands, source quotations, and project documentation unchanged.
 - Named the lead Claude Code session `Claude Factory Orchestrator` so it is easy
   to find in session and resume lists.
 - Renamed the product and internal plugin namespace from Asana Factory to Claude Factory.

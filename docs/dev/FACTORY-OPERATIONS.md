@@ -124,11 +124,11 @@ commit 57bf282
 claude attach 1a20569f
 ```
 
-| Value | Meaning |
-|---|---|
-| `1216632072822682` | Asana and factory task ID |
-| `57bf282` | abbreviated Git commit SHA produced by the worker |
-| `1a20569f` | short Claude background-session ID |
+| Value              | Meaning                                           |
+|--------------------|---------------------------------------------------|
+| `1216632072822682` | Asana and factory task ID                         |
+| `57bf282`          | abbreviated Git commit SHA produced by the worker |
+| `1a20569f`         | short Claude background-session ID                |
 
 In Agent View, find the session name containing the full task ID:
 
@@ -141,22 +141,22 @@ active factory tasks.
 
 ## 6. Task statuses
 
-| Status | Meaning | Operator action |
-|---|---|---|
-| `queued` | waiting for capacity | usually none |
-| `starting` | worktree and session are being created | wait |
-| `planning` | worker is inspecting the task | wait for its plan |
-| `awaiting-input` | worker needs a reply | open its conversation |
-| `running` | implementation or tests are in progress | monitor or steer |
-| `awaiting-review` | a validated commit is ready | `/factory review <id>` |
-| `approved` | the exact SHA was approved | scheduler begins integration |
-| `integrating` | development merge and checks are running | do not interfere |
-| `production` | production promotion is running | wait for the result |
-| `held` | task and artifacts are retained but held | decide later |
-| `rejected` | result was rejected | retain or clean up separately |
-| `blocked` | an external or technical blocker exists | `/factory inspect <id>` |
-| `failed` | the attempt failed | inspect, then `/factory retry <id>` |
-| `done` | integration, push, and verification completed | none |
+| Status            | Meaning                                       | Operator action                     |
+|-------------------|-----------------------------------------------|-------------------------------------|
+| `queued`          | waiting for capacity                          | usually none                        |
+| `starting`        | worktree and session are being created        | wait                                |
+| `planning`        | worker is inspecting the task                 | wait for its plan                   |
+| `awaiting-input`  | worker needs a reply                          | open its conversation               |
+| `running`         | implementation or tests are in progress       | monitor or steer                    |
+| `awaiting-review` | a validated commit is ready                   | `/factory review <id>`              |
+| `approved`        | the exact SHA was approved                    | scheduler begins integration        |
+| `integrating`     | development merge and checks are running      | do not interfere                    |
+| `production`      | production promotion is running               | wait for the result                 |
+| `held`            | task and artifacts are retained but held      | decide later                        |
+| `rejected`        | result was rejected                           | retain or clean up separately       |
+| `blocked`         | an external or technical blocker exists       | `/factory inspect <id>`             |
+| `failed`          | the attempt failed                            | inspect, then `/factory retry <id>` |
+| `done`            | integration, push, and verification completed | none                                |
 
 A Claude session state shown in parentheses is a separate concept:
 
