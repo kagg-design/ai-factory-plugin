@@ -67,6 +67,12 @@ try {
     $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
     Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
     Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
+    $rejectSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\reject-task.ps1") -Raw
+    Assert-True ($rejectSource.Contains("worktree remove --force")) "Task rejection does not remove abandoned worktrees."
+    Assert-True ($publicSkill.Contains('reject <task-id> [reason] [--yes|--keep]')) "The public skill does not expose final discard semantics."
+    Assert-True ($publicSkill.Contains('do not substitute')) "The public skill does not distinguish reject from cleanup."
+    $taskActionSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\task-action.ps1") -Raw
+    Assert-True ($taskActionSource.Contains("State-only rejection now requires")) "Legacy task-action reject still bypasses final discard semantics."
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
     Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
     Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
@@ -110,7 +116,10 @@ if "%~1"=="agents" (
   echo [{"id":"stale000","sessionId":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","status":"stopped","kind":"background","name":"factory-test-task-test-task","cwd":"!JSON_CWD!","transcriptPath":"foreign-transcript","lastAssistantMessage":"foreign"},{"id":"test1234","sessionId":"$fakeSessionId","status":"!AGENT_STATUS!","kind":"background","name":"factory-test-task-test-task","cwd":"!JSON_CWD!","transcriptPath":"live-transcript","lastAssistantMessage":"live","startedAt":1}]
   exit /b 0
 )
-if "%~1"=="stop" exit /b 0
+if "%~1"=="stop" (
+  if not "%CLAUDE_FACTORY_TEST_STOP_FILE%"=="" echo %~2 > "%CLAUDE_FACTORY_TEST_STOP_FILE%"
+  exit /b 0
+)
 if "%~1"=="mcp" (
   echo asana: connected
   exit /b 0
@@ -450,6 +459,105 @@ exit /b 0
     $cleanedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal "done" ([string]$cleanedState.tasks[0].status) "Task cleanup state was not persisted."
 
+
+    $rejectState = Read-FactoryJson -Path $context.statePath
+    $rejectState.tasks = @($rejectState.tasks) + @(
+        [pscustomobject]@{
+            id = "keep-task"
+            title = "Rejected but retained"
+            brief = "Keep this task inspectable."
+            status = "held"
+            backgroundSession = $null
+            branch = $null
+            commit = $null
+            worktree = $null
+            approval = $null
+            createdAt = $now
+            updatedAt = $now
+        },
+        [pscustomobject]@{
+            id = "discard-task"
+            url = $null
+            title = "Discard unique work"
+            brief = "This abandoned work may be dirty and unpublished."
+            acceptanceCriteria = @("discard succeeds")
+            sourceNotes = @()
+            startMode = "auto"
+            status = "queued"
+            attempts = 0
+            agentId = $null
+            backgroundSession = $null
+            branch = $null
+            commit = $null
+            worktree = $null
+            plan = $null
+            workerResult = $null
+            review = $null
+            approval = $null
+            error = $null
+            createdAt = $now
+            updatedAt = $now
+        }
+    )
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $rejectState
+
+    $kept = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "keep-task" -Reason "Needs an audit trail" -Keep -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    Assert-Equal "rejected" ([string]$kept.status) "Reject --keep did not retain a rejected task."
+    $keptState = Read-FactoryJson -Path $context.statePath
+    $keptTask = @($keptState.tasks | Where-Object { [string]$_.id -eq "keep-task" })[0]
+    Assert-Equal "Needs an audit trail" ([string]$keptTask.rejectionReason) "Reject --keep did not record its reason."
+
+    $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
+    $discardLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "discard-task" -Mode auto -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    [IO.File]::AppendAllText(
+        (Join-Path $discardLaunch.worktree "README.md"),
+        "unpublished dirty work`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $discardSentinel = Join-Path $testRoot "reject-external-sentinel"
+    New-Item -ItemType Directory -Path $discardSentinel -Force | Out-Null
+    $discardSentinelFile = Join-Path $discardSentinel "keep.txt"
+    [IO.File]::WriteAllText($discardSentinelFile, "keep", (New-Object Text.UTF8Encoding($false)))
+    $discardJunction = Join-Path $discardLaunch.worktree "node_modules"
+    New-Item -ItemType Junction -Path $discardJunction -Target $discardSentinel | Out-Null
+
+    $discardMetadata = Join-Path $context.sessionsPath "discard-task.json"
+    $discardPrompt = @(
+        Get-ChildItem -LiteralPath $context.sessionsPath -File |
+            Where-Object { $_.Name.StartsWith("discard-task-a") }
+    )[0].FullName
+    $discardEvents = Join-Path $context.eventsPath "discard-task"
+    Assert-True (Test-Path -LiteralPath $discardMetadata) "Discard fixture has no session metadata."
+    Assert-True (Test-Path -LiteralPath $discardPrompt) "Discard fixture has no durable prompt."
+    Assert-True (Test-Path -LiteralPath $discardEvents) "Discard fixture has no event directory."
+
+    $preview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "discard-task" -Reason "Duplicate" -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    Assert-True ([bool]$preview.confirmationRequired) "Reject did not preview potentially unique work."
+    Assert-Equal ([string]$discardLaunch.worktree) ([string]$preview.worktree) "Reject preview named the wrong worktree."
+    Assert-True (Test-Path -LiteralPath $discardLaunch.worktree) "Reject preview mutated the worktree."
+    $previewState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal 1 (@($previewState.tasks | Where-Object { [string]$_.id -eq "discard-task" }).Count) "Reject preview removed the task."
+
+    $stopCapture = Join-Path $testRoot "stopped-session.txt"
+    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $stopCapture
+    $discarded = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "discard-task" -Reason "Duplicate" -Yes -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+    Assert-True ([bool]$discarded.removedFromState) "Confirmed reject did not forget the task."
+    Assert-True ([bool]$discarded.stoppedSession) "Confirmed reject did not stop the session."
+    Assert-Equal "test1234" ((Get-Content -LiteralPath $stopCapture -Raw).Trim()) "Reject stopped the wrong session."
+    Assert-True (-not (Test-Path -LiteralPath $discardLaunch.worktree)) "Confirmed reject did not remove the dirty worktree."
+    Assert-Equal 0 (@(& git -C $repository branch --list ([string]$discardLaunch.branch))).Count "Confirmed reject did not remove the branch."
+    Assert-True (-not (Test-Path -LiteralPath $discardMetadata)) "Confirmed reject retained session metadata."
+    Assert-True (-not (Test-Path -LiteralPath $discardPrompt)) "Confirmed reject retained the durable prompt."
+    Assert-True (-not (Test-Path -LiteralPath $discardEvents)) "Confirmed reject retained event metadata."
+    Assert-True (Test-Path -LiteralPath $discardSentinelFile) "Reject traversed the external junction target."
+    Assert-Equal 1 (@($discarded.removedReparsePoints).Count) "Reject did not audit the removed junction."
+    $discardedState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal 0 (@($discardedState.tasks | Where-Object { [string]$_.id -eq "discard-task" }).Count) "Confirmed reject persisted the task."
     $doctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-True ([bool]$doctor.healthy) "Factory doctor reported required failures in the valid fixture."
 

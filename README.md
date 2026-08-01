@@ -212,7 +212,9 @@ Other decisions:
 
 ```text
 /factory hold <task-id>
-/factory reject <task-id>
+/factory reject <task-id> "Duplicate; already implemented elsewhere"
+/factory reject <task-id> --yes
+/factory reject <task-id> --keep
 /factory rework <task-id> "Keep the old endpoint compatible"
 ```
 
@@ -272,7 +274,7 @@ running; the scheduler simply waits before starting more.
 /factory go <task-id>
 /factory hold <task-id>
 /factory rework <task-id> [instructions]
-/factory reject <task-id>
+/factory reject <task-id> [reason] [--yes|--keep]
 /factory cleanup <task-id>
 /factory retry <task-id>
 /factory pause
@@ -311,8 +313,15 @@ branch. It keeps the transcript and result in private state and marks the task
 `done`. It also uses Git long-path support and finishes removal of verified
 clean residue left by Windows.
 
-`reject` alone does not delete artifacts; use `cleanup` only after the commit
-is safely published or otherwise retained.
+`reject` is the normal way to abandon a task. It first shows the exact session,
+worktree, branch, commit, and private metadata that will be lost, then asks for
+confirmation. Once confirmed, it stops the session, removes those artifacts,
+and forgets the task so it disappears from status. `reject --yes` skips the
+question. `reject --keep` provides the former state-only behavior and leaves a
+`rejected` task available for inspection.
+
+Use `cleanup` instead for completed work that was published: cleanup verifies
+both remote branches and retains the task as `done` history.
 
 Worker launch prompts are persisted as UTF-8 files in the private runtime and
 the background process receives only a short file pointer. Reconciliation binds

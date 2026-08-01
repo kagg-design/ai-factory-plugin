@@ -185,7 +185,7 @@ active factory tasks.
 | `integrating`     | development merge and checks are running      | do not interfere                    |
 | `production`      | production promotion is running               | wait for the result                 |
 | `held`            | task and artifacts are retained but held      | decide later                        |
-| `rejected`        | result was rejected                           | retain or clean up separately       |
+| `rejected`        | rejected with `--keep`; artifacts retained    | inspect or discard with `reject`    |
 | `blocked`         | an external or technical blocker exists       | `/factory inspect <id>`             |
 | `failed`          | the attempt failed                            | inspect, then `/factory retry <id>` |
 | `done`            | integration, push, and verification completed | none                                |
@@ -290,12 +290,26 @@ Other decisions:
 
 ```text
 /factory hold 1216632072822682
-/factory reject 1216632072822682
+/factory reject 1216632072822682 "Duplicate; already implemented"
+/factory reject 1216632072822682 --yes
+/factory reject 1216632072822682 --keep
 /factory rework 1216632072822682 "Keep the old endpoint compatible"
 ```
 
 `rework` retains the conversation and worktree. The orchestrator prints the
 instructions to paste into the worker conversation.
+
+`reject` is a final discard by default. Before changing anything, the
+orchestrator lists the background session, worktree, local worker branch,
+commit, and private prompt/event/session metadata that will be removed. Confirm
+the preview to stop the session, remove all those artifacts (including dirty or
+unpublished work), delete the task from private state, and make it disappear
+from `/factory status`.
+
+Use `--yes` when the preview is unnecessary and the loss is already understood.
+Use `--keep` only when the rejected task must remain inspectable: it marks the
+task `rejected` and records the reason without deleting anything. The factory
+uses `--yes`, not an ambiguous `--force`, for confirmation bypass.
 
 ### Synchronizing before review
 
@@ -340,8 +354,10 @@ worker branch, preserves the transcript and result, and marks the task `done`.
 
 The command enables Git long-path handling and removes verified clean residue
 that Windows may leave behind. It never removes an unpublished recorded
-commit. `reject` only changes task state and deliberately retains artifacts;
-it does not replace `cleanup`.
+commit. This is deliberately different from `reject`: cleanup is for published
+work, preserves a `done` history record, and will not discard unique changes.
+Reject is for abandoned work, removes the task record, and requires an explicit
+preview confirmation unless `--yes` is supplied.
 
 ## 11. Pause, stop, and recovery
 

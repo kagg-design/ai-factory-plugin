@@ -71,7 +71,8 @@ Prepare and decide
   review <id>              review exact commit
   go <id>                  approve and integrate
   rework <id> [text]       return work to the worker
-  hold|reject <id>         retain without integration
+  hold <id>                retain without integration
+  reject <id> [reason]     discard task and its artifacts
   cleanup <id>             remove published worker artifacts
 
 Control
@@ -262,8 +263,8 @@ Choose `Next:` from the actual task data:
   manual hold.
 - `blocked` or `failed`: `/factory inspect <id>`, then show
   `/factory retry <id>` only when its retry prerequisites are satisfied.
-- `rejected`: `/factory inspect <id>`; mention cleanup only when its published
-  commit satisfies cleanup prerequisites.
+- `rejected`: this exists only after `reject --keep`; use `/factory inspect <id>`
+  or run ordinary `/factory reject <id>` to discard it after confirmation.
 
 `/factory status <state>` shows only that state. In particular, `status held`
 must print the same actionable cards, while `status done` prints compact rows
@@ -395,7 +396,7 @@ Check scope, behavior, regressions, test adequacy, and acceptance criteria.
 Report risks and a verdict. Review is read-only and applies only to the exact
 current commit SHA.
 
-### `go|hold|reject|rework <task-id>`
+### `go|hold|rework <task-id>`
 
 Run the appropriate action through:
 
@@ -409,8 +410,32 @@ its live TUI. Print the attach command and the exact text for the user to paste.
 
 `go` approves the exact clean worker HEAD. It sets the task to `approved`,
 reactivates the scheduler, and invokes the tick. A later HEAD change invalidates
-integration. `hold` and `reject` preserve the worktree, commit, transcript, and
-session until explicit cleanup.
+integration. `hold` preserves the worktree, commit, transcript, and session.
+
+### `reject <task-id> [reason] [--yes|--keep]`
+
+`reject` is the normal final discard command. Reconcile first, then run the
+bundled script without `-Yes`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/reject-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Reason REASON
+```
+
+If `confirmationRequired` is true, present the exact session, worktree, branch,
+commit, and private metadata that will be removed. Ask one concise confirmation
+question. Only after explicit confirmation, rerun the same command with `-Yes`.
+The public `--yes` flag maps directly to `-Yes` and skips this question.
+
+Confirmed rejection stops the background session, unlinks reparse points
+without traversing their targets, force-removes the task worktree even when it
+contains unpublished or dirty work, deletes its local `factory-worker/*`
+branch and private prompt/event/session metadata, and removes the task from
+factory state. Make the irreversible loss explicit; do not substitute
+`cleanup`, because cleanup correctly refuses unpublished work.
+
+`--keep` maps to `-Keep`: it only marks the task `rejected`, records the optional
+reason, and preserves all artifacts. This is the compatibility mode for a task
+that must remain inspectable.
 
 ### `answer <task-id> (--text TEXT|--file PATH) [--interactive]`
 
@@ -436,7 +461,7 @@ Reconcile first, then run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/cleanup-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID
 ```
 
-Cleanup is a destructive artifact-removal command with strict safeguards. It
+Cleanup is a published-work artifact-removal command with strict safeguards. It
 must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
 from both configured remote development and production branches. It removes

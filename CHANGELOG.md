@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Changed `/factory reject` into a confirmed final discard that stops the
+  worker, removes its worktree, branch, and private runtime metadata, and
+  forgets the task; added `--yes` and artifact-preserving `--keep` modes.
 - Redesigned `/factory status` as one continuous Unicode workflow tree with
   exact next commands, state filters, explicit session availability, hold
   reasons, and completed history collapsed by default.

@@ -75,6 +75,8 @@ if ($Initialize) {
             foreach ($property in @{
                 startMode = "auto"
                 backgroundSession = $null
+                rejectionReason = $null
+                rejectedAt = $null
                 plan = $null
                 review = $null
                 approval = $null

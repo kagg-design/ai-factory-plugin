@@ -62,11 +62,7 @@ try {
             Set-FactoryProperty -Target $task -Name "holdReason" -Value "held by operator"
         }
         "reject" {
-            if ([string]$task.status -eq "done") {
-                throw "A completed production task cannot be rejected."
-            }
-            Set-FactoryProperty -Target $task -Name "approval" -Value $null
-            Set-FactoryProperty -Target $task -Name "status" -Value "rejected"
+            throw "Use reject-task.ps1. State-only rejection now requires its explicit -Keep switch."
         }
         "rework" {
             if ($null -eq $task.backgroundSession -or -not [string]$task.backgroundSession.id) {
