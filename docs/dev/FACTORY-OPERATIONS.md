@@ -102,35 +102,48 @@ Help is read-only and never executes the command it describes.
 
 ## 4. Reading `/factory status`
 
-Example:
+The default report is organized around operator actions, not internal state
+counts. Every unfinished task is shown as a narrow card:
 
 ```text
-awaiting-review 3 · awaiting-input 1 · held 5
-concurrency 3, active workers 0
-scheduler absent
-active=true, paused=false
+╭─ Factory · MotiveHR
+│  ○ idle · workers 0/3 · scheduler sleeping
+├─ ◆ NEEDS YOUR ACTION · 2
+│  ├─ REVIEW · 1216643944203164 — Team PTO: taken-YTD + overlaps
+│  │  ├─ State: ready for review
+│  │  ├─ Commit: 1079d949
+│  │  ├─ Session: 51962867 · done
+│  │  ├─ Notice: branch is behind the current development branch
+│  │  ├─ → Next: /factory sync 1216643944203164
+│  │  └─ Open: /factory chat 1216643944203164
+│  └─ HELD · 1216606487211903 — Taken-YTD duplicate
+│     ├─ State: held by operator
+│     ├─ Reason: held by operator
+│     ├─ Session: 3abc1234 · stopped
+│     ├─ → Next: /factory inspect 1216606487211903
+│     ├─ Open: /factory chat 1216606487211903
+│     └─ Resume: /factory answer 1216606487211903 --text "Continue"
+├─ ✓ COMPLETED · 3
+│  └─ History: /factory status done
+╰─ Factory enabled · no runnable tasks · scheduler sleeping
 ```
 
-This means:
+Use filters when the default view is too broad:
 
-- three workers produced commits that require human review;
-- one worker is waiting for a reply in its conversation;
-- five tasks are intentionally held;
-- no task currently requires automatic orchestration;
-- the factory is enabled and is not paused.
+```text
+/factory status held
+/factory status awaiting-review
+/factory status done
+/factory status all
+```
 
-An absent scheduler is expected in this state. The recurring job removes
-itself when only human decisions remain, avoiding pointless polling.
+`status done` is history: it shows task ID, title, completion summary, and the
+corresponding `inspect` command. It does not present an old attach command as
+the main action. The default view omits completed task rows.
 
-The scheduler is recreated when:
-
-- a new task is added;
-- `/factory go <task-id>` approves a task;
-- `/factory resume` is run;
-- concurrency is increased while queued work exists.
-
-If `/factory resume` finds no actionable work, its tick will run once and the
-scheduler will remove itself again.
+An absent scheduler is expected when every unfinished task requires an operator
+decision. It is recreated when work is queued, a task is approved, the factory
+is resumed, or concurrency is increased while queued work exists.
 
 ## 5. IDs shown in status output
 

@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Redesigned `/factory status` as one continuous Unicode workflow tree with
+  exact next commands, state filters, explicit session availability, hold
+  reasons, and completed history collapsed by default.
 - Persisted each full worker launch prompt as a private UTF-8 runtime file and
   replaced the native command-line payload with a short file pointer.
 - Hardened session reconciliation against stale same-name Agent View rows and

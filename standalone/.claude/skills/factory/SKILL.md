@@ -60,7 +60,7 @@ Add work
   start|add --auto <URL>   implement immediately
 
 Open and understand
-  status                   queue summary
+  status [state|all]       actionable task list
   chat <id>                open worker conversation
   inspect <id>             full task details
   transcript <id>          worker conversation summary
@@ -177,17 +177,103 @@ Re-read state after the tick and show, for every launched task:
 - that `←` opens Agent View, where Enter attaches and `Esc`/`Ctrl+C`
   interrupts a running turn.
 
-### `status`
+### `status [state|all]`
 
-Reconcile first. Show counts and compact rows for:
+Reconcile first. This is an operator view, not a state dump. The default output
+must help the user identify every unfinished task and choose the next command.
+Do not use a wide status/count table and do not lead with internal booleans.
+
+Default `status` rules:
+
+1. Exclude `done` task rows. Show only `Done: N` plus
+   `/factory status done` for history.
+2. Group unfinished tasks under human headings: `Needs your action`, `Working`,
+   `Waiting`, and `Problems`. Omit empty groups.
+3. Render the whole report as one continuous Unicode tree inside one `text`
+   fence. Use only `╭─`, `│`, `├─`, `└─`, and `╰─` as structural
+   connectors. Do not substitute ASCII pipes, tables, bullets, or disconnected
+   cards. There must be no physically empty line anywhere inside the tree:
+   every intervening line must carry the correct `│` continuation so vertical
+   trunks remain visually unbroken.
+4. Start with `╭─ Factory · PROJECT`. Render groups as root children and tasks
+   as group children. A non-final task uses `├─`; the final task in a group
+   uses `└─`. Every task detail is a nested child, so its connector lines stay
+   attached to that task.
+5. Include for each task:
+   - full task ID and untruncated title on the task node;
+   - one short `What:` summary from `brief` when the title is insufficient;
+   - factory status in plain language;
+   - `Reason:` from `holdReason`, `error`, blocking reason, or pending
+     question when present;
+   - commit SHA when present;
+   - background ID and session state, or explicitly `Session: none`;
+   - one primary exact `→ Next:` factory command;
+   - `Open:` with `/factory chat <id>` when a background ID exists;
+   - at most one useful alternative command.
+6. End with a compact completed-history node and one `╰─` technical footer:
+   active workers/concurrency, scheduler, and paused/running. Explain an absent
+   scheduler in plain language only when no runnable work exists.
+
+The tree layout is mandatory and must follow this shape:
 
 ```text
-queued starting planning awaiting-input running syncing awaiting-review approved
-integrating production held rejected blocked failed done
+╭─ Factory · PROJECT
+│  ○ idle · workers 0/3 · scheduler sleeping
+├─ ◆ NEEDS YOUR ACTION · 2
+│  ├─ REVIEW · TASK_ID — Full task title
+│  │  ├─ State: ready for review
+│  │  ├─ Commit: abc12345
+│  │  ├─ Session: bg123456 · done
+│  │  ├─ → Next: /factory review TASK_ID
+│  │  └─ Open: /factory chat TASK_ID
+│  └─ HELD · TASK_ID — Full task title
+│     ├─ State: held by operator
+│     ├─ Reason: held by operator
+│     ├─ Session: none
+│     ├─ → Next: /factory inspect TASK_ID
+│     └─ Resume: /factory answer TASK_ID --text "Continue"
+├─ ✓ COMPLETED · 3
+│  └─ History: /factory status done
+╰─ Factory enabled · no runnable tasks · scheduler sleeping
 ```
 
-Include current `concurrency`, active worker count, scheduler state, and attach
-commands. Do not launch or integrate solely for `status`.
+Preserve the vertical trunk exactly: do not insert blank lines before, between,
+or after task nodes inside the fenced tree.
+
+Choose `Next:` from the actual task data:
+
+- `queued`: say it will start automatically; use `/factory resume` only if the
+  factory is paused/inactive.
+- `starting`, `planning`, `running`: `/factory chat <id>`.
+- `awaiting-input`: `/factory chat <id>`; alternative
+  `/factory answer <id> --text "..."` when a fresh attempt is appropriate.
+- `syncing`: `/factory sync <id>`.
+- `awaiting-review`: `/factory review <id>`. If the task is known to be behind
+  the development branch, make `/factory sync <id>` primary and explain why.
+- `approved`, `integrating`, `production`: say the factory will continue; do
+  not invent a user decision.
+- `held` with a validated commit/result: `/factory review <id>` or
+  `/factory sync <id>` when stale.
+- machine `held` without a commit, identified by `holdReason`:
+  `/factory retry <id>`; alternative `/factory answer <id> --text "..."`.
+- manual or legacy `held` without a commit: `/factory inspect <id>`; show
+  `/factory chat <id>` if a session exists and
+  `/factory answer <id> --text "Continue"` as the relaunch action. Never claim `/factory retry` works for a
+  manual hold.
+- `blocked` or `failed`: `/factory inspect <id>`, then show
+  `/factory retry <id>` only when its retry prerequisites are satisfied.
+- `rejected`: `/factory inspect <id>`; mention cleanup only when its published
+  commit satisfies cleanup prerequisites.
+
+`/factory status <state>` shows only that state. In particular, `status held`
+must print the same actionable cards, while `status done` prints compact rows
+with task ID, title, completion summary, and `/factory inspect <id>`; session
+attach commands are not useful as the primary action for completed tasks.
+`/factory status all` includes the default actionable view plus compact done
+history.
+
+Do not launch, retry, answer, attach, sync, review, or integrate solely for
+`status`. Report commands only.
 
 ### `doctor`
 

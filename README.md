@@ -285,6 +285,12 @@ one-screen grouped overview or `/factory help <command>` for syntax,
 prerequisites, side effects, safety behavior, and the usual next step for one
 command.
 
+`/factory status` shows unfinished tasks in one continuous workflow-style tree
+with title, reason, session, and exact next command. Completed rows are collapsed by
+default. Use `/factory status held`, `/factory status awaiting-review`,
+`/factory status done`, or `/factory status all` to filter the report. Status is
+read-only: it reports commands but never launches or changes a task by itself.
+
 When the queue contains only tasks waiting for input or review, the recurring
 tick is removed so it does not print no-op messages. Adding a task, approving
 one, resuming, or increasing concurrency recreates it.

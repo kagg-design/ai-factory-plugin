@@ -41,6 +41,14 @@ try {
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
     Assert-True ($publicSkill.Contains('### `help [command]`')) "The public skill does not expose factory help."
     Assert-True ($publicSkill.Contains('Details: /factory help <command>')) "Factory help does not advertise command-specific help."
+    Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
+    Assert-True ($publicSkill.Contains('one continuous Unicode tree')) "Factory status is not rendered as one tree."
+    Assert-True ($publicSkill.Contains('There must be no physically empty line anywhere inside the tree')) "Factory status allows broken connector lines."
+    Assert-True ($publicSkill.Contains('The tree layout is mandatory')) "Factory status does not mandate the tree template."
+    Assert-True ($publicSkill.Contains('Preserve the vertical trunk exactly')) "Factory status does not preserve a solid tree trunk."
+    Assert-True ($publicSkill.Contains('one primary exact')) "Factory status does not require a next action."
+    Assert-True ($publicSkill.Contains('`/factory status done` for history')) "Factory status does not collapse completed history."
+    Assert-True ($publicSkill.Contains('Never claim `/factory retry` works for a')) "Factory status does not distinguish manual holds."
 
     $workerAgentSource = Get-Content -LiteralPath (Join-Path $pluginRoot "agents\worker.md") -Raw
     Assert-True ($workerAgentSource -match '(?m)^name: worker\s*$') "The scoped factory:worker agent is not resolvable."
