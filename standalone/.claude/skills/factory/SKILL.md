@@ -284,9 +284,12 @@ Run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/factory-doctor.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
-Report Claude version, plugin manifest, repository and remote branches, private
-runtime JSON, factory session lock, worktree registry, Agent View, scheduler,
-and Asana connector warning. The launcher supplies both the public skill and its
+Report Claude and PowerShell versions, required cmdlet availability, the parsed
+worker-agent definition, active agent-resolution path, plugin manifest,
+repository and remote branches, private runtime JSON, factory session lock,
+worktree registry, Agent View, scheduler, and Asana connector warning. An
+`inline-fallback` resolution is an active compatibility workaround, not a
+default-template worker. The launcher supplies both the public skill and its
 companion plugin. Doctor is diagnostic and must not launch, integrate, push, or
 clean anything.
 
@@ -466,8 +469,10 @@ must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
 from both configured remote development and production branches. It removes
 only the task's external worker worktree and local `factory-worker/*` branch.
-Preserve transcript and result metadata in private state and report the task as
-`done`.
+Preserve the factory's result metadata in private state, report the task as
+`done`, and then remove its completed background session from Claude Agent View.
+If Agent View removal fails after state and Git cleanup succeeded, report the
+returned `agentSessionWarning`; do not retry destructive artifact cleanup.
 
 Git long-path support is enabled by the bundled script. If Git verified the
 worktree clean and unregistered it but Windows left files behind, the script

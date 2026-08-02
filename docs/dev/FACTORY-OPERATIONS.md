@@ -350,7 +350,12 @@ remove its worker artifacts from the orchestrator:
 Cleanup reconciles the task, refuses active sessions and dirty worktrees,
 refreshes the remote development and production branches, verifies that the
 recorded commit is reachable from both, removes the worker worktree and local
-worker branch, preserves the transcript and result, and marks the task `done`.
+worker branch, preserves the factory result metadata, marks the task `done`,
+and removes its completed background session from Claude Agent View.
+
+Agent View removal is the final, best-effort step. If Claude's session
+supervisor is unavailable, cleanup still remains complete and returns an
+`agentSessionWarning`; remove that stale row manually with `claude rm <id>`.
 
 The command enables Git long-path handling and removes verified clean residue
 that Windows may leave behind. It never removes an unpublished recorded
@@ -420,7 +425,14 @@ same answer refreshes the file without duplicating the pointer or attempt.
 - `status` reconciles sessions and summarizes the queue.
 - `inspect` shows all normalized data for one task.
 - `transcript` summarizes the worker conversation.
-- `doctor` checks the CLI, runtime files, locks, worktrees, and scheduler.
+- `doctor` checks the CLI, PowerShell runtime and required cmdlets, parsed worker
+  definition, agent-resolution cache, runtime files, locks, worktrees, and
+  scheduler.
+
+A worker session reports `agentResolution: plugin` when Claude resolved the
+session-only plugin agent directly. `inline-fallback` means the launcher safely
+stopped a default-template session and supplied the same `agents/worker.md`
+prompt inline. That choice is cached only for the current Claude Code version.
 
 If the launcher reports that a factory is already running, inspect Agent View
 and other terminals first. Only one lead factory process may run for a

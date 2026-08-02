@@ -1,6 +1,17 @@
 # Changelog
 
 ## Unreleased
+- Removed completed worker sessions from Claude Agent View after successful
+  `/factory cleanup`, with non-destructive warning behavior if session removal
+  is unavailable.
+- Added a version-scoped inline worker-agent fallback for Claude Code releases
+  that cannot resolve session-only plugin agents with `--bg --agent`, including
+  verified stray-session shutdown and audited resolution metadata.
+- Added PowerShell 5.1-safe native argument quoting and replaced `Get-FileHash`
+  with .NET SHA-256 so worker launch is independent of ambient `PSModulePath`.
+- Extended `/factory doctor` with PowerShell and worker-resolution diagnostics,
+  and made the worker Git guard fail closed when its safety payload cannot be
+  parsed.
 - Changed `/factory reject` into a confirmed final discard that stops the
   worker, removes its worktree, branch, and private runtime metadata, and
   forgets the task; added `--yes` and artifact-preserving `--keep` modes.

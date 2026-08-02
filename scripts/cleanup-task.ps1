@@ -1,11 +1,20 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [Parameter(Mandatory = $true)][string]$TaskId
+    [Parameter(Mandatory = $true)][string]$TaskId,
+    [string]$ClaudeCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+
+if (-not $ClaudeCommand) {
+    $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
+        $env:CLAUDE_FACTORY_CLAUDE_COMMAND
+    } else {
+        "claude"
+    }
+}
 
 function Test-FactoryPathInsideRoot {
     param(
@@ -125,6 +134,16 @@ try {
     }
     $branch = [string]$task.branch
     $commit = [string]$task.commit
+    $backgroundId = if ($null -ne $task.backgroundSession) {
+        [string]$task.backgroundSession.id
+    } else {
+        ""
+    }
+    $backgroundState = if ($null -ne $task.backgroundSession) {
+        [string]$task.backgroundSession.state
+    } else {
+        ""
+    }
 
     if (-not $commit) {
         throw "Task '$TaskId' has no recorded commit. Cleanup refuses to discard unpublished work."
@@ -251,6 +270,33 @@ try {
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
 
+    # Factory state and Git artifacts are authoritative. Agent View cleanup is
+    # deliberately last and best-effort: a missing supervisor or an older
+    # Claude CLI must not turn a successfully finalized task back into a
+    # cleanup failure after its worktree and branch have already been removed.
+    $stoppedAgentSession = $false
+    $removedAgentSession = $false
+    $agentSessionWarning = $null
+    if ($backgroundId) {
+        try {
+            if ($backgroundState -notin @("stopped", "done", "failed")) {
+                & $ClaudeCommand stop $backgroundId 1> $null 2> $null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "claude stop exited with code $LASTEXITCODE"
+                }
+                $stoppedAgentSession = $true
+            }
+
+            & $ClaudeCommand rm $backgroundId 1> $null 2> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "claude rm exited with code $LASTEXITCODE"
+            }
+            $removedAgentSession = $true
+        } catch {
+            $agentSessionWarning = "Task cleanup succeeded, but Agent View session '$backgroundId' could not be removed: $($_.Exception.Message)"
+        }
+    }
+
     [ordered]@{
         taskId = $TaskId
         status = "done"
@@ -258,11 +304,10 @@ try {
         removedWorktree = $removedWorktree
         deletedBranch = $deletedBranch
         removedReparsePoints = @($removedReparsePoints)
-        preservedSession = if ($null -ne $task.backgroundSession) {
-            [string]$task.backgroundSession.id
-        } else {
-            $null
-        }
+        agentSessionId = if ($backgroundId) { $backgroundId } else { $null }
+        stoppedAgentSession = $stoppedAgentSession
+        removedAgentSession = $removedAgentSession
+        agentSessionWarning = $agentSessionWarning
     } | ConvertTo-Json -Depth 10
 } finally {
     Exit-FactoryMutex -Mutex $mutex

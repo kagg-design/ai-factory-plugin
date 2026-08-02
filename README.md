@@ -130,6 +130,24 @@ worktree.
 /factory start <Asana URL>
 ```
 
+Worker launch prefers the plugin agent `factory:worker`. If a Claude Code
+version cannot resolve a session-only plugin agent during `--bg` startup, the
+launcher stops and verifies removal of the default-template session, then
+relaunches once with the byte-identical `agents/worker.md` prompt supplied as an
+inline agent. The successful resolution path is stored as `plugin` or
+`inline-fallback` and cached for that Claude Code version. A version change
+automatically probes the native plugin path again.
+
+The launcher uses explicit Windows native-argument quoting so inline JSON is not
+mangled by Windows PowerShell 5.1. Prompt hashes use .NET SHA-256 rather than
+`Get-FileHash`, avoiding ambient `PSModulePath` incompatibilities. A second
+agent-resolution fallback is terminal and both stray sessions are stopped.
+
+The inline definition carries the agent `description` and prompt body. Worker
+model and effort remain explicit CLI flags. Claude's inline-agent option does
+not expose the `maxTurns` frontmatter field, so that limit is the one accepted
+deviation while the workaround is active.
+
 The worker reads the task and relevant code without editing, returns a
 `FACTORY_PLAN`, and waits. Open its conversation, discuss or change the plan,
 then tell it to begin.
@@ -282,6 +300,10 @@ running; the scheduler simply waits before starting more.
 /factory stop
 ```
 
+Successful `/factory cleanup` also removes the task's completed background
+session from Claude Agent View. A supervisor/CLI failure is reported as a
+warning after the authoritative factory state and Git artifacts are finalized.
+
 The slash-command hint is intentionally short. Use `/factory help` for a
 one-screen grouped overview or `/factory help <command>` for syntax,
 prerequisites, side effects, safety behavior, and the usual next step for one
@@ -327,6 +349,12 @@ Worker launch prompts are persisted as UTF-8 files in the private runtime and
 the background process receives only a short file pointer. Reconciliation binds
 identity-bearing metadata only through the background ID or full session UUID,
 so an older same-name Agent View row cannot replace the live attempt.
+`/factory doctor` reports the PowerShell runtime, required JSON cmdlets, inline
+worker definition readiness, and the cached worker-agent resolution path. The
+worker Git guard fails closed when its hook payload cannot be parsed; an
+internal guard error is never treated as permission to run a prohibited Git
+operation.
+
 
 A session that stops without `FACTORY_RESULT` is machine-held and can be resumed
 with `retry`, or supplied durable decisions with `answer`. `answer` refreshes an

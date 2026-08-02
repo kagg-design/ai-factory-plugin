@@ -4,6 +4,7 @@
   "paused": false,
   "cronJobId": null,
   "createdAt": null,
+  "agentResolutionCache": null,
   "updatedAt": null,
   "resolvedCommands": {
     "integration": [],

@@ -124,6 +124,18 @@ function Get-FactoryUtcTimestamp {
     return [DateTime]::UtcNow.ToString("o")
 }
 
+function Get-FactoryFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath($Path))
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
 function ConvertTo-FactorySafeName {
     param(
         [Parameter(Mandatory = $true)][string]$Value,

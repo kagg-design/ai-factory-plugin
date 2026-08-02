@@ -1,14 +1,18 @@
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
+
+function Stop-FactoryGuardClosed {
+    param([string]$Reason)
+    [Console]::Error.WriteLine("Factory Git guard blocked the tool because its safety check failed: $Reason")
+    exit 2
+}
+
 $raw = [Console]::In.ReadToEnd()
-if ([string]::IsNullOrWhiteSpace($raw)) { exit 0 }
-try { $payload = $raw | ConvertFrom-Json } catch { exit 0 }
+if ([string]::IsNullOrWhiteSpace($raw)) { Stop-FactoryGuardClosed -Reason "empty hook payload" }
+try { $payload = $raw | ConvertFrom-Json } catch { Stop-FactoryGuardClosed -Reason $_.Exception.Message }
 
 $command = [string]$payload.tool_input.command
 $cwd = [string]$payload.cwd
-if (-not $command -or -not $cwd) { exit 0 }
-
-$branch = (& git -C $cwd branch --show-current 2>$null).Trim()
-if ($branch -notlike "factory-worker/*") { exit 0 }
+if (-not $command -or -not $cwd) { Stop-FactoryGuardClosed -Reason "hook payload has no command or cwd" }
 
 $patterns = @(
     '(?i)(^|[;&|]\s*)git\s+push\b',
@@ -21,8 +25,24 @@ $patterns = @(
     '(?i)(^|[;&|]\s*)gh\s+pr\s+merge\b'
 )
 
+$prohibited = $false
 foreach ($pattern in $patterns) {
     if ($command -match $pattern) {
+        $prohibited = $true
+        break
+    }
+}
+if (-not $prohibited) { exit 0 }
+
+try {
+    $branchOutput = @(& git -C $cwd branch --show-current 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -ne 0) { Stop-FactoryGuardClosed -Reason ($branchOutput -join [Environment]::NewLine) }
+    $branch = ($branchOutput -join "").Trim()
+} catch {
+    Stop-FactoryGuardClosed -Reason $_.Exception.Message
+}
+
+if ($branch -like "factory-worker/*") {
         [ordered]@{
             hookSpecificOutput = [ordered]@{
                 hookEventName = "PreToolUse"
@@ -31,6 +51,5 @@ foreach ($pattern in $patterns) {
             }
         } | ConvertTo-Json -Depth 10 -Compress
         exit 0
-    }
 }
 exit 0

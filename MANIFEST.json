@@ -31,12 +31,14 @@
     "scripts/set-concurrency.ps1",
     "scripts/start-worker-session.ps1",
     "scripts/sync-task.ps1",
+    "scripts/worker-launch.ps1",
     "scripts/task-action.ps1",
     "scripts/worker-git-guard.ps1",
     "show-project-paths.ps1",
     "skills/tick/SKILL.md",
     "standalone/.claude/skills/factory/SKILL.md",
     "start-factory.ps1",
+    "tests/FakeClaude.cs",
     "tests/run-tests.ps1"
   ]
 }

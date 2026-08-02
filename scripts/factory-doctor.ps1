@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "worker-launch.ps1")
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
@@ -30,6 +31,39 @@ $versionText = (& $ClaudeCommand --version 2>&1 | Out-String).Trim()
 $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
 $versionOk = $versionMatch.Success -and [version]$versionMatch.Groups[1].Value -ge [version]"2.1.139"
 Add-DoctorCheck -Name "claudeVersion" -Passed $versionOk -Detail $versionText
+$requiredCmdlets = @("ConvertFrom-Json", "ConvertTo-Json")
+$missingCmdlets = @(
+    $requiredCmdlets | Where-Object {
+        $null -eq (Get-Command $_ -ErrorAction SilentlyContinue)
+    }
+)
+Add-DoctorCheck `
+    -Name "powershellRuntime" `
+    -Passed ($missingCmdlets.Count -eq 0) `
+    -Detail $(if ($missingCmdlets.Count -eq 0) {
+        "$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion); required cmdlets available; PSModulePath=$env:PSModulePath"
+    } else {
+        "Missing: $($missingCmdlets -join ', '); PSModulePath=$env:PSModulePath"
+    })
+
+$workerAgentOk = $false
+$workerAgentDetail = "unreadable"
+try {
+    $inlineWorker = Read-FactoryInlineWorkerAgent -Path (Join-Path ([string]$context.pluginRoot) "agents\worker.md")
+    $workerAgentOk = [bool]$inlineWorker.prompt
+    $workerAgentDetail = "$([Text.Encoding]::UTF8.GetByteCount([string]$inlineWorker.prompt)) prompt bytes; inline fallback ready"
+} catch {
+    $workerAgentDetail = $_.Exception.Message
+}
+Add-DoctorCheck -Name "workerAgentDefinition" -Passed $workerAgentOk -Detail $workerAgentDetail
+
+$resolutionCache = if ($null -ne $state.PSObject.Properties["agentResolutionCache"]) { $state.agentResolutionCache } else { $null }
+$resolutionDetail = if ($null -ne $resolutionCache -and [string]$resolutionCache.preferredResolution) {
+    "$($resolutionCache.preferredResolution) for Claude $($resolutionCache.claudeVersion), checked $($resolutionCache.checkedAt)"
+} else {
+    "not probed; the next worker launch will try the native plugin agent first"
+}
+Add-DoctorCheck -Name "workerAgentResolution" -Passed $true -Severity "info" -Detail $resolutionDetail
 
 $manifestPath = Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
 $manifestOk = $false

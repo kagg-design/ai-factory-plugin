@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "worker-launch.ps1")
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 
 if (-not $ClaudeCommand) {
@@ -31,6 +32,8 @@ $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
 $promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
 $eventDirectory = Join-Path $context.eventsPath $safeTaskId
 $previousFactoryPromptPath = $env:CLAUDE_FACTORY_PROMPT_PATH
+$claudeVersion = $null
+$agentResolutionPreference = "plugin"
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -101,6 +104,18 @@ try {
     }
     if ([version]$versionMatch.Groups[1].Value -lt [version]"2.1.139") {
         throw "Claude Code 2.1.139 or newer is required for background sessions; found $versionText."
+    }
+    $claudeVersion = $versionMatch.Groups[1].Value
+    $resolutionState = Read-FactoryJson -Path $context.statePath
+    if (
+        $null -ne $resolutionState.PSObject.Properties["agentResolutionCache"] -and
+        $null -ne $resolutionState.agentResolutionCache -and
+        [string]$resolutionState.agentResolutionCache.claudeVersion -eq $claudeVersion -and
+        [string]$resolutionState.agentResolutionCache.preferredResolution -eq "inline-fallback"
+    ) {
+        $agentResolutionPreference = "inline-fallback"
+    } else {
+        $agentResolutionPreference = "plugin"
     }
 
     $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
@@ -209,7 +224,7 @@ $payloadJson
 
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($promptPath, $prompt, $utf8WithoutBom)
-    $promptSha256 = (Get-FileHash -LiteralPath $promptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $promptSha256 = Get-FactoryFileSha256 -Path $promptPath
 
     $metadata = [ordered]@{
         taskId = $TaskId
@@ -223,6 +238,9 @@ $payloadJson
         promptPath = $promptPath
         promptSha256 = $promptSha256
         startedAt = $now
+        claudeVersion = $claudeVersion
+        agentResolution = $null
+        inlineAgentSha256 = $null
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
@@ -231,14 +249,6 @@ $payloadJson
     } else {
         "auto"
     }
-    $claudeArguments = @(
-        "--plugin-dir", [string]$context.pluginRoot,
-        "--agent", "factory:worker",
-        "--bg",
-        "--name", $sessionName,
-        "--permission-mode", $permissionMode
-    )
-
     $workerModel = if (
         $env:CLAUDE_FACTORY_MODEL -and
         ([string]$config.workerModel -eq "" -or [string]$config.workerModel -eq "inherit")
@@ -247,58 +257,23 @@ $payloadJson
     } else {
         [string]$config.workerModel
     }
-    if ($workerModel -and $workerModel -ne "inherit") {
-        $claudeArguments += @("--model", $workerModel)
-    }
-    if ([string]$config.workerEffort) {
-        $claudeArguments += @("--effort", [string]$config.workerEffort)
-    }
     $shortPrompt = "FACTORY_PROMPT_FILE=$promptPath"
     if ($shortPrompt -match '[\r\n"'']') { throw "Factory prompt pointer contains unsafe command-line characters." }
-    $claudeArguments += $shortPrompt
     $env:CLAUDE_FACTORY_PROMPT_PATH = $promptPath
-
-    Push-Location $worktree
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # Claude Code can emit non-fatal compatibility warnings on stderr while
-        # returning exit code 0. Capture them without turning them into a
-        # terminating PowerShell error; the native exit code remains decisive.
-        $ErrorActionPreference = "Continue"
-        $launchLines = @(& $ClaudeCommand @claudeArguments 2>&1 | ForEach-Object { [string]$_ })
-        $launchExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        Pop-Location
-    }
-    $launchOutput = $launchLines -join [Environment]::NewLine
-    if ($launchExitCode -ne 0) {
-        throw "Claude background launch failed with exit code ${launchExitCode}: $launchOutput"
-    }
-    if ($launchOutput -match '(?i)(no\s+(?:such\s+)?agent|agent\s+[^\r\n]*not\s+found|using\s+(?:the\s+)?default\s+(?:agent|template)|falling\s+back[^\r\n]*(?:agent|template))') {
-        $warningOutput = $launchOutput -replace "\x1b\[[0-9;]*[A-Za-z]", ""
-        $warningBackgroundMatch = [regex]::Match($warningOutput, '(?im)^\s*backgrounded\s+\W+\s*([A-Za-z0-9_-]+)')
-        if ($warningBackgroundMatch.Success) {
-            & $ClaudeCommand stop $warningBackgroundMatch.Groups[1].Value 1> $null 2> $null
-        }
-        throw "Claude did not resolve the required factory:worker agent: $launchOutput"
-    }
-
-    $backgroundId = $null
-    $launchOutputWithoutAnsi = $launchOutput -replace "\x1b\[[0-9;]*[A-Za-z]", ""
-    $backgroundMatch = [regex]::Match($launchOutputWithoutAnsi, '(?im)^\s*backgrounded\s+\W+\s*([A-Za-z0-9_-]+)')
-    if ($backgroundMatch.Success) {
-        $backgroundId = $backgroundMatch.Groups[1].Value
-    }
-    if (-not $backgroundId) {
-        $attachMatch = [regex]::Match($launchOutputWithoutAnsi, '(?im)claude\s+attach\s+([A-Za-z0-9_-]+)')
-        if ($attachMatch.Success) {
-            $backgroundId = $attachMatch.Groups[1].Value
-        }
-    }
-    if (-not $backgroundId) {
-        throw "Claude started without a parseable background session ID: $launchOutput"
-    }
+    $launch = Invoke-FactoryWorkerLaunch `
+        -ClaudeCommand $ClaudeCommand `
+        -PluginRoot ([string]$context.pluginRoot) `
+        -Worktree $worktree `
+        -SessionName $sessionName `
+        -PermissionMode $permissionMode `
+        -ShortPrompt $shortPrompt `
+        -WorkerAgentPath (Join-Path ([string]$context.pluginRoot) "agents\worker.md") `
+        -PreferredResolution $agentResolutionPreference `
+        -Model $workerModel `
+        -Effort ([string]$config.workerEffort)
+    $backgroundId = [string]$launch.backgroundId
+    $launchOutput = [string]$launch.launchOutput
+    $agentResolutionPreference = [string]$launch.agentResolution
 
     $authoritativeRow = $null
     try {
@@ -329,6 +304,8 @@ $payloadJson
     $metadata.sessionId = $sessionId
     $metadata.name = $resolvedSessionName
     $metadata.launchOutput = $launchOutput
+    $metadata.agentResolution = [string]$launch.agentResolution
+    $metadata.inlineAgentSha256 = $launch.inlineAgentSha256
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -345,11 +322,20 @@ $payloadJson
             transcriptPath = $transcriptPath
             lastAssistantMessage = $lastAssistantMessage
             attachCommand = "claude attach $backgroundId"
+            agentResolution = [string]$launch.agentResolution
         }
         Set-FactoryProperty -Target $task -Name "backgroundSession" -Value ([PSCustomObject]$session)
         Set-FactoryProperty -Target $task -Name "agentId" -Value $backgroundId
         Set-FactoryProperty -Target $task -Name "status" -Value $(if ($Mode -eq "interactive") { "planning" } else { "running" })
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
+        Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
+            claudeVersion = $claudeVersion
+            preferredResolution = [string]$launch.agentResolution
+            checkedAt = (Get-FactoryUtcTimestamp)
+            reason = if ([string]$launch.agentResolution -eq "inline-fallback") {
+                "session-only plugin agent was not resolved for background launch"
+            } else { "native plugin agent resolved" }
+        })
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     } finally {
@@ -366,6 +352,10 @@ $payloadJson
         backgroundSession = $session
     } | ConvertTo-Json -Depth 20
 } catch {
+    $nativeAgentUnsupported = (
+        $null -ne $_.Exception.Data["FactoryNativeAgentUnsupported"] -and
+        [bool]$_.Exception.Data["FactoryNativeAgentUnsupported"]
+    )
     $failure = $_.Exception.Message
     $mutex = $null
     try {
@@ -373,6 +363,14 @@ $payloadJson
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+        if ($nativeAgentUnsupported -and $claudeVersion) {
+            Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
+                claudeVersion = $claudeVersion
+                preferredResolution = "inline-fallback"
+                checkedAt = (Get-FactoryUtcTimestamp)
+                reason = "session-only plugin agent was not resolved for background launch"
+            })
+        }
         Set-FactoryProperty -Target $task -Name "error" -Value $failure
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
