@@ -25,6 +25,7 @@
     "scripts/create-worktree.ps1",
     "scripts/factory-common.ps1",
     "scripts/factory-doctor.ps1",
+    "scripts/orchestrator-session.ps1",
     "scripts/project-context.ps1",
     "scripts/reconcile-worker-sessions.ps1",
     "scripts/reject-task.ps1",

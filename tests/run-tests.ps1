@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
+. (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -76,6 +77,9 @@ try {
     Assert-True ($publicSkill.Contains('The tree layout is mandatory')) "Factory status does not mandate the tree template."
     Assert-True ($publicSkill.Contains('Preserve the vertical trunk exactly')) "Factory status does not preserve a solid tree trunk."
     Assert-True ($publicSkill.Contains('one primary exact')) "Factory status does not require a next action."
+    Assert-True ($publicSkill.Contains('full canonical task URL as the first nested detail')) "Factory status does not require the task URL."
+    Assert-True ($publicSkill.Contains('URL: https://app.asana.com/0/PROJECT/TASK_ID')) "Factory status template does not show task URLs."
+    Assert-True ($publicSkill.Contains('full title, full canonical task URL, completion summary')) "Completed status history omits task identity or URL."
     Assert-True ($publicSkill.Contains('`/factory status done` for history')) "Factory status does not collapse completed history."
     Assert-True ($publicSkill.Contains('Never claim `/factory retry` works for a')) "Factory status does not distinguish manual holds."
 
@@ -87,6 +91,22 @@ try {
     Assert-True ($launcherSource.Contains('[string]$Name = "Claude Factory Orchestrator"')) "Launcher does not use the orchestrator display name by default."
     Assert-True ($launcherSource.Contains('"--name", $Name')) "Launcher does not set the Claude session display name."
     Assert-True ($launcherSource.Contains('"--add-dir", $standaloneRoot')) "Launcher does not load the /factory standalone skill."
+    Assert-True ($launcherSource.Contains('"--session-id", $newSessionId')) "Launcher does not assign a durable orchestrator session ID."
+    Assert-True ($launcherSource.Contains('@("--resume", $storedSessionId)')) "Launcher does not resume the stored orchestrator conversation."
+    Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
+
+    $orchestratorRows = @(
+        [pscustomobject]@{ id = "oldbg"; sessionId = "11111111-1111-4111-8111-111111111111"; kind = "background"; name = "Claude Factory Orchestrator"; cwd = "C:\repo"; state = "blocked"; startedAt = 1 },
+        [pscustomobject]@{ id = "newbg"; sessionId = "22222222-2222-4222-8222-222222222222"; kind = "background"; name = "Claude Factory Orchestrator"; cwd = "C:\repo"; state = "working"; startedAt = 2 },
+        [pscustomobject]@{ id = "donebg"; sessionId = "33333333-3333-4333-8333-333333333333"; kind = "background"; name = "Claude Factory Orchestrator"; cwd = "C:\repo"; state = "done"; startedAt = 3 },
+        [pscustomobject]@{ id = "other"; sessionId = "44444444-4444-4444-8444-444444444444"; kind = "background"; name = "Claude Factory Orchestrator"; cwd = "C:\other"; state = "working"; startedAt = 4 }
+    )
+    $matchingOrchestrators = @(Get-FactoryMatchingOrchestratorRows -Rows $orchestratorRows -RepositoryRoot "C:\repo" -Name "Claude Factory Orchestrator")
+    Assert-Equal 3 $matchingOrchestrators.Count "Orchestrator matching mixed repositories or names."
+    $newestOrchestrator = Select-FactoryBackgroundOrchestrator -Rows $matchingOrchestrators
+    Assert-Equal "newbg" ([string]$newestOrchestrator.id) "Launcher did not choose the newest live background orchestrator."
+    $preferredOrchestrator = Select-FactoryBackgroundOrchestrator -Rows $matchingOrchestrators -PreferredSessionId "11111111-1111-4111-8111-111111111111"
+    Assert-Equal "oldbg" ([string]$preferredOrchestrator.id) "Launcher ignored the stored orchestrator identity."
 
     $workerLauncherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Raw
     $workerLaunchHelperSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\worker-launch.ps1") -Raw
@@ -138,6 +158,45 @@ try {
         ConvertFrom-Json
     Assert-Equal 3 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 3 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+
+    $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
+    $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $orchestratorArgv
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Fresh orchestrator launcher fixture failed." }
+    $firstOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
+    $newSessionIndex = [Array]::IndexOf($firstOrchestratorArgs, "--session-id")
+    Assert-True ($newSessionIndex -ge 0 -and $newSessionIndex + 1 -lt $firstOrchestratorArgs.Count) "Fresh launcher did not assign an orchestrator session ID."
+    $orchestratorSessionId = $firstOrchestratorArgs[$newSessionIndex + 1]
+    $parsedOrchestratorSessionId = [Guid]::Empty
+    Assert-True ([Guid]::TryParse($orchestratorSessionId, [ref]$parsedOrchestratorSessionId)) "Launcher assigned an invalid orchestrator UUID."
+    $orchestratorIdentityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
+    $orchestratorIdentity = Read-FactoryJson -Path $orchestratorIdentityPath
+    Assert-Equal $orchestratorSessionId ([string]$orchestratorIdentity.sessionId) "Launcher did not persist the orchestrator UUID."
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Stored orchestrator resume fixture failed." }
+    $resumedOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
+    $resumeIndex = [Array]::IndexOf($resumedOrchestratorArgs, "--resume")
+    Assert-True ($resumeIndex -ge 0 -and $resumeIndex + 1 -lt $resumedOrchestratorArgs.Count) "Repeated launcher did not resume the stored orchestrator."
+    Assert-Equal $orchestratorSessionId $resumedOrchestratorArgs[$resumeIndex + 1] "Repeated launcher resumed a different conversation."
+
+    $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
+    $env:CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID = $orchestratorSessionId
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Background orchestrator attach fixture failed." }
+    $attachedOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
+    Assert-Equal "attach" $attachedOrchestratorArgs[0] "Launcher did not attach the existing background orchestrator."
+    Assert-Equal "orch1234" $attachedOrchestratorArgs[1] "Launcher attached the wrong background orchestrator."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
+
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -New 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Explicit new orchestrator fixture failed." }
+    $newOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
+    $replacementSessionIndex = [Array]::IndexOf($newOrchestratorArgs, "--session-id")
+    Assert-True ($replacementSessionIndex -ge 0 -and $replacementSessionIndex + 1 -lt $newOrchestratorArgs.Count) "-New did not create a replacement orchestrator identity."
+    Assert-True ($newOrchestratorArgs[$replacementSessionIndex + 1] -ne $orchestratorSessionId) "-New reused the previous orchestrator UUID."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
 
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
@@ -726,6 +785,7 @@ try {
     }
     $missingAgentFailed = $missingAgentExitCode -ne 0
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
     Assert-True $missingAgentFailed "Missing-agent warning did not abort launch."
     $failedAgentState = Read-FactoryJson -Path $context.statePath
     $failedAgentTask = @($failedAgentState.tasks | Where-Object { [string]$_.id -eq 'missing-agent-task' })[0]

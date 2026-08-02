@@ -60,6 +60,15 @@ public static class FakeClaude
                 return 0;
             }
             string cwd = Json(Env("CLAUDE_FACTORY_TEST_AGENT_CWD"));
+            string orchestratorSessionId = Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID");
+            if (!String.IsNullOrEmpty(orchestratorSessionId))
+            {
+                Console.WriteLine(
+                    "[{\"id\":\"orch1234\",\"sessionId\":\"" + Json(orchestratorSessionId) +
+                    "\",\"state\":\"blocked\",\"kind\":\"background\",\"name\":\"Claude Factory Orchestrator\",\"cwd\":\"" + cwd + "\",\"startedAt\":10}]"
+                );
+                return 0;
+            }
             string status = Env("CLAUDE_FACTORY_TEST_AGENT_STATUS");
             if (String.IsNullOrEmpty(status)) status = "working";
             Console.WriteLine(

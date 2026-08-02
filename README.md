@@ -65,6 +65,13 @@ It does not add a task, create a task commit, merge, or push by itself.
 Only one factory lead session can run for a repository. Different repositories
 can run separate factory sessions at the same time.
 
+Normal startup reuses the same orchestrator conversation. The launcher stores
+its exact UUID in the private project runtime. If that conversation is still a
+background Agent View row, startup attaches to its short ID; after an ordinary
+`Ctrl+C` exit, startup resumes the stored UUID. Use `-New` only when a genuinely
+new orchestrator conversation is required and no matching live orchestrator
+exists.
+
 Override the lead session name when needed:
 
 ```powershell
@@ -79,9 +86,16 @@ Open the resume picker in the correct repository context:
 start-factory -Resume
 ```
 
-For normal factory startup, omit both resume flags. `-Continue` selects the
-newest conversation in the repository and may therefore resume an unrelated
-scheduled task or development conversation.
+For normal factory startup, omit all mode flags: the stored orchestrator is
+resumed automatically. `-Continue` selects the newest conversation in the
+repository and may therefore resume an unrelated scheduled task or development
+conversation. `-Resume` remains a manual recovery picker for legacy sessions.
+
+Start a deliberately new orchestrator conversation:
+
+```powershell
+start-factory -New
+```
 
 Continue the repository's most recent conversation:
 
@@ -310,8 +324,9 @@ prerequisites, side effects, safety behavior, and the usual next step for one
 command.
 
 `/factory status` shows unfinished tasks in one continuous workflow-style tree
-with title, reason, session, and exact next command. Completed rows are collapsed by
-default. Use `/factory status held`, `/factory status awaiting-review`,
+with full task ID, untruncated title, canonical task URL, reason, session, and
+exact next command. Completed rows are collapsed by default. Use
+`/factory status held`, `/factory status awaiting-review`,
 `/factory status done`, or `/factory status all` to filter the report. Status is
 read-only: it reports commands but never launches or changes a task by itself.
 

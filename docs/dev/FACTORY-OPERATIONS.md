@@ -28,6 +28,11 @@ the orchestrator conversation:
 Closing the orchestrator or starting a fresh orchestrator conversation does
 not remove tasks, worker sessions, branches, commits, or worktrees.
 
+The launcher also stores the orchestrator's exact conversation UUID in the
+private project runtime. Normal startup attaches to that conversation when it
+is in Agent View, or resumes it after an ordinary `Ctrl+C` exit. This prevents
+accidental duplicate orchestrators from normal repeated startup.
+
 ## 2. Safe startup
 
 Start the factory from the target Git repository:
@@ -55,8 +60,9 @@ Claude Code interprets `--continue` as "continue the newest conversation in
 the current directory." That conversation may belong to a scheduled task,
 ordinary development work, or another session rather than the factory.
 
-Start the factory without `-Continue` for normal use. If the old orchestrator
-conversation history is specifically required, use:
+Start the factory without flags for normal use; it resumes the stored
+orchestrator exactly. For manual recovery of a legacy conversation that predates
+the stored identity, use:
 
 ```powershell
 start-factory.ps1 -Resume
@@ -65,6 +71,10 @@ start-factory.ps1 -Resume
 In the resume picker, inspect the conversation preview instead of relying only
 on its name. An unrelated resumed session may previously have been renamed
 `Claude Factory Orchestrator`.
+
+Use `start-factory.ps1 -New` only to deliberately replace the stored
+conversation. The launcher still refuses to create a new one while a matching
+interactive or background orchestrator is live.
 
 ## 3. Where commands belong
 
@@ -137,9 +147,10 @@ Use filters when the default view is too broad:
 /factory status all
 ```
 
-`status done` is history: it shows task ID, title, completion summary, and the
-corresponding `inspect` command. It does not present an old attach command as
-the main action. The default view omits completed task rows.
+`status done` is history: it shows task ID, full title, canonical task URL,
+completion summary, and the corresponding `inspect` command. It does not
+present an old attach command as the main action. The default view omits
+completed task rows.
 
 An absent scheduler is expected when every unfinished task requires an operator
 decision. It is recreated when work is queued, a task is approved, the factory

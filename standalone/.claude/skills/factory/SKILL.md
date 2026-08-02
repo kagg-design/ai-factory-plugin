@@ -201,7 +201,11 @@ Default `status` rules:
    uses `└─`. Every task detail is a nested child, so its connector lines stay
    attached to that task.
 5. Include for each task:
-   - full task ID and untruncated title on the task node;
+   - full task ID and untruncated title on the task node; never replace either
+     with a session name, slug, status label, or summary;
+   - `URL:` with the full canonical task URL as the first nested detail. Do not
+     shorten or hide it behind link text. If legacy state has no URL, print
+     `URL: unavailable` explicitly;
    - one short `What:` summary from `brief` when the title is insufficient;
    - factory status in plain language;
    - `Reason:` from `holdReason`, `error`, blocking reason, or pending
@@ -222,12 +226,14 @@ The tree layout is mandatory and must follow this shape:
 │  ○ idle · workers 0/3 · scheduler sleeping
 ├─ ◆ NEEDS YOUR ACTION · 2
 │  ├─ REVIEW · TASK_ID — Full task title
+│  │  ├─ URL: https://app.asana.com/0/PROJECT/TASK_ID
 │  │  ├─ State: ready for review
 │  │  ├─ Commit: abc12345
 │  │  ├─ Session: bg123456 · done
 │  │  ├─ → Next: /factory review TASK_ID
 │  │  └─ Open: /factory chat TASK_ID
 │  └─ HELD · TASK_ID — Full task title
+│     ├─ URL: https://app.asana.com/0/PROJECT/TASK_ID
 │     ├─ State: held by operator
 │     ├─ Reason: held by operator
 │     ├─ Session: none
@@ -268,8 +274,9 @@ Choose `Next:` from the actual task data:
 
 `/factory status <state>` shows only that state. In particular, `status held`
 must print the same actionable cards, while `status done` prints compact rows
-with task ID, title, completion summary, and `/factory inspect <id>`; session
-attach commands are not useful as the primary action for completed tasks.
+with task ID, full title, full canonical task URL, completion summary, and
+`/factory inspect <id>`; session attach commands are not useful as the primary
+action for completed tasks.
 `/factory status all` includes the default actionable view plus compact done
 history.
 

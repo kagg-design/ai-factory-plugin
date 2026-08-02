@@ -4,17 +4,28 @@ param(
     [string]$Name = "Claude Factory Orchestrator",
     [switch]$Resume,
     [switch]$Continue,
+    [switch]$New,
+    [string]$ClaudeCommand = "claude",
+    [string]$RuntimeHome = "",
     [string]$Model = ""
 )
 
 $ErrorActionPreference = "Stop"
-if ($Resume -and $Continue) {
-    throw "-Resume and -Continue are mutually exclusive."
+$selectedModes = @(@($Resume, $Continue, $New) | Where-Object { $_ })
+if ($selectedModes.Count -gt 1) {
+    throw "-Resume, -Continue, and -New are mutually exclusive."
 }
 
 $pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $standaloneRoot = Join-Path $pluginRoot "standalone"
-$env:CLAUDE_FACTORY_HOME = Join-Path $pluginRoot "runtime"
+. (Join-Path $pluginRoot "scripts\factory-common.ps1")
+. (Join-Path $pluginRoot "scripts\worker-launch.ps1")
+. (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
+$env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) {
+    [IO.Path]::GetFullPath($RuntimeHome)
+} else {
+    Join-Path $pluginRoot "runtime"
+}
 if ($Model) {
     $env:CLAUDE_FACTORY_MODEL = $Model
 }
@@ -43,6 +54,68 @@ try {
     Write-Host "Command: /factory" -ForegroundColor Cyan
     Write-Host ""
 
+    $identityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
+    $identity = if (Test-Path -LiteralPath $identityPath) {
+        try { Read-FactoryJson -Path $identityPath } catch { $null }
+    } else { $null }
+    $storedSessionId = if (
+        -not $New -and $null -ne $identity -and
+        [string]$identity.repositoryRoot -and [string]$identity.sessionId -and
+        [string]$identity.name -ceq $Name -and
+        (Test-FactorySamePath -Left ([string]$identity.repositoryRoot) -Right ([string]$context.repositoryRoot))
+    ) { [string]$identity.sessionId } else { "" }
+
+    $agentRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
+    $matchingRows = @(Get-FactoryMatchingOrchestratorRows `
+        -Rows $agentRows `
+        -RepositoryRoot ([string]$context.repositoryRoot) `
+        -Name $Name)
+    $interactiveRows = @($matchingRows | Where-Object {
+        [string]$_.kind -eq "interactive" -and -not (Test-FactoryTerminalAgentRow -Row $_)
+    })
+    if ($interactiveRows.Count -gt 0) {
+        $interactiveIds = @($interactiveRows | ForEach-Object {
+            if ($null -ne $_.PSObject.Properties["sessionId"]) { [string]$_.sessionId } else { "unknown" }
+        }) -join ", "
+        throw "An interactive factory orchestrator is already running for '$($context.repositoryRoot)' (session: $interactiveIds)."
+    }
+
+    $background = Select-FactoryBackgroundOrchestrator `
+        -Rows $matchingRows `
+        -PreferredSessionId $storedSessionId
+    if ($null -ne $background) {
+        $backgroundId = [string]$background.id
+        if ($New) {
+            throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Attach to it or stop/remove it first."
+        }
+        $liveBackgroundRows = @($matchingRows | Where-Object {
+            [string]$_.kind -eq "background" -and
+            $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -and
+            -not (Test-FactoryTerminalAgentRow -Row $_)
+        })
+        if ($liveBackgroundRows.Count -gt 1) {
+            $otherIds = @($liveBackgroundRows | Where-Object {
+                [string]$_.id -ne $backgroundId
+            } | ForEach-Object { [string]$_.id }) -join ", "
+            Write-Warning "Multiple live orchestrator rows exist. Reusing '$backgroundId'; inspect obsolete rows in Agent View: $otherIds"
+        }
+        $backgroundSessionId = if ($null -ne $background.PSObject.Properties["sessionId"]) {
+            [string]$background.sessionId
+        } else { $storedSessionId }
+        if ($backgroundSessionId) {
+            Write-FactoryOrchestratorIdentity `
+                -Path $identityPath `
+                -RepositoryRoot ([string]$context.repositoryRoot) `
+                -Name $Name `
+                -SessionId $backgroundSessionId `
+                -BackgroundId $backgroundId
+        }
+        Write-Host "Reusing background orchestrator: $backgroundId" -ForegroundColor Green
+        Set-Location $context.repositoryRoot
+        & $ClaudeCommand attach $backgroundId
+        exit $LASTEXITCODE
+    }
+
     $claudeArguments = @(
         "--plugin-dir", $pluginRoot,
         "--add-dir", $standaloneRoot,
@@ -57,10 +130,21 @@ try {
         $claudeArguments += "--resume"
     } elseif ($Continue) {
         $claudeArguments += "--continue"
+    } elseif ($storedSessionId) {
+        Write-Host "Resuming factory conversation: $storedSessionId" -ForegroundColor Green
+        $claudeArguments += @("--resume", $storedSessionId)
+    } else {
+        $newSessionId = [Guid]::NewGuid().ToString()
+        Write-FactoryOrchestratorIdentity `
+            -Path $identityPath `
+            -RepositoryRoot ([string]$context.repositoryRoot) `
+            -Name $Name `
+            -SessionId $newSessionId
+        $claudeArguments += @("--session-id", $newSessionId)
     }
 
     Set-Location $context.repositoryRoot
-    & claude @claudeArguments
+    & $ClaudeCommand @claudeArguments
     exit $LASTEXITCODE
 } finally {
     if ($ownsMutex) {

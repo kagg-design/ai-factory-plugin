@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Reused one exact per-repository orchestrator conversation across repeated
+  startup, attaching its Agent View row or resuming its stored UUID, with
+  explicit `-New` replacement semantics.
+- Required `/factory status` task nodes and completed history to show both the
+  untruncated task title and full canonical source URL.
 - Removed completed worker sessions from Claude Agent View after successful
   `/factory cleanup`, with non-destructive warning behavior if session removal
   is unavailable.
