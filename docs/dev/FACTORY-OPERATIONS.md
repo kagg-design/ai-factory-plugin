@@ -443,7 +443,18 @@ same answer refreshes the file without duplicating the pointer or attempt.
 A worker session reports `agentResolution: plugin` when Claude resolved the
 session-only plugin agent directly. `inline-fallback` means the launcher safely
 stopped a default-template session and supplied the same `agents/worker.md`
-prompt inline. That choice is cached only for the current Claude Code version.
+prompt inline. `system-prompt` means both agent-resolution forms were rejected,
+their stray sessions were stopped, and the launcher appended a private,
+byte-identical copy of the stripped worker body to Claude's default system
+prompt without `--agent`. That last path keeps model and effort CLI flags but
+does not apply the agent frontmatter name, description, `maxTurns`, or tools
+restriction. The active path, per-path outcomes, prompt hash, and accepted
+deviations are audited. The choice is cached only for the current Claude Code
+version; an older `inline-fallback` cache migrates to `system-prompt`, while a
+new CLI version probes the plugin path again.
+
+`/factory doctor` treats the resolution check as required. A cache proving that
+plugin, inline, and system-prompt paths all failed makes the factory unhealthy.
 
 If the launcher reports that a factory is already running, inspect Agent View
 and other terminals first. Only one lead factory process may run for a

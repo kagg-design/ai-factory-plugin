@@ -48,7 +48,9 @@ public static class FakeClaude
     {
         if (args.Length > 0 && args[0] == "--version")
         {
-            Console.WriteLine("2.1.218 (Claude Code)");
+            string version = Env("CLAUDE_FACTORY_TEST_VERSION");
+            if (String.IsNullOrEmpty(version)) version = "2.1.218";
+            Console.WriteLine(version + " (Claude Code)");
             return 0;
         }
 
@@ -72,7 +74,8 @@ public static class FakeClaude
             string status = Env("CLAUDE_FACTORY_TEST_AGENT_STATUS");
             if (String.IsNullOrEmpty(status)) status = "working";
             Console.WriteLine(
-                "[{\"id\":\"stale000\",\"sessionId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"status\":\"stopped\",\"kind\":\"background\",\"name\":\"factory-test-task-test-task\",\"cwd\":\"" + cwd + "\",\"transcriptPath\":\"foreign-transcript\",\"lastAssistantMessage\":\"foreign\"}," +
+                "[{\"sessionId\":\"interactive-session\",\"status\":\"idle\",\"kind\":\"interactive\",\"name\":\"unrelated interactive session\",\"cwd\":\"" + cwd + "\"}," +
+                "{\"id\":\"stale000\",\"sessionId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"status\":\"stopped\",\"kind\":\"background\",\"name\":\"factory-test-task-test-task\",\"cwd\":\"" + cwd + "\",\"transcriptPath\":\"foreign-transcript\",\"lastAssistantMessage\":\"foreign\"}," +
                 "{\"id\":\"test1234\",\"sessionId\":\"" + SessionId + "\",\"status\":\"" + status + "\",\"kind\":\"background\",\"name\":\"factory-test-task-test-task\",\"cwd\":\"" + cwd + "\",\"transcriptPath\":\"live-transcript\",\"lastAssistantMessage\":\"live\",\"startedAt\":1}]"
             );
             return 0;
@@ -84,7 +87,7 @@ public static class FakeClaude
             string stopFile = Env("CLAUDE_FACTORY_TEST_STOP_FILE");
             if (!String.IsNullOrEmpty(stopFile))
             {
-                File.WriteAllText(stopFile, stoppedId, new UTF8Encoding(false));
+                File.AppendAllText(stopFile, stoppedId + Environment.NewLine, new UTF8Encoding(false));
             }
             return 0;
         }
@@ -117,14 +120,27 @@ public static class FakeClaude
         {
             File.Copy(promptPath, promptCopy, true);
         }
+        string systemPromptCopy = Env("CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY");
+        string systemPromptPath = After(args, "--append-system-prompt-file");
+        if (!String.IsNullOrEmpty(systemPromptCopy) && !String.IsNullOrEmpty(systemPromptPath))
+        {
+            File.Copy(systemPromptPath, systemPromptCopy, true);
+        }
 
         int launchNumber = Increment(Env("CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE"));
         string behavior = Env("CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR");
         bool inline = Has(args, "--agents");
+        bool systemPrompt = Has(args, "--append-system-prompt-file");
         bool fallback = Env("CLAUDE_FACTORY_TEST_MISSING_AGENT") == "1" ||
             behavior == "fallback-always" ||
-            (behavior == "fallback-once" && !inline);
-        string backgroundId = fallback ? "fallback" + launchNumber.ToString() : "test1234";
+            (behavior == "fallback-once" && !inline) ||
+            (behavior == "fallback-to-system" && !systemPrompt) ||
+            (behavior == "fallback-all-three" && !systemPrompt);
+        bool systemFailure = systemPrompt && (
+            behavior == "fallback-all-three" ||
+            Env("CLAUDE_FACTORY_TEST_MISSING_AGENT") == "1"
+        );
+        string backgroundId = fallback || systemFailure ? "fallback" + launchNumber.ToString() : "test1234";
         if (fallback)
         {
             Console.Error.WriteLine(
@@ -135,6 +151,7 @@ public static class FakeClaude
         Console.Error.WriteLine("Warning: benign background-launch warning");
         Console.WriteLine("backgrounded - " + backgroundId + " - factory-test-task");
         Console.WriteLine("claude attach " + backgroundId);
+        if (systemFailure) return 1;
         return 0;
     }
 }

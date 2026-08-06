@@ -30,6 +30,7 @@ $worktree = $null
 $sessionName = $null
 $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
 $promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
+$systemPromptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-worker-system-prompt.txt"
 $eventDirectory = Join-Path $context.eventsPath $safeTaskId
 $previousFactoryPromptPath = $env:CLAUDE_FACTORY_PROMPT_PATH
 $claudeVersion = $null
@@ -64,6 +65,7 @@ try {
         $previousAttempts + 1
     }
     $promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
+    $systemPromptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-worker-system-prompt.txt"
 
     $branch = if ([string]$task.branch) {
         [string]$task.branch
@@ -107,15 +109,25 @@ try {
     }
     $claudeVersion = $versionMatch.Groups[1].Value
     $resolutionState = Read-FactoryJson -Path $context.statePath
-    if (
+    $resolutionCache = if (
         $null -ne $resolutionState.PSObject.Properties["agentResolutionCache"] -and
-        $null -ne $resolutionState.agentResolutionCache -and
-        [string]$resolutionState.agentResolutionCache.claudeVersion -eq $claudeVersion -and
-        [string]$resolutionState.agentResolutionCache.preferredResolution -eq "inline-fallback"
+        $null -ne $resolutionState.agentResolutionCache
+    ) { $resolutionState.agentResolutionCache } else { $null }
+    if (
+        $null -ne $resolutionCache -and
+        $null -ne $resolutionCache.PSObject.Properties["claudeVersion"] -and
+        [string]$resolutionCache.claudeVersion -eq $claudeVersion
     ) {
-        $agentResolutionPreference = "inline-fallback"
-    } else {
-        $agentResolutionPreference = "plugin"
+        $cachedPreference = if ($null -ne $resolutionCache.PSObject.Properties["preferredResolution"]) {
+            [string]$resolutionCache.preferredResolution
+        } else { "" }
+        $agentResolutionPreference = switch ($cachedPreference) {
+            "system-prompt" { "system-prompt"; break }
+            # Legacy inline cache entries are known-bad on the affected CLI and
+            # migrate directly to the system-prompt path for the same version.
+            "inline-fallback" { "system-prompt"; break }
+            default { "plugin" }
+        }
     }
 
     $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
@@ -241,6 +253,10 @@ $payloadJson
         claudeVersion = $claudeVersion
         agentResolution = $null
         inlineAgentSha256 = $null
+        systemPromptPath = $null
+        systemPromptSha256 = $null
+        agentDefinitionDeviations = @()
+        resolutionOutcomes = $null
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
@@ -268,6 +284,7 @@ $payloadJson
         -PermissionMode $permissionMode `
         -ShortPrompt $shortPrompt `
         -WorkerAgentPath (Join-Path ([string]$context.pluginRoot) "agents\worker.md") `
+        -SystemPromptPath $systemPromptPath `
         -PreferredResolution $agentResolutionPreference `
         -Model $workerModel `
         -Effort ([string]$config.workerEffort)
@@ -275,25 +292,27 @@ $payloadJson
     $launchOutput = [string]$launch.launchOutput
     $agentResolutionPreference = [string]$launch.agentResolution
 
-    $authoritativeRow = $null
-    try {
-        $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and $agentsText) {
-            $parsedAgentRows = $agentsText | ConvertFrom-Json
-            foreach ($candidate in @($parsedAgentRows | ForEach-Object { $_ })) {
-                if ($null -ne $candidate.PSObject.Properties["id"] -and [string]$candidate.id -eq $backgroundId) {
-                    $authoritativeRow = $candidate
-                    break
+    $authoritativeRow = $launch.authoritativeRow
+    if ($null -eq $authoritativeRow) {
+        try {
+            $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $agentsText) {
+                $parsedAgentRows = $agentsText | ConvertFrom-Json
+                foreach ($candidate in @($parsedAgentRows | ForEach-Object { $_ })) {
+                    if ($null -ne $candidate.PSObject.Properties["id"] -and [string]$candidate.id -eq $backgroundId) {
+                        $authoritativeRow = $candidate
+                        break
+                    }
                 }
             }
+        } catch {
+            $authoritativeRow = $null
         }
-    } catch {
-        $authoritativeRow = $null
     }
-    $sessionId = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.sessionId) { [string]$authoritativeRow.sessionId } else { $null }
-    $resolvedSessionName = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.name) { [string]$authoritativeRow.name } else { $sessionName }
-    $transcriptPath = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.transcriptPath) { [string]$authoritativeRow.transcriptPath } else { $null }
-    $lastAssistantMessage = if ($null -ne $authoritativeRow -and [string]$authoritativeRow.lastAssistantMessage) { [string]$authoritativeRow.lastAssistantMessage } else { $null }
+    $sessionId = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["sessionId"] -and [string]$authoritativeRow.sessionId) { [string]$authoritativeRow.sessionId } else { $null }
+    $resolvedSessionName = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["name"] -and [string]$authoritativeRow.name) { [string]$authoritativeRow.name } else { $sessionName }
+    $transcriptPath = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["transcriptPath"] -and [string]$authoritativeRow.transcriptPath) { [string]$authoritativeRow.transcriptPath } else { $null }
+    $lastAssistantMessage = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["lastAssistantMessage"] -and [string]$authoritativeRow.lastAssistantMessage) { [string]$authoritativeRow.lastAssistantMessage } else { $null }
     $resolvedState = if ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["state"] -and [string]$authoritativeRow.state) {
         [string]$authoritativeRow.state
     } elseif ($null -ne $authoritativeRow -and $null -ne $authoritativeRow.PSObject.Properties["status"] -and [string]$authoritativeRow.status) {
@@ -306,6 +325,10 @@ $payloadJson
     $metadata.launchOutput = $launchOutput
     $metadata.agentResolution = [string]$launch.agentResolution
     $metadata.inlineAgentSha256 = $launch.inlineAgentSha256
+    $metadata.systemPromptPath = $launch.systemPromptPath
+    $metadata.systemPromptSha256 = $launch.systemPromptSha256
+    $metadata.agentDefinitionDeviations = @($launch.agentDefinitionDeviations)
+    $metadata.resolutionOutcomes = $launch.resolutionOutcomes
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -329,12 +352,17 @@ $payloadJson
         Set-FactoryProperty -Target $task -Name "status" -Value $(if ($Mode -eq "interactive") { "planning" } else { "running" })
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
         Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
+            schemaVersion = 2
             claudeVersion = $claudeVersion
             preferredResolution = [string]$launch.agentResolution
+            outcomes = $launch.resolutionOutcomes
+            deviations = @($launch.agentDefinitionDeviations)
             checkedAt = (Get-FactoryUtcTimestamp)
-            reason = if ([string]$launch.agentResolution -eq "inline-fallback") {
-                "session-only plugin agent was not resolved for background launch"
-            } else { "native plugin agent resolved" }
+            reason = switch ([string]$launch.agentResolution) {
+                "inline-fallback" { "plugin agent was not resolved; inline agent resolved"; break }
+                "system-prompt" { "plugin and inline agents were not resolved; additive system-prompt file resolved"; break }
+                default { "native plugin agent resolved" }
+            }
         })
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -356,6 +384,10 @@ $payloadJson
         $null -ne $_.Exception.Data["FactoryNativeAgentUnsupported"] -and
         [bool]$_.Exception.Data["FactoryNativeAgentUnsupported"]
     )
+    $resolutionOutcomes = $_.Exception.Data["FactoryResolutionOutcomes"]
+    $agentDefinitionDeviations = if ($null -ne $_.Exception.Data["FactoryAgentDefinitionDeviations"]) {
+        @($_.Exception.Data["FactoryAgentDefinitionDeviations"])
+    } else { @() }
     $failure = $_.Exception.Message
     $mutex = $null
     try {
@@ -363,12 +395,17 @@ $payloadJson
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         Set-FactoryProperty -Target $task -Name "status" -Value "failed"
-        if ($nativeAgentUnsupported -and $claudeVersion) {
+        if ($null -ne $resolutionOutcomes -and $claudeVersion) {
             Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
+                schemaVersion = 2
                 claudeVersion = $claudeVersion
-                preferredResolution = "inline-fallback"
+                preferredResolution = $null
+                outcomes = $resolutionOutcomes
+                deviations = $agentDefinitionDeviations
                 checkedAt = (Get-FactoryUtcTimestamp)
-                reason = "session-only plugin agent was not resolved for background launch"
+                reason = if ($nativeAgentUnsupported) {
+                    "no verified worker agent resolution path completed"
+                } else { "worker launch failed before a resolution path completed" }
             })
         }
         Set-FactoryProperty -Target $task -Name "error" -Value $failure

@@ -51,19 +51,51 @@ $workerAgentDetail = "unreadable"
 try {
     $inlineWorker = Read-FactoryInlineWorkerAgent -Path (Join-Path ([string]$context.pluginRoot) "agents\worker.md")
     $workerAgentOk = [bool]$inlineWorker.prompt
-    $workerAgentDetail = "$([Text.Encoding]::UTF8.GetByteCount([string]$inlineWorker.prompt)) prompt bytes; inline fallback ready"
+    $maxTurnsDetail = if ($null -ne $inlineWorker.maxTurns) {
+        "; maxTurns $($inlineWorker.maxTurns) is not enforced on that fallback"
+    } else { "" }
+    $workerAgentDetail = "$([Text.Encoding]::UTF8.GetByteCount([string]$inlineWorker.prompt)) prompt bytes; additive system-prompt file fallback ready$maxTurnsDetail"
 } catch {
     $workerAgentDetail = $_.Exception.Message
 }
 Add-DoctorCheck -Name "workerAgentDefinition" -Passed $workerAgentOk -Detail $workerAgentDetail
 
 $resolutionCache = if ($null -ne $state.PSObject.Properties["agentResolutionCache"]) { $state.agentResolutionCache } else { $null }
-$resolutionDetail = if ($null -ne $resolutionCache -and [string]$resolutionCache.preferredResolution) {
-    "$($resolutionCache.preferredResolution) for Claude $($resolutionCache.claudeVersion), checked $($resolutionCache.checkedAt)"
+$currentClaudeVersion = if ($versionMatch.Success) { $versionMatch.Groups[1].Value } else { "" }
+$cacheVersion = if ($null -ne $resolutionCache -and $null -ne $resolutionCache.PSObject.Properties["claudeVersion"]) {
+    [string]$resolutionCache.claudeVersion
+} else { "" }
+$cacheSameVersion = [bool]$currentClaudeVersion -and $cacheVersion -eq $currentClaudeVersion
+$cachedPreference = if ($null -ne $resolutionCache -and $null -ne $resolutionCache.PSObject.Properties["preferredResolution"]) {
+    [string]$resolutionCache.preferredResolution
+} else { "" }
+$cachedOutcomes = if ($null -ne $resolutionCache -and $null -ne $resolutionCache.PSObject.Properties["outcomes"]) {
+    $resolutionCache.outcomes
+} else { $null }
+$pluginOutcome = if ($null -ne $cachedOutcomes -and $null -ne $cachedOutcomes.PSObject.Properties["plugin"]) { [string]$cachedOutcomes.plugin } else { "" }
+$inlineOutcome = if ($null -ne $cachedOutcomes -and $null -ne $cachedOutcomes.PSObject.Properties["inlineFallback"]) { [string]$cachedOutcomes.inlineFallback } else { "" }
+$systemOutcome = if ($null -ne $cachedOutcomes -and $null -ne $cachedOutcomes.PSObject.Properties["systemPrompt"]) { [string]$cachedOutcomes.systemPrompt } else { "" }
+$terminalFailures = @("failed", "unsupported")
+$noWorkingResolution = (
+    $cacheSameVersion -and
+    -not $cachedPreference -and
+    $pluginOutcome -in $terminalFailures -and
+    $inlineOutcome -in $terminalFailures -and
+    $systemOutcome -in $terminalFailures
+)
+$checkedAt = if ($null -ne $resolutionCache -and $null -ne $resolutionCache.PSObject.Properties["checkedAt"]) { [string]$resolutionCache.checkedAt } else { "unknown time" }
+$resolutionDetail = if ($noWorkingResolution) {
+    "no working resolution for Claude $currentClaudeVersion (plugin=$pluginOutcome, inline=$inlineOutcome, system-prompt=$systemOutcome); last checked $checkedAt"
+} elseif ($cacheSameVersion -and $cachedPreference -eq "inline-fallback") {
+    "legacy inline-fallback cache for Claude $currentClaudeVersion will migrate to additive system-prompt on the next launch"
+} elseif ($cacheSameVersion -and $cachedPreference) {
+    "$cachedPreference for Claude $currentClaudeVersion, checked $checkedAt"
+} elseif ($cacheVersion -and -not $cacheSameVersion) {
+    "cached result is for Claude $cacheVersion; Claude $currentClaudeVersion will probe plugin -> inline -> system-prompt"
 } else {
-    "not probed; the next worker launch will try the native plugin agent first"
+    "not probed; the next worker launch will try plugin -> inline -> additive system-prompt file"
 }
-Add-DoctorCheck -Name "workerAgentResolution" -Passed $true -Severity "info" -Detail $resolutionDetail
+Add-DoctorCheck -Name "workerAgentResolution" -Passed ($workerAgentOk -and $versionOk -and -not $noWorkingResolution) -Severity "required" -Detail $resolutionDetail
 
 $manifestPath = Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
 $manifestOk = $false

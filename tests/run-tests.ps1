@@ -651,46 +651,52 @@ try {
     $fallbackState = Read-FactoryJson -Path $context.statePath
     $fallbackState.agentResolutionCache = $null
     $fallbackState.tasks = @($fallbackState.tasks) + @(
-        New-FactoryTestTask -Id "fallback-task" -Title "Inline fallback" -Now $now
+        New-FactoryTestTask -Id "fallback-task" -Title "System prompt fallback" -Now $now
     )
     Write-FactoryJsonAtomic -Path $context.statePath -Value $fallbackState
     $fallbackCount = Join-Path $testRoot "fallback-launch-count.txt"
     $fallbackArgv = Join-Path $testRoot "fallback-argv.txt"
     $fallbackStops = Join-Path $testRoot "fallback-stops.txt"
-    $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-once"
+    $systemPromptCopy = Join-Path $testRoot "system-prompt-copy.txt"
+    $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-to-system"
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $fallbackCount
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $fallbackArgv
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $fallbackStops
+    $env:CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY = $systemPromptCopy
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
     $fallbackLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "fallback-task" -Mode auto -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
-    Assert-Equal 2 ([int](Get-Content -LiteralPath $fallbackCount -Raw)) "Native fallback did not relaunch exactly once."
-    Assert-Equal "inline-fallback" ([string]$fallbackLaunch.backgroundSession.agentResolution) "Inline fallback was not audited."
-    Assert-Equal "fallback1" ((Get-Content -LiteralPath $fallbackStops -Raw).Trim()) "The native default-template session was not stopped."
+    Assert-Equal 3 ([int](Get-Content -LiteralPath $fallbackCount -Raw)) "The third resolution path was not reached exactly once."
+    Assert-Equal "system-prompt" ([string]$fallbackLaunch.backgroundSession.agentResolution) "System-prompt fallback was not audited."
+    $fallbackStopIds = @(Get-Content -LiteralPath $fallbackStops | Where-Object { $_ })
+    Assert-Equal 2 $fallbackStopIds.Count "Unexpected number of stray fallback sessions survived."
+    Assert-Equal "fallback1" $fallbackStopIds[0] "The native default-template session was not stopped."
+    Assert-Equal "fallback2" $fallbackStopIds[1] "The inline default-template session was not stopped."
     $fallbackLaunchState = Read-FactoryJson -Path $context.statePath
     $fallbackTask = @($fallbackLaunchState.tasks | Where-Object { [string]$_.id -eq "fallback-task" })[0]
-    Assert-Equal 1 ([int]$fallbackTask.attempts) "Two process launches consumed two factory attempts."
-    Assert-Equal "inline-fallback" ([string]$fallbackLaunchState.agentResolutionCache.preferredResolution) "Inline capability was not cached."
+    Assert-Equal 1 ([int]$fallbackTask.attempts) "Three process launches consumed more than one factory attempt."
+    Assert-Equal "system-prompt" ([string]$fallbackLaunchState.agentResolutionCache.preferredResolution) "System-prompt capability was not cached."
+    Assert-Equal "working" ([string]$fallbackLaunchState.agentResolutionCache.outcomes.systemPrompt) "System-prompt success was not recorded."
     $fallbackArguments = @([IO.File]::ReadAllLines($fallbackArgv, [Text.Encoding]::UTF8))
-    $agentsIndex = [Array]::IndexOf($fallbackArguments, "--agents")
-    Assert-True ($agentsIndex -ge 0 -and $agentsIndex + 1 -lt $fallbackArguments.Count) "Inline launch did not pass --agents JSON."
-    $inlineDefinition = $fallbackArguments[$agentsIndex + 1] | ConvertFrom-Json
+    Assert-True ([Array]::IndexOf($fallbackArguments, "--append-system-prompt-file") -ge 0) "System launch omitted the prompt file."
+    Assert-True ([Array]::IndexOf($fallbackArguments, "--plugin-dir") -ge 0) "System launch dropped the plugin directory."
+    Assert-True ([Array]::IndexOf($fallbackArguments, "--agent") -lt 0) "System launch still selected an agent."
+    Assert-True ([Array]::IndexOf($fallbackArguments, "--agents") -lt 0) "System launch still transported an inline agent."
     $workerAgentRaw = [IO.File]::ReadAllText((Join-Path $pluginRoot "agents\worker.md"), (New-Object Text.UTF8Encoding($false, $true)))
     $workerAgentParts = [regex]::Match($workerAgentRaw, '\A---\r?\n(?<frontmatter>[\s\S]*?)\r?\n---\r?\n(?<body>[\s\S]*)\z')
     Assert-True $workerAgentParts.Success "Test fixture could not independently parse worker.md."
-    $expectedDescription = [regex]::Match($workerAgentParts.Groups["frontmatter"].Value, '(?m)^description:\s*(?<value>.+?)\s*$').Groups["value"].Value
-    $expectedPrompt = $workerAgentParts.Groups["body"].Value
-    Assert-Equal $expectedDescription ([string]$inlineDefinition.worker.description) "Inline agent description changed in argv."
-    Assert-Equal $expectedPrompt ([string]$inlineDefinition.worker.prompt) "Inline agent prompt was truncated or mangled in argv."
+    $expectedSystemBytes = [Text.Encoding]::UTF8.GetBytes($workerAgentParts.Groups["body"].Value)
+    $actualSystemBytes = [IO.File]::ReadAllBytes($systemPromptCopy)
+    Assert-Equal $expectedSystemBytes.Length $actualSystemBytes.Length "System prompt byte length changed."
+    Assert-Equal (Get-FactorySha256Hex -Bytes $expectedSystemBytes) (Get-FactorySha256Hex -Bytes $actualSystemBytes) "System prompt body was not byte-identical."
     $fallbackMetadata = Read-FactoryJson -Path (Join-Path $context.sessionsPath "fallback-task.json")
-    Assert-Equal "inline-fallback" ([string]$fallbackMetadata.agentResolution) "Fallback metadata did not record its resolution path."
-    Assert-True ([bool]$fallbackMetadata.inlineAgentSha256) "Fallback metadata has no inline definition hash."
+    Assert-Equal "system-prompt" ([string]$fallbackMetadata.agentResolution) "Fallback metadata did not record its resolution path."
+    Assert-Equal ([string]$fallbackMetadata.systemPromptSha256) (Get-FactoryFileSha256 -Path $fallbackMetadata.systemPromptPath) "System prompt audit hash is wrong."
+    Assert-True ((@($fallbackMetadata.agentDefinitionDeviations) -join " ") -match 'maxTurns: 100') "Lost maxTurns behavior was not audited."
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "fallback-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
 
     $cachedState = Read-FactoryJson -Path $context.statePath
-    $cachedState.tasks = @($cachedState.tasks) + @(
-        New-FactoryTestTask -Id "cached-fallback-task" -Title "Cached inline fallback" -Now $now
-    )
+    $cachedState.tasks = @($cachedState.tasks) + @(New-FactoryTestTask -Id "cached-fallback-task" -Title "Cached system fallback" -Now $now)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $cachedState
     $cachedCount = Join-Path $testRoot "cached-launch-count.txt"
     $cachedArgv = Join-Path $testRoot "cached-argv.txt"
@@ -698,59 +704,85 @@ try {
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $cachedCount
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $cachedArgv
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $cachedStops
-    $cachedLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "cached-fallback-task" -Mode auto -ClaudeCommand $fakeClaude) |
-        ConvertFrom-Json
-    Assert-Equal 1 ([int](Get-Content -LiteralPath $cachedCount -Raw)) "Cached fallback still created a native stray session."
-    Assert-Equal "inline-fallback" ([string]$cachedLaunch.backgroundSession.agentResolution) "Cached fallback did not use inline resolution."
-    Assert-True (-not (Test-Path -LiteralPath $cachedStops)) "Cached fallback stopped an unexpected stray session."
-    $cachedArguments = @([IO.File]::ReadAllLines($cachedArgv, [Text.Encoding]::UTF8))
-    Assert-True ([Array]::IndexOf($cachedArguments, "--agents") -ge 0) "Cached fallback omitted its inline definition."
+    $cachedLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "cached-fallback-task" -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal 1 ([int](Get-Content -LiteralPath $cachedCount -Raw)) "Cached system fallback retried known-bad agent paths."
+    Assert-Equal "system-prompt" ([string]$cachedLaunch.backgroundSession.agentResolution) "Cached system fallback was not reused."
+    Assert-True (-not (Test-Path -LiteralPath $cachedStops)) "Cached system fallback stopped an unexpected session."
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "cached-fallback-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
 
-    $doubleState = Read-FactoryJson -Path $context.statePath
-    $doubleState.agentResolutionCache = $null
-    $doubleState.tasks = @($doubleState.tasks) + @(
-        New-FactoryTestTask -Id "double-fallback-task" -Title "Double fallback failure" -Now $now
-    )
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $doubleState
-    $doubleCount = Join-Path $testRoot "double-launch-count.txt"
-    $doubleStops = Join-Path $testRoot "double-stops.txt"
-    $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-always"
-    $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $doubleCount
-    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $doubleStops
-    $previousFallbackErrorAction = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $doubleOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "double-fallback-task" -Mode auto -ClaudeCommand $fakeClaude 2>&1 | ForEach-Object { [string]$_ })
-        $doubleExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousFallbackErrorAction
-    }
-    Assert-True ($doubleExitCode -ne 0) "A second default-template fallback was accepted as a worker."
-    Assert-Equal 2 ([int](Get-Content -LiteralPath $doubleCount -Raw)) "Double fallback did not stop after one inline retry."
-    Assert-Equal "fallback2" ((Get-Content -LiteralPath $doubleStops -Raw).Trim()) "The second stray fallback session was not stopped."
-    $doubleFailedState = Read-FactoryJson -Path $context.statePath
-    $doubleTask = @($doubleFailedState.tasks | Where-Object { [string]$_.id -eq "double-fallback-task" })[0]
-    Assert-Equal "failed" ([string]$doubleTask.status) "Double fallback failure was not persisted."
-    Assert-Equal 1 ([int]$doubleTask.attempts) "Double fallback failure consumed two factory attempts."
-    Assert-True ($null -eq $doubleTask.backgroundSession) "Double fallback retained a stray background session."
-    Assert-Equal "inline-fallback" ([string]$doubleFailedState.agentResolutionCache.preferredResolution) "Native failure capability was not cached after inline failure."
-    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "double-fallback-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $legacyState = Read-FactoryJson -Path $context.statePath
+    $legacyState.agentResolutionCache = [pscustomobject]@{ claudeVersion = "2.1.218"; preferredResolution = "inline-fallback"; checkedAt = $now }
+    $legacyState.tasks = @($legacyState.tasks) + @(New-FactoryTestTask -Id "legacy-fallback-task" -Title "Legacy fallback migration" -Now $now)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $legacyState
+    $legacyCount = Join-Path $testRoot "legacy-launch-count.txt"
+    $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $legacyCount
+    $legacyLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "legacy-fallback-task" -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal 1 ([int](Get-Content -LiteralPath $legacyCount -Raw)) "Legacy inline cache did not migrate directly."
+    Assert-Equal "system-prompt" ([string]$legacyLaunch.backgroundSession.agentResolution) "Legacy inline cache did not migrate to system-prompt."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "legacy-fallback-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
 
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR -ErrorAction SilentlyContinue
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE -ErrorAction SilentlyContinue
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
-    $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $argvCapture
     $doctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
-    Assert-True ([bool]$doctor.healthy) "Factory doctor reported required failures in the valid fixture."
+    Assert-True ([bool]$doctor.healthy) "Factory doctor reported required failures for the working system fallback."
     $doctorChecks = @($doctor.checks)
     $runtimeCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "powershellRuntime" })[0]
     $agentDefinitionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentDefinition" })[0]
     $resolutionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
     Assert-True ([bool]$runtimeCheck.passed) "Factory doctor did not verify PowerShell dependencies."
-    Assert-True ([bool]$agentDefinitionCheck.passed) "Factory doctor did not verify the inline worker definition."
-    Assert-Equal "info" ([string]$resolutionCheck.severity) "Factory doctor did not report the resolution workaround."
-    Assert-True ([string]$resolutionCheck.detail -match 'inline-fallback') "Factory doctor hid the active inline fallback."
+    Assert-True ([bool]$agentDefinitionCheck.passed) "Factory doctor did not verify the worker definition."
+    Assert-True ([string]$agentDefinitionCheck.detail -match 'additive system-prompt') "Factory doctor hid the additive fallback semantics."
+    Assert-Equal "required" ([string]$resolutionCheck.severity) "Worker resolution is not a required doctor check."
+    Assert-True ([string]$resolutionCheck.detail -match 'system-prompt') "Factory doctor hid the active system fallback."
+
+    $failureState = Read-FactoryJson -Path $context.statePath
+    $failureState.agentResolutionCache = $null
+    $failureState.tasks = @($failureState.tasks) + @(New-FactoryTestTask -Id "all-fallbacks-fail" -Title "All fallbacks fail" -Now $now)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $failureState
+    $failureCount = Join-Path $testRoot "failure-launch-count.txt"
+    $failureStops = Join-Path $testRoot "failure-stops.txt"
+    $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-all-three"
+    $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $failureCount
+    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $failureStops
+    $previousFallbackErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $failureOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "all-fallbacks-fail" -Mode auto -ClaudeCommand $fakeClaude 2>&1 | ForEach-Object { [string]$_ })
+        $failureExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousFallbackErrorAction
+    }
+    Assert-True ($failureExitCode -ne 0) "A failed system-prompt process was accepted as a worker."
+    Assert-Equal 3 ([int](Get-Content -LiteralPath $failureCount -Raw)) "All three resolution paths were not attempted."
+    $failureStopIds = @(Get-Content -LiteralPath $failureStops | Where-Object { $_ })
+    Assert-Equal 3 $failureStopIds.Count "A failed resolution session survived."
+    Assert-Equal "fallback3" $failureStopIds[2] "The failed system-prompt session was not stopped."
+    $failedState = Read-FactoryJson -Path $context.statePath
+    $failedTask = @($failedState.tasks | Where-Object { [string]$_.id -eq "all-fallbacks-fail" })[0]
+    Assert-Equal "failed" ([string]$failedTask.status) "All-path failure was not persisted."
+    Assert-Equal 1 ([int]$failedTask.attempts) "Three resolution processes consumed more than one attempt."
+    Assert-True ($null -eq $failedTask.backgroundSession) "All-path failure retained a background session."
+    Assert-True (-not [string]$failedState.agentResolutionCache.preferredResolution) "A failed resolution was cached as preferred."
+    Assert-Equal "failed" ([string]$failedState.agentResolutionCache.outcomes.systemPrompt) "System failure outcome was not cached."
+    $failedDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $failedResolutionCheck = @($failedDoctor.checks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
+    Assert-True (-not [bool]$failedDoctor.healthy) "Doctor accepted a version with no working resolution."
+    Assert-True (-not [bool]$failedResolutionCheck.passed) "Doctor did not fail the required resolution check."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "all-fallbacks-fail" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR -ErrorAction SilentlyContinue
+    $fixedState = Read-FactoryJson -Path $context.statePath
+    $fixedState.tasks = @($fixedState.tasks) + @(New-FactoryTestTask -Id "fixed-version-task" -Title "Fixed native version" -Now $now)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $fixedState
+    $fixedCount = Join-Path $testRoot "fixed-launch-count.txt"
+    $env:CLAUDE_FACTORY_TEST_VERSION = "2.1.219"
+    $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $fixedCount
+    $fixedLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "fixed-version-task" -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal 1 ([int](Get-Content -LiteralPath $fixedCount -Raw)) "A new CLI version reused the old negative cache."
+    Assert-Equal "plugin" ([string]$fixedLaunch.backgroundSession.agentResolution) "A fixed CLI version did not retry the native agent."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "fixed-version-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+    $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $argvCapture
 
     $missingAgentState = Read-FactoryJson -Path $context.statePath
     $missingAgentState.tasks = @($missingAgentState.tasks) + @([pscustomobject]@{
@@ -790,7 +822,7 @@ try {
     $failedAgentState = Read-FactoryJson -Path $context.statePath
     $failedAgentTask = @($failedAgentState.tasks | Where-Object { [string]$_.id -eq 'missing-agent-task' })[0]
     Assert-Equal "failed" ([string]$failedAgentTask.status) "Missing-agent launch was not recorded as failed."
-    Assert-True ([string]$failedAgentTask.error -match 'did not resolve the inline worker agent') "Missing-agent failure was not explicit."
+    Assert-True ([string]$failedAgentTask.error -match 'system-prompt launch failed') "Missing-agent failure was not explicit."
 
     Write-Host "All factory runtime tests passed." -ForegroundColor Green
 } finally {
@@ -804,6 +836,8 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PROMPT_COPY -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_VERSION -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_PROMPT_PATH -ErrorAction SilentlyContinue
     if ($KeepTemp) {

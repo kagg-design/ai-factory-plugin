@@ -9,9 +9,10 @@
 - Removed completed worker sessions from Claude Agent View after successful
   `/factory cleanup`, with non-destructive warning behavior if session removal
   is unavailable.
-- Added a version-scoped inline worker-agent fallback for Claude Code releases
-  that cannot resolve session-only plugin agents with `--bg --agent`, including
-  verified stray-session shutdown and audited resolution metadata.
+- Added version-scoped inline-agent and additive system-prompt-file fallbacks
+  for Claude Code releases that cannot resolve agents with `--bg --agent`,
+  including verified stray-session shutdown, positive Agent View confirmation,
+  per-path capability caching, and audited frontmatter deviations.
 - Added PowerShell 5.1-safe native argument quoting and replaced `Get-FileHash`
   with .NET SHA-256 so worker launch is independent of ambient `PSModulePath`.
 - Extended `/factory doctor` with PowerShell and worker-resolution diagnostics,

@@ -148,19 +148,24 @@ Worker launch prefers the plugin agent `factory:worker`. If a Claude Code
 version cannot resolve a session-only plugin agent during `--bg` startup, the
 launcher stops and verifies removal of the default-template session, then
 relaunches once with the byte-identical `agents/worker.md` prompt supplied as an
-inline agent. The successful resolution path is stored as `plugin` or
-`inline-fallback` and cached for that Claude Code version. A version change
-automatically probes the native plugin path again.
+inline agent. If that agent is also unresolved, it stops that stray session and
+launches without `--agent`, appending the stripped worker body from a private
+UTF-8 prompt file. The successful resolution path is stored as `plugin`,
+`inline-fallback`, or `system-prompt` and cached for that Claude Code version.
+A version change automatically probes the native plugin path again.
 
 The launcher uses explicit Windows native-argument quoting so inline JSON is not
-mangled by Windows PowerShell 5.1. Prompt hashes use .NET SHA-256 rather than
-`Get-FileHash`, avoiding ambient `PSModulePath` incompatibilities. A second
-agent-resolution fallback is terminal and both stray sessions are stopped.
+mangled by Windows PowerShell 5.1. The system-prompt path avoids the large JSON
+argument entirely. Prompt hashes use .NET SHA-256 rather than `Get-FileHash`,
+avoiding ambient `PSModulePath` incompatibilities. Every failed path is terminal
+unless a later verified resolution exists, and every stray session is stopped.
 
-The inline definition carries the agent `description` and prompt body. Worker
-model and effort remain explicit CLI flags. Claude's inline-agent option does
-not expose the `maxTurns` frontmatter field, so that limit is the one accepted
-deviation while the workaround is active.
+The inline definition carries the agent `description` and prompt body. The
+system-prompt workaround is explicitly additive to Claude's default system
+prompt. Worker model and effort remain explicit CLI flags, but agent
+frontmatter name, description, `maxTurns`, and any tools restriction are not
+applied on that path; these deviations are stored in launch metadata and shown
+by `/factory doctor`.
 
 The worker reads the task and relevant code without editing, returns a
 `FACTORY_PLAN`, and waits. Open its conversation, discuss or change the plan,
@@ -364,11 +369,12 @@ Worker launch prompts are persisted as UTF-8 files in the private runtime and
 the background process receives only a short file pointer. Reconciliation binds
 identity-bearing metadata only through the background ID or full session UUID,
 so an older same-name Agent View row cannot replace the live attempt.
-`/factory doctor` reports the PowerShell runtime, required JSON cmdlets, inline
-worker definition readiness, and the cached worker-agent resolution path. The
-worker Git guard fails closed when its hook payload cannot be parsed; an
-internal guard error is never treated as permission to run a prohibited Git
-operation.
+`/factory doctor` reports the PowerShell runtime, required JSON cmdlets, worker
+definition readiness, fallback deviations, and the cached worker-agent
+resolution path. Having no working path for the installed CLI is a required
+failure. The worker Git guard fails closed when its hook payload cannot be
+parsed; an internal guard error is never treated as permission to run a
+prohibited Git operation.
 
 
 A session that stops without `FACTORY_RESULT` is machine-held and can be resumed
