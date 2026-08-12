@@ -313,7 +313,8 @@ instructions to paste into the worker conversation.
 `reject` is a final discard by default. Before changing anything, the
 orchestrator lists the background session, worktree, local worker branch,
 commit, and private prompt/event/session metadata that will be removed. Confirm
-the preview to stop the session, remove all those artifacts (including dirty or
+the preview to stop the task's live processes, remove every Agent View row from
+current and previous attempts, remove all other artifacts (including dirty or
 unpublished work), delete the task from private state, and make it disappear
 from `/factory status`.
 
@@ -362,11 +363,20 @@ Cleanup reconciles the task, refuses active sessions and dirty worktrees,
 refreshes the remote development and production branches, verifies that the
 recorded commit is reachable from both, removes the worker worktree and local
 worker branch, preserves the factory result metadata, marks the task `done`,
-and removes its completed background session from Claude Agent View.
+and removes every background session for the task from Claude Agent View.
 
-Agent View removal is the final, best-effort step. If Claude's session
-supervisor is unavailable, cleanup still remains complete and returns an
-`agentSessionWarning`; remove that stale row manually with `claude rm <id>`.
+After all Git safety checks pass, cleanup stops and verifies every live task
+process before touching the worktree. This includes a terminal-looking row that
+still has a PID and can hold the directory on Windows. A stop failure aborts
+before artifact removal. Agent View `rm` is best effort: if one row cannot be
+removed, cleanup continues, remains `done`, and returns an
+`agentSessionWarning` naming the ID; remove that row manually with
+`claude rm <id>`.
+
+`claude rm` removes the Agent View index row, not the JSONL transcript. This was
+verified with Claude Code 2.1.228: the transcript under `~/.claude/projects`
+remained byte-present after stop and rm, so `/factory transcript` history is
+preserved.
 
 The command enables Git long-path handling and removes verified clean residue
 that Windows may leave behind. It never removes an unpublished recorded
@@ -422,8 +432,9 @@ To make decisions durable before relaunching a worker:
 ```
 
 This writes the ignored `FACTORY-DECISIONS.md` inside the retained worktree,
-stops the previous background row, and queues one new attempt. Repeating the
-same answer refreshes the file without duplicating the pointer or attempt.
+stops and removes superseded task rows from Agent View, and queues one new
+attempt. Their JSONL transcripts remain on disk. Repeating the same answer
+refreshes the file without duplicating the pointer or attempt.
 ## 12. Diagnostics
 
 ```text

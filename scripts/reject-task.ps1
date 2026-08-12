@@ -204,14 +204,15 @@ try {
         exit 0
     }
 
-    $stoppedSession = $false
-    if ($sessionId -and $sessionState -notin @("stopped", "done", "failed")) {
-        & $ClaudeCommand stop $sessionId 1> $null 2> $null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to stop background session '$sessionId'. No artifacts were removed."
-        }
-        $stoppedSession = $true
+    $sessionCleanup = Remove-FactoryTaskAgentSessions `
+        -ClaudeCommand $ClaudeCommand `
+        -TaskId $TaskId `
+        -Worktree $(if ($worktree) { $worktree } else { "" })
+    if (@($sessionCleanup.stopFailures).Count -gt 0) {
+        $blockedIds = @($sessionCleanup.stopFailures | ForEach-Object { [string]$_.id }) -join ", "
+        throw "Failed to stop task session(s) $blockedIds. No artifacts were removed."
     }
+    $stoppedSession = @($sessionCleanup.stoppedAgentSessions).Count -gt 0
 
     $removedReparsePoints = @()
     $registeredPaths = @(Get-FactoryRegisteredWorktreePaths -RepositoryRoot $repositoryRoot)
@@ -277,6 +278,9 @@ try {
         reason = $Reason
         removedFromState = $true
         stoppedSession = $stoppedSession
+        stoppedAgentSessions = @($sessionCleanup.stoppedAgentSessions)
+        removedAgentSessions = @($sessionCleanup.removedAgentSessions)
+        agentSessionWarning = if (@($sessionCleanup.warnings).Count -gt 0) { @($sessionCleanup.warnings) -join "; " } else { $null }
         removedWorktree = $removedWorktree
         deletedBranch = $deletedBranch
         removedMetadataFiles = @($sessionFiles | ForEach-Object { $_.FullName })

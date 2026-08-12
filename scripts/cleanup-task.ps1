@@ -139,12 +139,6 @@ try {
     } else {
         ""
     }
-    $backgroundState = if ($null -ne $task.backgroundSession) {
-        [string]$task.backgroundSession.state
-    } else {
-        ""
-    }
-
     if (-not $commit) {
         throw "Task '$TaskId' has no recorded commit. Cleanup refuses to discard unpublished work."
     }
@@ -202,7 +196,7 @@ try {
         ).Count -gt 0
     }
 
-    $removedWorktree = $false
+    # Validate every Git/worktree safeguard before changing Agent View or disk.
     if ($worktree -and (Test-Path -LiteralPath $worktree)) {
         if (-not $isRegistered) {
             throw "Residual worker directory '$worktree' is not a registered worktree. Inspect it manually before cleanup."
@@ -216,7 +210,24 @@ try {
         if ($dirty.Count -gt 0) {
             throw "Worker worktree has uncommitted changes. Cleanup refuses to remove it."
         }
+    }
 
+    # A terminal-looking row can still own a live process (and therefore hold
+    # the worktree on Windows). Stop and verify every matching session before
+    # touching the directory. Agent View rm failures remain best effort.
+    $sessionCleanup = Remove-FactoryTaskAgentSessions `
+        -ClaudeCommand $ClaudeCommand `
+        -TaskId $TaskId `
+        -Worktree $(if ($worktree) { $worktree } else { "" })
+    if (@($sessionCleanup.stopFailures).Count -gt 0) {
+        $blocked = @($sessionCleanup.stopFailures | ForEach-Object {
+            "session $($_.id): $($_.warning)"
+        }) -join "; "
+        throw "Task cleanup stopped before removing artifacts because $blocked"
+    }
+
+    $removedWorktree = $false
+    if ($worktree -and (Test-Path -LiteralPath $worktree)) {
         $removedReparsePoints = @(Remove-FactoryReparsePointsInTree -Path $worktree)
 
         & git -c core.longpaths=true -C $repositoryRoot worktree remove $worktree
@@ -270,32 +281,13 @@ try {
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
 
-    # Factory state and Git artifacts are authoritative. Agent View cleanup is
-    # deliberately last and best-effort: a missing supervisor or an older
-    # Claude CLI must not turn a successfully finalized task back into a
-    # cleanup failure after its worktree and branch have already been removed.
-    $stoppedAgentSession = $false
-    $removedAgentSession = $false
-    $agentSessionWarning = $null
-    if ($backgroundId) {
-        try {
-            if ($backgroundState -notin @("stopped", "done", "failed")) {
-                & $ClaudeCommand stop $backgroundId 1> $null 2> $null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "claude stop exited with code $LASTEXITCODE"
-                }
-                $stoppedAgentSession = $true
-            }
-
-            & $ClaudeCommand rm $backgroundId 1> $null 2> $null
-            if ($LASTEXITCODE -ne 0) {
-                throw "claude rm exited with code $LASTEXITCODE"
-            }
-            $removedAgentSession = $true
-        } catch {
-            $agentSessionWarning = "Task cleanup succeeded, but Agent View session '$backgroundId' could not be removed: $($_.Exception.Message)"
-        }
-    }
+    # Git artifacts and done state remain authoritative. Individual `claude rm`
+    # failures were collected before removal and never roll finalization back.
+    $stoppedAgentSession = @($sessionCleanup.stoppedAgentSessions).Count -gt 0
+    $removedAgentSession = @($sessionCleanup.removedAgentSessions).Count -gt 0
+    $agentSessionWarning = if (@($sessionCleanup.warnings).Count -gt 0) {
+        "Task cleanup succeeded, but " + (@($sessionCleanup.warnings) -join "; ")
+    } else { $null }
 
     [ordered]@{
         taskId = $TaskId
@@ -307,6 +299,8 @@ try {
         agentSessionId = if ($backgroundId) { $backgroundId } else { $null }
         stoppedAgentSession = $stoppedAgentSession
         removedAgentSession = $removedAgentSession
+        stoppedAgentSessions = @($sessionCleanup.stoppedAgentSessions)
+        removedAgentSessions = @($sessionCleanup.removedAgentSessions)
         agentSessionWarning = $agentSessionWarning
     } | ConvertTo-Json -Depth 10
 } finally {

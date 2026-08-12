@@ -257,6 +257,7 @@ $payloadJson
         systemPromptSha256 = $null
         agentDefinitionDeviations = @()
         resolutionOutcomes = $null
+        agentSessionWarnings = @()
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
@@ -329,6 +330,7 @@ $payloadJson
     $metadata.systemPromptSha256 = $launch.systemPromptSha256
     $metadata.agentDefinitionDeviations = @($launch.agentDefinitionDeviations)
     $metadata.resolutionOutcomes = $launch.resolutionOutcomes
+    $metadata.agentSessionWarnings = @($launch.agentSessionWarnings)
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey

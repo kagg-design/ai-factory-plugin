@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Removed every completed attempt of a closed task from Agent View during
+  `answer`, `reject`, and `cleanup`; fallback-launch strays are now removed
+  immediately. Cleanup verifies live processes are gone before touching their
+  worktrees, preserves JSONL transcripts, and reports per-ID `claude rm`
+  failures without rolling back `done` state.
 - Reused one exact per-repository orchestrator conversation across repeated
   startup, attaching its Agent View row or resuming its stored UUID, with
   explicit `-New` replacement semantics.

@@ -319,9 +319,11 @@ running; the scheduler simply waits before starting more.
 /factory stop
 ```
 
-Successful `/factory cleanup` also removes the task's completed background
-session from Claude Agent View. A supervisor/CLI failure is reported as a
-warning after the authoritative factory state and Git artifacts are finalized.
+Successful `/factory cleanup` removes every background row belonging to the
+task from Claude Agent View, including older attempts. Live processes are
+stopped and verified before the worktree is touched. An individual `claude rm`
+failure is reported through `agentSessionWarning` without rolling a finalized
+task back from `done`.
 
 The slash-command hint is intentionally short. Use `/factory help` for a
 one-screen grouped overview or `/factory help <command>` for syntax,
@@ -350,17 +352,21 @@ until `/factory sync <task-id>` successfully resumes and finalizes it.
 `cleanup` is intentionally strict. It reconciles the task first, refuses
 active sessions and dirty worktrees, refreshes the configured remote branches,
 and requires the recorded commit to be reachable from both development and
-production before deleting the worker worktree and local `factory-worker/*`
-branch. It keeps the transcript and result in private state and marks the task
-`done`. It also uses Git long-path support and finishes removal of verified
-clean residue left by Windows.
+production. It then stops every live process for the task, verifies that none
+still holds the directory, removes all of the task's Agent View rows, and only
+then deletes the worker worktree and local `factory-worker/*` branch. It keeps
+the transcript and result in private state and marks the task `done`. Claude
+Code 2.1.228 was verified to leave JSONL transcripts intact after `claude rm`.
+Cleanup also uses Git long-path support and finishes removal of verified clean
+residue left by Windows.
 
 `reject` is the normal way to abandon a task. It first shows the exact session,
 worktree, branch, commit, and private metadata that will be lost, then asks for
 confirmation. Once confirmed, it stops the session, removes those artifacts,
-and forgets the task so it disappears from status. `reject --yes` skips the
-question. `reject --keep` provides the former state-only behavior and leaves a
-`rejected` task available for inspection.
+removes all Agent View rows from current and previous attempts, and forgets the
+task so it disappears from status. `reject --yes` skips the question. `reject
+--keep` provides the former state-only behavior and leaves a `rejected` task
+available for inspection.
 
 Use `cleanup` instead for completed work that was published: cleanup verifies
 both remote branches and retains the task as `done` history.
@@ -379,7 +385,8 @@ prohibited Git operation.
 
 A session that stops without `FACTORY_RESULT` is machine-held and can be resumed
 with `retry`, or supplied durable decisions with `answer`. `answer` refreshes an
-ignored `FACTORY-DECISIONS.md` in the retained worktree and queues one attempt.
+ignored `FACTORY-DECISIONS.md` in the retained worktree, removes the superseded
+Agent View rows without deleting their transcripts, and queues one attempt.
 Manual holds remain distinct and are not automatically retryable.
 
 ## Worktree isolation

@@ -40,9 +40,23 @@ try {
 
     $backgroundId = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.id } else { "" }
     $isSameQueuedAnswer = [string]$task.answerHash -eq $answerHash -and [string]$task.status -eq "queued"
+    $sessionCleanup = [pscustomobject]@{
+        stoppedAgentSessions = @()
+        removedAgentSessions = @()
+        stopFailures = @()
+        warnings = @()
+    }
     if ($backgroundId -and -not $isSameQueuedAnswer) {
-        & $ClaudeCommand stop $backgroundId 1> $null
-        if ($LASTEXITCODE -ne 0) { throw "Failed to stop background session '$backgroundId'." }
+        # Removing the Agent View row does not remove the JSONL transcript;
+        # Claude Code 2.1.228 was verified to retain it under ~/.claude/projects.
+        $sessionCleanup = Remove-FactoryTaskAgentSessions `
+            -ClaudeCommand $ClaudeCommand `
+            -TaskId $TaskId `
+            -Worktree $worktree
+        if (@($sessionCleanup.stopFailures).Count -gt 0) {
+            $blockedIds = @($sessionCleanup.stopFailures | ForEach-Object { [string]$_.id }) -join ", "
+            throw "Failed to stop task session(s) $blockedIds; the retained worktree was not changed."
+        }
     }
 
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
@@ -82,7 +96,18 @@ try {
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
 
-    [ordered]@{ taskId = $TaskId; status = "queued"; mode = $Mode; decisionsPath = $decisionsPath; answerHash = $answerHash; stoppedBackgroundId = $backgroundId; idempotent = $isSameQueuedAnswer } | ConvertTo-Json -Depth 10
+    [ordered]@{
+        taskId = $TaskId
+        status = "queued"
+        mode = $Mode
+        decisionsPath = $decisionsPath
+        answerHash = $answerHash
+        stoppedBackgroundId = $backgroundId
+        stoppedAgentSessions = @($sessionCleanup.stoppedAgentSessions)
+        removedAgentSessions = @($sessionCleanup.removedAgentSessions)
+        agentSessionWarning = if (@($sessionCleanup.warnings).Count -gt 0) { @($sessionCleanup.warnings) -join "; " } else { $null }
+        idempotent = $isSameQueuedAnswer
+    } | ConvertTo-Json -Depth 10
 } finally {
     Exit-FactoryMutex -Mutex $mutex
 }

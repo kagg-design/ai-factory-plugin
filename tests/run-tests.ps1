@@ -119,7 +119,7 @@ try {
 
     $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
     Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
-    Assert-True ($cleanupSource.Contains("rm `$backgroundId")) "Task cleanup does not remove completed Agent View sessions."
+    Assert-True ($cleanupSource.Contains("Remove-FactoryTaskAgentSessions")) "Task cleanup does not remove all completed Agent View sessions."
     Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
     $rejectSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\reject-task.ps1") -Raw
     Assert-True ($rejectSource.Contains("worktree remove --force")) "Task rejection does not remove abandoned worktrees."
@@ -154,6 +154,7 @@ try {
     Add-Type -Path (Join-Path $PSScriptRoot "FakeClaude.cs") -OutputAssembly $fakeClaude -OutputType ConsoleApplication
 
     $env:CLAUDE_FACTORY_HOME = $runtime
+    $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE = Join-Path $testRoot "agent-session-events.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
     Assert-Equal 3 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
@@ -338,8 +339,19 @@ try {
     Assert-Equal 2 ([int]$retryState.tasks[0].attempts) "Retry did not advance exactly one attempt."
 
     $answers = "Use the existing worktree.`nKeep the special payload intact."
+    $answerTranscript = Join-Path $testRoot "answer-transcript.jsonl"
+    [IO.File]::WriteAllText($answerTranscript, "transcript survives", (New-Object Text.UTF8Encoding($false)))
+    $answerRmCapture = Join-Path $testRoot "answer-rm.txt"
+    $env:CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH = $answerTranscript
+    $env:CLAUDE_FACTORY_TEST_RM_FILE = $answerRmCapture
     $answered = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\answer-task.ps1") -Repository $repository -TaskId "test-task" -Text $answers -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "queued" ([string]$answered.status) "Answer did not queue the retained worker task."
+    Assert-Equal 2 (@($answered.removedAgentSessions).Count) "Answer did not remove every previous task row."
+    Assert-True (Test-Path -LiteralPath $answerTranscript) "Removing Agent View rows deleted the retained transcript."
+    $answerRemovedIds = @(Get-Content -LiteralPath $answerRmCapture | Where-Object { $_ })
+    Assert-True ($answerRemovedIds -contains "stale000" -and $answerRemovedIds -contains "test1234") "Answer removed the wrong session rows."
+    Assert-True ($answerRemovedIds -notcontains "other999" -and $answerRemovedIds -notcontains "orchestrator-static") "Answer touched another task or the orchestrator."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FILE -ErrorAction SilentlyContinue
     Assert-Equal $answers ([IO.File]::ReadAllText([string]$answered.decisionsPath, [Text.Encoding]::UTF8)) "Answer file content changed."
     $answeredState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 3 ([int]$answeredState.tasks[0].attempts) "Answer did not prepare exactly one new attempt."
@@ -531,10 +543,32 @@ try {
     New-Item -ItemType Junction -Path $junctionPath -Target $externalSentinel | Out-Null
     Assert-True ((Get-Item -LiteralPath $junctionPath).Attributes -band [IO.FileAttributes]::ReparsePoint) "Junction fixture was not created."
 
+    $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = "test1234"
+    $env:CLAUDE_FACTORY_TEST_STOP_FAIL_ID = "test1234"
+    $previousCleanupErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $blockedCleanupOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task" -ClaudeCommand $fakeClaude 2>&1 | ForEach-Object { [string]$_ })
+        $blockedCleanupExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousCleanupErrorAction
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FAIL_ID -ErrorAction SilentlyContinue
+    }
+    Assert-True ($blockedCleanupExitCode -ne 0) "Cleanup continued after a task session failed to stop."
+    Assert-True (Test-Path -LiteralPath $launch.worktree) "Cleanup touched the worktree after a session stop failure."
+    Assert-True (@(& git -C $repository branch --list ([string]$launch.branch)).Count -gt 0) "Cleanup deleted the branch after a session stop failure."
+
     $agentSessionRemoval = Join-Path $testRoot "removed-agent-session.txt"
+    $cleanupStopCapture = Join-Path $testRoot "cleanup-stopped-session.txt"
     $env:CLAUDE_FACTORY_TEST_RM_FILE = $agentSessionRemoval
+    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $cleanupStopCapture
+    $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = "test1234"
+    $env:CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM = [string]$launch.worktree
     $cleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task" -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
     Assert-Equal "done" ([string]$cleanup.status) "Task cleanup did not mark the task done."
     Assert-True (-not (Test-Path -LiteralPath $launch.worktree)) "Task cleanup did not remove the worker worktree."
     $remainingWorkerBranch = @(& git -C $repository branch --list ([string]$launch.branch))
@@ -542,9 +576,40 @@ try {
     Assert-True (Test-Path -LiteralPath $sentinelFile) "Cleanup traversed the external junction target."
     Assert-Equal 1 (@($cleanup.removedReparsePoints).Count) "Cleanup did not audit the removed junction."
     Assert-True ([bool]$cleanup.removedAgentSession) "Cleanup did not report Agent View session removal."
-    Assert-Equal "test1234" ((Get-Content -LiteralPath $agentSessionRemoval -Raw).Trim()) "Cleanup removed the wrong Agent View session."
+    Assert-Equal 1 (@($cleanup.removedAgentSessions).Count) "Cleanup did not report all removed Agent View sessions."
+    Assert-Equal "test1234" (@(Get-Content -LiteralPath $agentSessionRemoval | Where-Object { $_ })[0]) "Cleanup removed the wrong Agent View session."
+    Assert-Equal "test1234" ((Get-Content -LiteralPath $cleanupStopCapture -Raw).Trim()) "Cleanup did not stop a terminal-looking live process before removal."
+    Assert-True (Test-Path -LiteralPath $answerTranscript) "Cleanup deleted the transcript retained by answer."
     $cleanedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal "done" ([string]$cleanedState.tasks[0].status) "Task cleanup state was not persisted."
+    $rowsAfterCleanup = @(Get-FactoryClaudeAgentRows -ClaudeCommand $fakeClaude)
+    Assert-Equal 0 (@($rowsAfterCleanup | Where-Object {
+        $null -ne $_.PSObject.Properties["name"] -and [string]$_.name -like "factory-test-task-*"
+    }).Count) "Answer followed by cleanup left a task background row behind."
+    Assert-Equal 1 (@($rowsAfterCleanup | Where-Object {
+        $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "other999"
+    }).Count) "Answer or cleanup removed another task's row."
+    Assert-Equal 1 (@($rowsAfterCleanup | Where-Object { [string]$_.kind -eq "interactive" }).Count) "Answer or cleanup removed the id-less interactive row."
+
+    $registryPath = [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE
+    [IO.File]::AppendAllText(
+        $registryPath,
+        "launch`trmfail1`t$($launch.worktree)`tfactory-test-task-old-attempt`tstopped`n" +
+        "launch`trmfail2`t$($launch.worktree)`tfactory-test-task-another-attempt`tdone`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $rmFailureCapture = Join-Path $testRoot "cleanup-rm-failure.txt"
+    $env:CLAUDE_FACTORY_TEST_RM_FILE = $rmFailureCapture
+    $env:CLAUDE_FACTORY_TEST_RM_FAIL_ID = "rmfail1"
+    $cleanupWithRmFailure = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task" -ClaudeCommand $fakeClaude) |
+        ConvertFrom-Json
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL_ID -ErrorAction SilentlyContinue
+    Assert-Equal "done" ([string]$cleanupWithRmFailure.status) "An Agent View rm failure rolled cleanup back."
+    Assert-True ([string]$cleanupWithRmFailure.agentSessionWarning -match 'rmfail1') "Cleanup hid the failed Agent View id."
+    Assert-True (@($cleanupWithRmFailure.removedAgentSessions) -contains "rmfail2") "Cleanup stopped after one Agent View rm failure."
+    $cleanupFailureState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "done" ([string]$cleanupFailureState.tasks[0].status) "Agent View rm failure changed finalized task state."
+    [IO.File]::AppendAllText($registryPath, "rm`trmfail1`n", (New-Object Text.UTF8Encoding($false)))
 
 
     $rejectState = Read-FactoryJson -Path $context.statePath
@@ -628,8 +693,16 @@ try {
     $previewState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 1 (@($previewState.tasks | Where-Object { [string]$_.id -eq "discard-task" }).Count) "Reject preview removed the task."
 
+    [IO.File]::AppendAllText(
+        [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
+        "launch`tdiscard-old`t$($discardLaunch.worktree)`tfactory-discard-task-old-attempt`tstopped`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+
     $stopCapture = Join-Path $testRoot "stopped-session.txt"
+    $discardRmCapture = Join-Path $testRoot "discard-rm.txt"
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $stopCapture
+    $env:CLAUDE_FACTORY_TEST_RM_FILE = $discardRmCapture
     $discarded = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "discard-task" -Reason "Duplicate" -Yes -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
@@ -637,7 +710,10 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL -ErrorAction SilentlyContinue
     Assert-True ([bool]$discarded.removedFromState) "Confirmed reject did not forget the task."
     Assert-True ([bool]$discarded.stoppedSession) "Confirmed reject did not stop the session."
+    Assert-Equal 2 (@($discarded.removedAgentSessions).Count) "Reject did not remove every matching Agent View row."
     Assert-Equal "test1234" ((Get-Content -LiteralPath $stopCapture -Raw).Trim()) "Reject stopped the wrong session."
+    $discardRemovedIds = @(Get-Content -LiteralPath $discardRmCapture | Where-Object { $_ })
+    Assert-True ($discardRemovedIds -contains "test1234" -and $discardRemovedIds -contains "discard-old") "Reject did not remove current and previous attempts."
     Assert-True (-not (Test-Path -LiteralPath $discardLaunch.worktree)) "Confirmed reject did not remove the dirty worktree."
     Assert-Equal 0 (@(& git -C $repository branch --list ([string]$discardLaunch.branch))).Count "Confirmed reject did not remove the branch."
     Assert-True (-not (Test-Path -LiteralPath $discardMetadata)) "Confirmed reject retained session metadata."
@@ -647,6 +723,14 @@ try {
     Assert-Equal 1 (@($discarded.removedReparsePoints).Count) "Reject did not audit the removed junction."
     $discardedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 0 (@($discardedState.tasks | Where-Object { [string]$_.id -eq "discard-task" }).Count) "Confirmed reject persisted the task."
+    $rowsAfterReject = @(Get-FactoryClaudeAgentRows -ClaudeCommand $fakeClaude)
+    Assert-Equal 0 (@($rowsAfterReject | Where-Object {
+        $null -ne $_.PSObject.Properties["name"] -and [string]$_.name -like "factory-discard-task-*"
+    }).Count) "Reject left a background row behind."
+    Assert-Equal 1 (@($rowsAfterReject | Where-Object {
+        $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "other999"
+    }).Count) "Reject removed another task's row."
+    Assert-Equal 1 (@($rowsAfterReject | Where-Object { [string]$_.kind -eq "interactive" }).Count) "Reject removed the id-less interactive row."
 
     $fallbackState = Read-FactoryJson -Path $context.statePath
     $fallbackState.agentResolutionCache = $null
@@ -657,11 +741,13 @@ try {
     $fallbackCount = Join-Path $testRoot "fallback-launch-count.txt"
     $fallbackArgv = Join-Path $testRoot "fallback-argv.txt"
     $fallbackStops = Join-Path $testRoot "fallback-stops.txt"
+    $fallbackRemovals = Join-Path $testRoot "fallback-removals.txt"
     $systemPromptCopy = Join-Path $testRoot "system-prompt-copy.txt"
     $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-to-system"
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $fallbackCount
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $fallbackArgv
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $fallbackStops
+    $env:CLAUDE_FACTORY_TEST_RM_FILE = $fallbackRemovals
     $env:CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY = $systemPromptCopy
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
     $fallbackLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "fallback-task" -Mode auto -ClaudeCommand $fakeClaude) |
@@ -672,6 +758,9 @@ try {
     Assert-Equal 2 $fallbackStopIds.Count "Unexpected number of stray fallback sessions survived."
     Assert-Equal "fallback1" $fallbackStopIds[0] "The native default-template session was not stopped."
     Assert-Equal "fallback2" $fallbackStopIds[1] "The inline default-template session was not stopped."
+    $fallbackRemovedIds = @(Get-Content -LiteralPath $fallbackRemovals | Where-Object { $_ })
+    Assert-Equal 2 $fallbackRemovedIds.Count "Fallback launch left abandoned Agent View rows."
+    Assert-True ($fallbackRemovedIds -contains "fallback1" -and $fallbackRemovedIds -contains "fallback2") "Fallback launch removed the wrong rows."
     $fallbackLaunchState = Read-FactoryJson -Path $context.statePath
     $fallbackTask = @($fallbackLaunchState.tasks | Where-Object { [string]$_.id -eq "fallback-task" })[0]
     Assert-Equal 1 ([int]$fallbackTask.attempts) "Three process launches consumed more than one factory attempt."
@@ -739,9 +828,11 @@ try {
     Write-FactoryJsonAtomic -Path $context.statePath -Value $failureState
     $failureCount = Join-Path $testRoot "failure-launch-count.txt"
     $failureStops = Join-Path $testRoot "failure-stops.txt"
+    $failureRemovals = Join-Path $testRoot "failure-removals.txt"
     $env:CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR = "fallback-all-three"
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $failureCount
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $failureStops
+    $env:CLAUDE_FACTORY_TEST_RM_FILE = $failureRemovals
     $previousFallbackErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -755,6 +846,8 @@ try {
     $failureStopIds = @(Get-Content -LiteralPath $failureStops | Where-Object { $_ })
     Assert-Equal 3 $failureStopIds.Count "A failed resolution session survived."
     Assert-Equal "fallback3" $failureStopIds[2] "The failed system-prompt session was not stopped."
+    $failureRemovedIds = @(Get-Content -LiteralPath $failureRemovals | Where-Object { $_ })
+    Assert-Equal 3 $failureRemovedIds.Count "A failed resolution row survived Agent View cleanup."
     $failedState = Read-FactoryJson -Path $context.statePath
     $failedTask = @($failedState.tasks | Where-Object { [string]$_.id -eq "all-fallbacks-fail" })[0]
     Assert-Equal "failed" ([string]$failedTask.status) "All-path failure was not persisted."
@@ -834,6 +927,12 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FAIL_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PROMPT_COPY -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY -ErrorAction SilentlyContinue

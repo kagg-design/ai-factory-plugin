@@ -436,11 +436,12 @@ commit, and private metadata that will be removed. Ask one concise confirmation
 question. Only after explicit confirmation, rerun the same command with `-Yes`.
 The public `--yes` flag maps directly to `-Yes` and skips this question.
 
-Confirmed rejection stops the background session, unlinks reparse points
-without traversing their targets, force-removes the task worktree even when it
-contains unpublished or dirty work, deletes its local `factory-worker/*`
-branch and private prompt/event/session metadata, and removes the task from
-factory state. Make the irreversible loss explicit; do not substitute
+Confirmed rejection stops every live background session belonging to the task,
+removes all matching Agent View rows from current and previous attempts,
+unlinks reparse points without traversing their targets, force-removes the task
+worktree even when it contains unpublished or dirty work, deletes its local
+`factory-worker/*` branch and private prompt/event/session metadata, and removes
+the task from factory state. Make the irreversible loss explicit; do not substitute
 `cleanup`, because cleanup correctly refuses unpublished work.
 
 `--keep` maps to `-Keep`: it only marks the task `rejected`, records the optional
@@ -460,7 +461,8 @@ Use `-File PATH` instead of `-Text TEXT` for a decision document. Add
 `-Mode interactive` only when the user wants another planning stop. The script
 writes or refreshes the ignored `FACTORY-DECISIONS.md` in the retained worker
 worktree, replaces one brief pointer, stops the prior background row, and queues
-exactly one new attempt. Repeating the same answer is idempotent. Ensure the
+exactly one new attempt. It also removes superseded Agent View rows; their JSONL
+transcripts remain on disk. Repeating the same answer is idempotent. Ensure the
 scheduler exists and invoke the tick after the script succeeds.
 
 ### `cleanup <task-id>`
@@ -474,12 +476,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 Cleanup is a published-work artifact-removal command with strict safeguards. It
 must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
-from both configured remote development and production branches. It removes
-only the task's external worker worktree and local `factory-worker/*` branch.
-Preserve the factory's result metadata in private state, report the task as
-`done`, and then remove its completed background session from Claude Agent View.
-If Agent View removal fails after state and Git cleanup succeeded, report the
-returned `agentSessionWarning`; do not retry destructive artifact cleanup.
+from both configured remote development and production branches. After those
+checks, it must stop and verify every live process belonging to the task before
+touching the worktree, then remove every matching Agent View row. A stop failure
+must abort before artifact removal. It removes only the task's external worker
+worktree and local `factory-worker/*` branch. Preserve the factory's result
+metadata in private state and report the task as `done`. If an individual Agent
+View `rm` fails, report the returned `agentSessionWarning`; the Git cleanup and
+`done` state remain authoritative. JSONL transcripts remain on disk after rm.
 
 Git long-path support is enabled by the bundled script. If Git verified the
 worktree clean and unregistered it but Windows left files behind, the script

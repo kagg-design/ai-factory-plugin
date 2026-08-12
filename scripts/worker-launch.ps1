@@ -1,85 +1,5 @@
 Set-StrictMode -Version 2.0
-
-function ConvertTo-FactoryWindowsArgument {
-    param([AllowEmptyString()][string]$Value)
-
-    if ($Value -and $Value -notmatch '[\s"]') { return $Value }
-
-    $builder = New-Object Text.StringBuilder
-    [void]$builder.Append('"')
-    $backslashes = 0
-    foreach ($character in $Value.ToCharArray()) {
-        if ($character -eq '\') {
-            $backslashes++
-            continue
-        }
-        if ($character -eq '"') {
-            [void]$builder.Append(('\' * (($backslashes * 2) + 1)))
-            [void]$builder.Append('"')
-            $backslashes = 0
-            continue
-        }
-        if ($backslashes -gt 0) {
-            [void]$builder.Append(('\' * $backslashes))
-            $backslashes = 0
-        }
-        [void]$builder.Append($character)
-    }
-    if ($backslashes -gt 0) {
-        [void]$builder.Append(('\' * ($backslashes * 2)))
-    }
-    [void]$builder.Append('"')
-    return $builder.ToString()
-}
-
-function Invoke-FactoryNativeProcess {
-    param(
-        [Parameter(Mandatory = $true)][string]$Command,
-        [string[]]$Arguments = @(),
-        [string]$WorkingDirectory = ""
-    )
-
-    $resolvedCommand = Get-Command $Command -ErrorAction Stop
-    $executable = if ([string]$resolvedCommand.Source) {
-        [string]$resolvedCommand.Source
-    } else {
-        [string]$resolvedCommand.Path
-    }
-    if (-not $executable) { throw "Could not resolve executable '$Command'." }
-
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $executable
-    $startInfo.Arguments = (@($Arguments | ForEach-Object {
-        ConvertTo-FactoryWindowsArgument -Value ([string]$_)
-    }) -join ' ')
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    if ($WorkingDirectory) {
-        $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
-    }
-
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $startInfo
-    try {
-        if (-not $process.Start()) { throw "Failed to start '$executable'." }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
-        $stdout = $stdoutTask.Result.TrimEnd("`r", "`n")
-        $stderr = $stderrTask.Result.TrimEnd("`r", "`n")
-        $combined = @($stdout, $stderr) | Where-Object { $_ } | ForEach-Object { [string]$_ }
-        return [pscustomobject]@{
-            exitCode = $process.ExitCode
-            stdout = $stdout
-            stderr = $stderr
-            output = ($combined -join [Environment]::NewLine)
-        }
-    } finally {
-        $process.Dispose()
-    }
-}
+. (Join-Path $PSScriptRoot "factory-common.ps1")
 
 function Get-FactoryBackgroundId {
     param([string]$Output)
@@ -96,17 +16,6 @@ function Test-FactoryAgentFallbackWarning {
     param([string]$Output)
 
     return $Output -match '(?i)(no\s+(?:such\s+)?agent|agent\s+[^\r\n]*not\s+found|using\s+(?:the\s+)?default\s+(?:agent|template)|falling\s+back[^\r\n]*(?:agent|template))'
-}
-
-function Get-FactoryClaudeAgentRows {
-    param([Parameter(Mandatory = $true)][string]$ClaudeCommand)
-
-    $result = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("agents", "--json", "--all")
-    if ($result.exitCode -ne 0) {
-        throw "Failed to query Claude background sessions: $($result.output)"
-    }
-    if (-not $result.stdout) { return @() }
-    return @(($result.stdout | ConvertFrom-Json) | ForEach-Object { $_ })
 }
 
 function Get-FactorySha256Hex {
@@ -154,40 +63,6 @@ function New-FactoryWorkerLaunchException {
     $exception.Data["FactoryNativeAgentUnsupported"] = $NativeAgentUnsupported
     $exception.Data["FactoryAgentDefinitionDeviations"] = @($Deviations)
     return $exception
-}
-
-function Stop-FactoryClaudeSessionAndWait {
-    param(
-        [Parameter(Mandatory = $true)][string]$ClaudeCommand,
-        [Parameter(Mandatory = $true)][string]$BackgroundId,
-        [int]$TimeoutMilliseconds = 5000
-    )
-
-    $stopResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("stop", $BackgroundId)
-    if ($stopResult.exitCode -ne 0) {
-        throw "Failed to stop stray background session '$BackgroundId': $($stopResult.output)"
-    }
-
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
-    do {
-        $rows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
-        $row = @($rows | Where-Object {
-            $null -ne $_.PSObject.Properties["id"] -and
-            [string]$_.id -eq $BackgroundId
-        } | Select-Object -First 1)
-        if ($row.Count -eq 0) { return }
-        $state = if ($null -ne $row[0].PSObject.Properties["state"] -and [string]$row[0].state) {
-            [string]$row[0].state
-        } elseif ($null -ne $row[0].PSObject.Properties["status"]) {
-            [string]$row[0].status
-        } else {
-            ""
-        }
-        if ($state -in @("stopped", "done", "failed")) { return }
-        Start-Sleep -Milliseconds 200
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw "Stray background session '$BackgroundId' did not stop within $TimeoutMilliseconds ms."
 }
 
 function Read-FactoryInlineWorkerAgent {
@@ -247,6 +122,7 @@ function Invoke-FactoryWorkerLaunch {
     }
     $nativeFallbackDetected = $PreferredResolution -ne "plugin"
     $workerAgent = $null
+    $agentSessionWarnings = New-Object System.Collections.Generic.List[string]
     $systemDeviations = @(
         "The worker prompt is appended to Claude's default system prompt instead of replacing it.",
         "Worker agent frontmatter name and description are not applied by the system-prompt fallback."
@@ -261,6 +137,8 @@ function Invoke-FactoryWorkerLaunch {
                 $failedNativeId = Get-FactoryBackgroundId -Output $nativeResult.output
                 if ($failedNativeId) {
                     Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $failedNativeId
+                    $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $failedNativeId
+                    if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
                 }
                 throw (New-FactoryWorkerLaunchException -Message "Claude background launch failed with exit code $($nativeResult.exitCode): $($nativeResult.output)" -Outcomes $outcomes)
             }
@@ -282,6 +160,7 @@ function Invoke-FactoryWorkerLaunch {
                     agentDefinitionDeviations = @()
                     resolutionOutcomes = [pscustomobject]$outcomes
                     authoritativeRow = $null
+                    agentSessionWarnings = @($agentSessionWarnings)
                 }
             }
 
@@ -292,6 +171,8 @@ function Invoke-FactoryWorkerLaunch {
                 throw (New-FactoryWorkerLaunchException -Message "Claude fell back from factory:worker without a parseable session ID: $($nativeResult.output)" -Outcomes $outcomes -NativeAgentUnsupported $true)
             }
             Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $strayId
+            $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $strayId
+            if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
         }
 
         if ($PreferredResolution -ne "system-prompt") {
@@ -305,6 +186,8 @@ function Invoke-FactoryWorkerLaunch {
                 $failedInlineId = Get-FactoryBackgroundId -Output $inlineResult.output
                 if ($failedInlineId) {
                     Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $failedInlineId
+                    $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $failedInlineId
+                    if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
                 }
                 throw (New-FactoryWorkerLaunchException -Message "Claude inline-agent launch failed with exit code $($inlineResult.exitCode): $($inlineResult.output)" -Outcomes $outcomes -NativeAgentUnsupported $nativeFallbackDetected)
             }
@@ -326,6 +209,7 @@ function Invoke-FactoryWorkerLaunch {
                     agentDefinitionDeviations = @()
                     resolutionOutcomes = [pscustomobject]$outcomes
                     authoritativeRow = $null
+                    agentSessionWarnings = @($agentSessionWarnings)
                 }
             }
 
@@ -335,6 +219,8 @@ function Invoke-FactoryWorkerLaunch {
                 throw (New-FactoryWorkerLaunchException -Message "Claude rejected the inline worker agent without a parseable session ID: $($inlineResult.output)" -Outcomes $outcomes -NativeAgentUnsupported $nativeFallbackDetected)
             }
             Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $strayInlineId
+            $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $strayInlineId
+            if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
         }
 
         if ($null -eq $workerAgent) {
@@ -363,6 +249,8 @@ function Invoke-FactoryWorkerLaunch {
             $failedSystemId = Get-FactoryBackgroundId -Output $systemResult.output
             if ($failedSystemId) {
                 Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $failedSystemId
+                $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $failedSystemId
+                if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
             }
             throw (New-FactoryWorkerLaunchException -Message "Claude system-prompt launch failed with exit code $($systemResult.exitCode): $($systemResult.output)" -Outcomes $outcomes -NativeAgentUnsupported $nativeFallbackDetected -Deviations $systemDeviations)
         }
@@ -377,6 +265,8 @@ function Invoke-FactoryWorkerLaunch {
             $outcomes.systemPrompt = "failed"
             try {
                 Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId $systemId
+                $removeResult = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId $systemId
+                if (-not $removeResult.removed) { $agentSessionWarnings.Add([string]$removeResult.warning) }
             } catch {
                 # Preserve the visibility failure; cleanup is best effort here.
             }
@@ -394,6 +284,7 @@ function Invoke-FactoryWorkerLaunch {
             agentDefinitionDeviations = @($systemDeviations)
             resolutionOutcomes = [pscustomobject]$outcomes
             authoritativeRow = $systemRow
+            agentSessionWarnings = @($agentSessionWarnings)
         }
     } catch {
         if ($null -eq $_.Exception.Data["FactoryResolutionOutcomes"]) {
@@ -405,6 +296,7 @@ function Invoke-FactoryWorkerLaunch {
         if ($null -eq $_.Exception.Data["FactoryAgentDefinitionDeviations"]) {
             $_.Exception.Data["FactoryAgentDefinitionDeviations"] = @($systemDeviations)
         }
+        $_.Exception.Data["FactoryAgentSessionWarnings"] = @($agentSessionWarnings)
         throw
     }
 }

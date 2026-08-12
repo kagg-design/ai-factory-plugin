@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
@@ -44,6 +45,88 @@ public static class FakeClaude
         return count;
     }
 
+    private sealed class SessionRow
+    {
+        public string Id;
+        public string SessionId;
+        public string Cwd;
+        public string Name;
+        public string State;
+        public bool HasPid;
+        public string TranscriptPath;
+    }
+
+    private static void AppendEvent(string operation, params string[] values)
+    {
+        string path = Env("CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE");
+        if (String.IsNullOrEmpty(path)) return;
+        string[] fields = new string[values.Length + 1];
+        fields[0] = operation;
+        Array.Copy(values, 0, fields, 1, values.Length);
+        File.AppendAllText(path, String.Join("\t", fields) + Environment.NewLine, new UTF8Encoding(false));
+    }
+
+    private static Dictionary<string, SessionRow> ReadSessions(string defaultCwd)
+    {
+        Dictionary<string, SessionRow> rows = new Dictionary<string, SessionRow>();
+        rows["stale000"] = new SessionRow {
+            Id = "stale000", SessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            Cwd = defaultCwd, Name = "factory-test-task-test-task", State = "stopped",
+            TranscriptPath = "foreign-transcript"
+        };
+        rows["other999"] = new SessionRow {
+            Id = "other999", SessionId = "99999999-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            Cwd = defaultCwd + "-other", Name = "factory-other-task-unrelated", State = "done",
+            TranscriptPath = "other-transcript"
+        };
+        rows["orchestrator-static"] = new SessionRow {
+            Id = "orchestrator-static", SessionId = "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            Cwd = defaultCwd, Name = "Claude Factory Orchestrator", State = "blocked", HasPid = true
+        };
+
+        string registry = Env("CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE");
+        if (String.IsNullOrEmpty(registry) || !File.Exists(registry)) return rows;
+        foreach (string line in File.ReadAllLines(registry))
+        {
+            string[] fields = line.Split('\t');
+            if (fields.Length < 2) continue;
+            string operation = fields[0];
+            string id = fields[1];
+            if (operation == "launch" && fields.Length >= 5)
+            {
+                rows[id] = new SessionRow {
+                    Id = id,
+                    SessionId = id == "test1234" ? SessionId : id + "-session",
+                    Cwd = fields[2], Name = fields[3], State = fields[4],
+                    TranscriptPath = id == "test1234" && !String.IsNullOrEmpty(Env("CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH"))
+                        ? Env("CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH")
+                        : (id == "test1234" ? "live-transcript" : id + "-transcript")
+                };
+            }
+            else if (operation == "stop" && rows.ContainsKey(id))
+            {
+                rows[id].State = "stopped";
+                rows[id].HasPid = false;
+            }
+            else if (operation == "rm")
+            {
+                rows.Remove(id);
+            }
+        }
+        return rows;
+    }
+
+    private static string SessionJson(SessionRow row)
+    {
+        string pid = row.HasPid ? "\"pid\":4242," : "";
+        string transcript = String.IsNullOrEmpty(row.TranscriptPath) ? "" :
+            ",\"transcriptPath\":\"" + Json(row.TranscriptPath) + "\",\"lastAssistantMessage\":\"live\"";
+        return "{" + pid + "\"id\":\"" + Json(row.Id) + "\",\"sessionId\":\"" +
+            Json(row.SessionId) + "\",\"state\":\"" + Json(row.State) +
+            "\",\"status\":\"" + Json(row.State) + "\",\"kind\":\"background\",\"name\":\"" +
+            Json(row.Name) + "\",\"cwd\":\"" + Json(row.Cwd) + "\"" + transcript + "}";
+    }
+
     public static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--version")
@@ -61,7 +144,8 @@ public static class FakeClaude
                 Console.WriteLine("[]");
                 return 0;
             }
-            string cwd = Json(Env("CLAUDE_FACTORY_TEST_AGENT_CWD"));
+            string rawCwd = Env("CLAUDE_FACTORY_TEST_AGENT_CWD");
+            string cwd = Json(rawCwd);
             string orchestratorSessionId = Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID");
             if (!String.IsNullOrEmpty(orchestratorSessionId))
             {
@@ -71,13 +155,18 @@ public static class FakeClaude
                 );
                 return 0;
             }
+            Dictionary<string, SessionRow> sessions = ReadSessions(rawCwd);
             string status = Env("CLAUDE_FACTORY_TEST_AGENT_STATUS");
-            if (String.IsNullOrEmpty(status)) status = "working";
-            Console.WriteLine(
-                "[{\"sessionId\":\"interactive-session\",\"status\":\"idle\",\"kind\":\"interactive\",\"name\":\"unrelated interactive session\",\"cwd\":\"" + cwd + "\"}," +
-                "{\"id\":\"stale000\",\"sessionId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"status\":\"stopped\",\"kind\":\"background\",\"name\":\"factory-test-task-test-task\",\"cwd\":\"" + cwd + "\",\"transcriptPath\":\"foreign-transcript\",\"lastAssistantMessage\":\"foreign\"}," +
-                "{\"id\":\"test1234\",\"sessionId\":\"" + SessionId + "\",\"status\":\"" + status + "\",\"kind\":\"background\",\"name\":\"factory-test-task-test-task\",\"cwd\":\"" + cwd + "\",\"transcriptPath\":\"live-transcript\",\"lastAssistantMessage\":\"live\",\"startedAt\":1}]"
-            );
+            string liveTerminalId = Env("CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID");
+            List<string> jsonRows = new List<string>();
+            jsonRows.Add("{\"sessionId\":\"interactive-session\",\"status\":\"idle\",\"kind\":\"interactive\",\"name\":\"unrelated interactive session\",\"cwd\":\"" + cwd + "\"}");
+            foreach (SessionRow row in sessions.Values)
+            {
+                if (!String.IsNullOrEmpty(status) && row.Id == "test1234") row.State = status;
+                if (row.Id == liveTerminalId && row.State != "stopped") { row.State = "done"; row.HasPid = true; }
+                jsonRows.Add(SessionJson(row));
+            }
+            Console.WriteLine("[" + String.Join(",", jsonRows.ToArray()) + "]");
             return 0;
         }
 
@@ -89,6 +178,8 @@ public static class FakeClaude
             {
                 File.AppendAllText(stopFile, stoppedId + Environment.NewLine, new UTF8Encoding(false));
             }
+            if (Env("CLAUDE_FACTORY_TEST_STOP_FAIL_ID") == stoppedId) return 1;
+            AppendEvent("stop", stoppedId);
             return 0;
         }
 
@@ -98,9 +189,13 @@ public static class FakeClaude
             string rmFile = Env("CLAUDE_FACTORY_TEST_RM_FILE");
             if (!String.IsNullOrEmpty(rmFile))
             {
-                File.WriteAllText(rmFile, removedId, new UTF8Encoding(false));
+                File.AppendAllText(rmFile, removedId + Environment.NewLine, new UTF8Encoding(false));
             }
-            return Env("CLAUDE_FACTORY_TEST_RM_FAIL") == "1" ? 1 : 0;
+            string expectedPath = Env("CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM");
+            if (!String.IsNullOrEmpty(expectedPath) && !Directory.Exists(expectedPath)) return 2;
+            bool fail = Env("CLAUDE_FACTORY_TEST_RM_FAIL") == "1" || Env("CLAUDE_FACTORY_TEST_RM_FAIL_ID") == removedId;
+            if (!fail) AppendEvent("rm", removedId);
+            return fail ? 1 : 0;
         }
 
         if (args.Length > 0 && args[0] == "mcp")
@@ -141,6 +236,11 @@ public static class FakeClaude
             Env("CLAUDE_FACTORY_TEST_MISSING_AGENT") == "1"
         );
         string backgroundId = fallback || systemFailure ? "fallback" + launchNumber.ToString() : "test1234";
+        if (Has(args, "--bg")) {
+            string launchState = Env("CLAUDE_FACTORY_TEST_AGENT_STATUS");
+            if (String.IsNullOrEmpty(launchState)) launchState = "working";
+            AppendEvent("launch", backgroundId, Environment.CurrentDirectory, After(args, "--name"), launchState);
+        }
         if (fallback)
         {
             Console.Error.WriteLine(

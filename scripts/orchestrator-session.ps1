@@ -1,28 +1,5 @@
 Set-StrictMode -Version 2.0
-
-function Test-FactorySamePath {
-    param(
-        [Parameter(Mandatory = $true)][string]$Left,
-        [Parameter(Mandatory = $true)][string]$Right
-    )
-
-    try {
-        $leftFull = [IO.Path]::GetFullPath($Left).TrimEnd('\', '/')
-        $rightFull = [IO.Path]::GetFullPath($Right).TrimEnd('\', '/')
-        return $leftFull.Equals($rightFull, [StringComparison]::OrdinalIgnoreCase)
-    } catch {
-        return $false
-    }
-}
-
-function Test-FactoryTerminalAgentRow {
-    param([Parameter(Mandatory = $true)]$Row)
-
-    $terminal = @("done", "stopped", "failed")
-    $state = if ($null -ne $Row.PSObject.Properties["state"]) { [string]$Row.state } else { "" }
-    $status = if ($null -ne $Row.PSObject.Properties["status"]) { [string]$Row.status } else { "" }
-    return $state -in $terminal -or $status -in $terminal
-}
+. (Join-Path $PSScriptRoot "factory-common.ps1")
 
 function Get-FactoryMatchingOrchestratorRows {
     param(
