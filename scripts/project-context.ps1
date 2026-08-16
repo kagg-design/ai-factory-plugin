@@ -80,6 +80,8 @@ if ($Initialize) {
                 plan = $null
                 review = $null
                 approval = $null
+                integration = $null
+                production = $null
                 reworkRequestedAt = $null
                 planRecordedAt = $null
                 resultRecordedAt = $null
@@ -113,4 +115,5 @@ if ($Initialize) {
     worktreeRoot = $worktreeRoot
     resultSchemaPath = (Join-Path $pluginRoot "resources\result.schema.json")
     planSchemaPath = (Join-Path $pluginRoot "resources\plan.schema.json")
+    reviewSchemaPath = (Join-Path $pluginRoot "resources\review.schema.json")
 } | ConvertTo-Json -Depth 5

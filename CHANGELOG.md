@@ -1,10 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Added a formal exact-SHA review contract and native `factory go` publication
+  pipeline. Reviews now pin both remote bases, trusted integration/release
+  commands, and a plan hash; the native scheduler serially merges, tests,
+  pushes development and production without force, verifies reachability, and
+  runs guarded cleanup without an AI integration turn.
 - Replaced recurring AI cron polling with one hidden native PowerShell scheduler
   per repository. It reconciles workers, fills capacity, records heartbeat and
-  bounded backoff, starts with the orchestrator, and sleeps without model calls;
-  judgment-bearing integration remains a one-shot skill turn. Added unified
+  bounded backoff, starts with the orchestrator, and sleeps without model calls.
+  Added unified
   `factory start`, `paths`, `config`, scheduler/control, and guarded project
   `purge` commands over the compatibility `.ps1` implementations.
 - Preserved UTF-8 across Windows PowerShell 5.1 hook stdin and redirected

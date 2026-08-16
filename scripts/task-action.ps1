@@ -32,6 +32,21 @@ try {
             if ([string]$task.workerResult.commit -ne [string]$task.commit) {
                 throw "Validated worker result does not match task commit '$($task.commit)'."
             }
+            $review = Get-FactoryNestedValue -Target $task -Name "review"
+            if ($null -eq $review -or [string]$review.verdict -ne "approved") {
+                throw "Task '$TaskId' has no approved formal review. Run review first."
+            }
+            if ([string]$review.commit -ne [string]$task.commit) {
+                throw "Formal review does not match task commit '$($task.commit)'. Run review again."
+            }
+            $integrationPlan = Get-FactoryNestedValue -Target $review -Name "integrationPlan"
+            if ($null -eq $integrationPlan) {
+                throw "Task '$TaskId' review has no executable integration plan. Run review again."
+            }
+            $planHash = Assert-FactoryIntegrationPlan `
+                -Plan $integrationPlan `
+                -TaskId $TaskId `
+                -Commit ([string]$task.commit)
             if (-not (Test-Path -LiteralPath ([string]$task.worktree))) {
                 throw "Worker worktree is missing: $($task.worktree)"
             }
@@ -47,6 +62,7 @@ try {
 
             Set-FactoryProperty -Target $task -Name "approval" -Value ([pscustomobject]@{
                 commit = [string]$task.commit
+                planHash = $planHash
                 approvedAt = $now
             })
             Set-FactoryProperty -Target $task -Name "status" -Value "approved"
@@ -118,8 +134,9 @@ try {
         action = $Action
         status = [string]$task.status
         approvedCommit = if ($null -ne $task.approval) { [string]$task.approval.commit } else { $null }
-        backgroundId = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.id } else { $null }
-        attachCommand = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.attachCommand } else { $null }
+        approvedPlanHash = if ($null -ne $task.approval) { [string]$task.approval.planHash } else { $null }
+        backgroundId = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "") } else { $null }
+        attachCommand = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "attachCommand" -Default "") } else { $null }
         instructions = $Instructions
     } | ConvertTo-Json -Depth 20
 } finally {

@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "inspect", "doctor", "chat", "hold", "reject",
+        "help", "status", "inspect", "doctor", "chat", "go", "hold", "reject",
         "cleanup", "concurrency", "completion", "start", "paths", "config",
         "scheduler", "tick", "pause", "resume", "stop", "purge"
     )]
@@ -24,7 +24,7 @@ param(
         $staticValues = @(switch ($typedCommand) {
             "help" {
                 @(
-                    "status", "inspect", "doctor", "chat", "hold", "reject",
+                    "status", "inspect", "doctor", "chat", "go", "hold", "reject",
                     "cleanup", "concurrency", "completion", "start", "paths",
                     "config", "scheduler", "tick", "pause", "resume", "stop",
                     "purge", "help"
@@ -50,7 +50,7 @@ param(
             return
         }
 
-        if ($typedCommand -notin @("inspect", "chat", "hold", "reject", "cleanup")) { return }
+        if ($typedCommand -notin @("inspect", "chat", "go", "hold", "reject", "cleanup")) { return }
 
         try {
             $commandInfo = Get-Command $CommandName -ErrorAction Stop

@@ -84,6 +84,7 @@ factory start
 factory status
 factory inspect 1216632072822682
 factory chat 1216632072822682
+factory go 1216632072822682
 factory hold 1216632072822682
 factory reject 1216632072822682 -Yes
 factory cleanup 1216632072822682
@@ -102,6 +103,7 @@ using Claude Code's direct shell mode:
 ```text
 !factory status
 !factory inspect 1216632072822682
+!factory go 1216632072822682
 !factory hold 1216632072822682
 ```
 
@@ -114,10 +116,11 @@ enable PSReadLine's menu for the current terminal with
 line but never edits the profile automatically.
 
 Native commands cover launcher/runtime/scheduler control, deterministic reads,
-`hold`, confirmed `reject`, safe `cleanup`, and concurrency changes.
+formally reviewed `go`, `hold`, confirmed `reject`, safe `cleanup`, and
+concurrency changes.
 `factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
 inside that orchestrator adds work. Judgment-heavy workflows such as task
-intake, `sync`, `review`, and `go` still use `/factory ...`. A
+intake, `sync`, and `review` still use `/factory ...`. A
 plain `factory reject <id>` prints the exact destructive preview; repeat it with
 `-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
 rejection. The leading `!` is required inside Claude: without it, Claude
@@ -283,8 +286,8 @@ in Agent View.
 
 ## Human review gate
 
-A successful worker ends in `awaiting-review`. It is never integrated
-automatically.
+A successful worker ends in `awaiting-review`. It is never integrated before a
+formal AI review and explicit operator approval.
 
 Review the requirements, transcript, tests, and exact commit:
 
@@ -292,10 +295,19 @@ Review the requirements, transcript, tests, and exact commit:
 /factory review <task-id>
 ```
 
-Approve the exact clean worker SHA:
+Review records the verdict, risks, trusted integration/release commands, exact
+remote bases, and a hash of the immutable publication plan. Approve that exact
+clean worker SHA and plan:
 
 ```text
 /factory go <task-id>
+```
+
+After review, the deterministic equivalent is also available without an AI
+turn:
+
+```powershell
+factory go <task-id>
 ```
 
 Other decisions:
@@ -312,9 +324,11 @@ Other decisions:
 the text to paste. A full background session is independent, so the factory
 does not pretend it can inject keystrokes into the live TUI.
 
-If the worktree HEAD changes after approval, integration stops and requires a
-fresh review. The integrator merges the immutable approved SHA, not a moving
-branch name.
+If the worktree HEAD or a reviewed remote base changes after review, integration
+stops and requires synchronization/review again. The native scheduler merges
+the immutable approved SHA, runs every recorded check in isolated reusable
+worktrees, pushes both configured branches without force, verifies reachability,
+and cleans the worker. It never asks AI to resolve a merge conflict implicitly.
 
 ## Dynamic concurrency
 
@@ -390,9 +404,9 @@ exact next command. Completed rows are collapsed by default. Use
 `/factory status done`, or `/factory status all` to filter the report. Status is
 read-only: it reports commands but never launches or changes a task by itself.
 
-When the queue contains only tasks waiting for input or review, the recurring
-tick is removed so it does not print no-op messages. Adding a task, approving
-one, resuming, or increasing concurrency recreates it.
+When the queue contains only tasks waiting for input or review, the native
+scheduler remains asleep and emits no AI messages. Adding a task, approving one,
+resuming, or increasing concurrency wakes it immediately.
 
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,
@@ -476,9 +490,10 @@ factory:
 1. fetches the current remote development branch;
 2. merges the approved SHA;
 3. runs integration tests;
-4. fetches again and rebuilds if the remote moved;
+4. fetches again and stops before development push if its reviewed base moved;
 5. pushes without force;
-6. promotes in the separate `factory-release` worktree;
+6. promotes in the separate `factory-release` worktree, rebuilding and
+   retesting when a release input races;
 7. runs release tests and verifies remote reachability;
 8. cleans the worker only after verification.
 

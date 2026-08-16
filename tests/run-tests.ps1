@@ -102,8 +102,9 @@ try {
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
-    Assert-True ($publicSkill.Contains("Skill(factory:tick)")) "The public skill does not reference the internal tick."
+    Assert-True (-not $publicSkill.Contains("Skill(factory:tick)")) "The public skill still delegates approved publication to an AI tick."
     Assert-True ($publicSkill.Contains("factory-scheduler.ps1")) "The public skill does not use the native scheduler."
+    Assert-True ($publicSkill.Contains("record-review.ps1")) "The public skill does not persist a formal review plan."
     Assert-True (-not $publicSkill.Contains("CronCreate")) "The public skill still provisions an AI cron scheduler."
     Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
@@ -137,6 +138,7 @@ try {
     $tickSkillSource = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\tick\SKILL.md") -Raw
     Assert-True (-not $tickSkillSource.Contains("CronCreate")) "The internal tick still owns an AI cron scheduler."
     Assert-True ($tickSkillSource.Contains("factory-scheduler.ps1")) "The integration tick does not return capacity to the native scheduler."
+    Assert-True (-not $tickSkillSource.Contains("Resolve only obvious mechanical conflicts")) "The legacy tick still asks AI to resolve integration conflicts."
     Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
 
     $orchestratorRows = @(
@@ -171,6 +173,11 @@ try {
     Assert-True ($publicSkill.Contains('do not substitute')) "The public skill does not distinguish reject from cleanup."
     $taskActionSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\task-action.ps1") -Raw
     Assert-True ($taskActionSource.Contains("State-only rejection now requires")) "Legacy task-action reject still bypasses final discard semantics."
+    Assert-True ($taskActionSource.Contains("Assert-FactoryIntegrationPlan")) "Native go does not validate the formal integration plan."
+    $integrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Raw
+    Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", $Commit')) "Native integration does not merge the immutable approved SHA."
+    Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
+    Assert-True (-not $integrationSource.Contains("--force")) "Native integration contains a force operation."
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
     Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
     Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
@@ -216,7 +223,7 @@ try {
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
     Assert-Equal 5 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
-    Assert-Equal 4 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    Assert-Equal 5 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
@@ -313,6 +320,7 @@ try {
         -Command $isolatedCommand
     if ($LASTEXITCODE -ne 0) { throw "Isolated integrator command fixture failed." }
     Assert-Equal "factory_test_integrator" ([IO.File]::ReadAllText($integratorDatabaseCapture)) "Integrator checks did not receive their own database."
+    Remove-Item -LiteralPath $integratorWorktree -Recurse -Force
     $dropFailureTask = "drop-failure-task"
     $dropFailureDatabase = Initialize-FactoryTestDatabase -Config $migratedConfig -RepositoryRoot $repository -Scope worker -TaskId $dropFailureTask
     $env:CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP = [string]$dropFailureDatabase.name
@@ -385,7 +393,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal 4 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-Equal 5 ([int]$migratedState.version) "Legacy state version was not migrated."
     Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
@@ -395,6 +403,7 @@ try {
     $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
     Assert-True ($cliSource.Contains('[ValidateSet(') -and $cliSource.Contains('"completion"')) "Factory CLI does not expose native command completion."
+    Assert-True ($cliSource.Contains('"go"')) "Factory CLI does not expose native go."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -764,10 +773,47 @@ try {
     Assert-Equal $commit ([string]$syncFinal.commit) "Task sync finalized the wrong commit."
     Assert-True (-not (Test-Path -LiteralPath $syncReportPath)) "Task sync did not remove its temporary test report."
 
+    $phaseFourConfig = Read-FactoryJson -Path $context.configPath
+    $phaseFourConfig.autoPushDevelopment = $true
+    $phaseFourConfig.autoPromoteToProduction = $true
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $phaseFourConfig
+    $reviewPath = Join-Path $context.sessionsPath "test-task.review.json"
+    Write-FactoryJsonAtomic -Path $reviewPath -Value ([pscustomobject]@{
+        commit = $commit
+        verdict = "approved"
+        summary = "The synchronized fixture is safe to publish."
+        riskNotes = @("Synthetic README-only change.")
+        integrationTestCommands = @("git diff --check")
+        releaseTestCommands = @("git diff --check")
+    })
+    $recordedReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "test-task" -ReviewPath $reviewPath) |
+        ConvertFrom-Json
+    Assert-Equal "approved" ([string]$recordedReview.verdict) "Formal review verdict was not recorded."
+    Assert-Equal 64 ([string]$recordedReview.planHash).Length "Formal review plan was not hashed."
+    Assert-True (-not (Test-Path -LiteralPath $reviewPath)) "Formal review input was not removed from private sessions."
+
+    $tamperedState = Read-FactoryJson -Path $context.statePath
+    $savedReview = $tamperedState.tasks[0].review | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+    $tamperedState.tasks[0].review.integrationPlan.integrationTestCommands = @("git diff --check", "git status --short")
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $tamperedState
+    $previousTamperErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "test-task" 2>&1)
+        $tamperedGoExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousTamperErrorAction
+    }
+    Assert-True ($tamperedGoExit -ne 0) "Native go accepted a tampered integration plan."
+    $restoredReviewState = Read-FactoryJson -Path $context.statePath
+    $restoredReviewState.tasks[0].review = $savedReview
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $restoredReviewState
+
     $decision = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "test-task") |
         ConvertFrom-Json
     Assert-Equal "approved" ([string]$decision.status) "Explicit go did not approve the task."
     Assert-Equal $commit ([string]$decision.approvedCommit) "Approval did not pin the exact commit."
+    Assert-Equal ([string]$recordedReview.planHash) ([string]$decision.approvedPlanHash) "Approval did not pin the formal plan hash."
 
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     $stateAfterSecondReconcile = Read-FactoryJson -Path $context.statePath
@@ -855,6 +901,65 @@ try {
         $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "other999"
     }).Count) "Answer or cleanup removed another task's row."
     Assert-Equal 1 (@($rowsAfterCleanup | Where-Object { [string]$_.kind -eq "interactive" }).Count) "Answer or cleanup removed the id-less interactive row."
+
+    $pipelineState = Read-FactoryJson -Path $context.statePath
+    $pipelineWorktree = Join-Path ([string]$context.worktreeRoot) "worker-pipeline-task"
+    $pipelineBranch = "factory-worker/pipeline-task"
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository worktree add -b $pipelineBranch $pipelineWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create native pipeline fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $pipelineWorktree "PIPELINE.md"), "native pipeline`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $pipelineWorktree add PIPELINE.md
+    & git -C $pipelineWorktree commit -m "test: native integration pipeline" 1> $null
+    $pipelineCommit = (& git -C $pipelineWorktree rev-parse HEAD).Trim()
+    $pipelineTask = New-FactoryTestTask -Id "pipeline-task" -Title "Native integration pipeline" -Now (Get-FactoryUtcTimestamp)
+    $pipelineTask.status = "awaiting-review"
+    $pipelineTask.branch = $pipelineBranch
+    $pipelineTask.commit = $pipelineCommit
+    $pipelineTask.worktree = $pipelineWorktree
+    $pipelineTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = "pipeline-task"; branch = $pipelineBranch; commit = $pipelineCommit
+        worktree = $pipelineWorktree; changedFiles = @("PIPELINE.md")
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        notes = "Ready for native publication."; blockingReason = ""
+    }
+    $pipelineTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-pipeline-task" }
+    $pipelineState.tasks = @($pipelineState.tasks) + @($pipelineTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $pipelineState
+    $pipelineReviewPath = Join-Path $context.sessionsPath "pipeline-task.review.json"
+    Write-FactoryJsonAtomic -Path $pipelineReviewPath -Value ([pscustomobject]@{
+        commit = $pipelineCommit; verdict = "approved"; summary = "Native pipeline fixture approved."
+        riskNotes = @(); integrationTestCommands = @("git diff --check"); releaseTestCommands = @("git diff --check")
+    })
+    $pipelineReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "pipeline-task" -ReviewPath $pipelineReviewPath) | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$pipelineReview.verdict) "Native pipeline review was not recorded."
+    $pipelineGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task") | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$pipelineGo.status) "Native pipeline fixture was not approved."
+    $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal 1 ([int]$pipelineTick.integratedCount) "Native scheduler did not integrate exactly one approved task."
+    Assert-Equal 0 @($pipelineTick.errors).Count "Native pipeline reported an error."
+    $pipelineFinalState = Read-FactoryJson -Path $context.statePath
+    $pipelineFinalTask = @($pipelineFinalState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    Assert-Equal "done" ([string]$pipelineFinalTask.status) "Native pipeline did not finish cleanup."
+    Assert-Equal "published" ([string]$pipelineFinalTask.integration.status) "Native pipeline did not audit development publication."
+    Assert-Equal "published" ([string]$pipelineFinalTask.production.status) "Native pipeline did not audit production publication."
+    Assert-True (-not (Test-Path -LiteralPath $pipelineWorktree)) "Native pipeline left its worker worktree behind."
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository merge-base --is-ancestor $pipelineCommit origin/develop
+    Assert-Equal 0 $LASTEXITCODE "Native pipeline commit is absent from remote development."
+    & git -C $repository merge-base --is-ancestor $pipelineCommit origin/master
+    Assert-Equal 0 $LASTEXITCODE "Native pipeline commit is absent from remote production."
+    $previousDoneIntegrationErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Repository $repository -TaskId "pipeline-task" -ClaudeCommand $fakeClaude 2>&1)
+        $doneIntegrationExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousDoneIntegrationErrorAction
+    }
+    Assert-True ($doneIntegrationExit -ne 0) "Native integrator accepted a done task."
+    $stateAfterDoneIntegration = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "done" ([string](@($stateAfterDoneIntegration.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0].status)) "Rejected manual integration mutated a done task."
 
     $registryPath = [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE
     [IO.File]::AppendAllText(

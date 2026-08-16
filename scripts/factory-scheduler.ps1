@@ -158,7 +158,25 @@ function Invoke-SchedulerTick {
             "-ClaudeCommand", $ClaudeCommand
         )
         $launched = New-Object Collections.Generic.List[object]
+        $integrated = New-Object Collections.Generic.List[object]
         $errors = New-Object Collections.Generic.List[string]
+
+        $state = Read-FactoryJson -Path ([string]$context.statePath)
+        if ([bool]$state.active -and -not [bool]$state.paused) {
+            $approved = @($state.tasks | Where-Object { [string]$_.status -eq "approved" } | Sort-Object createdAt, id)
+            if ($approved.Count -gt 0) {
+                try {
+                    $pipeline = Invoke-SchedulerChildJson -ScriptName "integrate-task.ps1" -Arguments @(
+                        "-Repository", [string]$context.repositoryRoot,
+                        "-TaskId", [string]$approved[0].id,
+                        "-ClaudeCommand", $ClaudeCommand
+                    )
+                    $integrated.Add($pipeline)
+                } catch {
+                    $errors.Add($_.Exception.Message)
+                }
+            }
+        }
 
         while ($true) {
             $state = Read-FactoryJson -Path ([string]$context.statePath)
@@ -197,7 +215,7 @@ function Invoke-SchedulerTick {
             mode = "native"
             lastTickAt = $now
         }
-        if ($launched.Count -gt 0 -or [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0) -gt 0) {
+        if ($launched.Count -gt 0 -or $integrated.Count -gt 0 -or [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0) -gt 0) {
             $schedulerValues.lastTransitionAt = $now
         }
         Update-SchedulerState -Values $schedulerValues
@@ -206,9 +224,10 @@ function Invoke-SchedulerTick {
             reconciledTransitions = [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0)
             launched = $launched.ToArray()
             launchedCount = $launched.Count
+            integrated = $integrated.ToArray()
+            integratedCount = $integrated.Count
             activeWorkers = $activeWorkers
             queued = $queuedCount
-            aiIntegrationRequired = ($approvedCount -gt 0)
             approvedPipelineTasks = $approvedCount
             errors = $errors.ToArray()
         }

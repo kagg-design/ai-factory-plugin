@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [switch]$FinalizeProduction
 )
 
 $ErrorActionPreference = "Stop"
@@ -114,9 +115,16 @@ try {
 
     if ([string]$task.status -in @(
         "queued", "starting", "planning", "running", "approved",
-        "integrating", "production", "syncing"
+        "integrating", "syncing"
     )) {
         throw "Task '$TaskId' is '$($task.status)' and cannot be cleaned up while active."
+    }
+    if ([string]$task.status -eq "production") {
+        $integrationStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "integration") -Name "status" -Default "")
+        $productionStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "production") -Name "status" -Default "")
+        if (-not $FinalizeProduction -or $integrationStatus -ne "published" -or $productionStatus -ne "published") {
+            throw "Task '$TaskId' is in production and has not completed the native publication pipeline."
+        }
     }
     if (
         $null -ne $task.backgroundSession -and

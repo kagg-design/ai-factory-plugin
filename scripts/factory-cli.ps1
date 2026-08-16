@@ -264,10 +264,22 @@ function Get-CliNextAction {
         }
         { $_ -in @("starting", "planning", "running", "awaiting-input") } { "/factory chat $id" }
         "syncing" { "/factory sync $id" }
-        "awaiting-review" { "/factory review $id" }
+        "awaiting-review" {
+            $review = Get-CliProperty -InputObject $Task -Name "review"
+            if ([string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
+                [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
+                $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")) {
+                "/factory go $id"
+            } else { "/factory review $id" }
+        }
         { $_ -in @("approved", "integrating", "production") } { "automatic; the factory will continue" }
         "held" {
-            if ($commit -and $resultCommit -eq $commit) { "/factory review $id" }
+            $review = Get-CliProperty -InputObject $Task -Name "review"
+            $hasApprovedPlan = [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
+                [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
+                $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")
+            if ($commit -and $resultCommit -eq $commit -and $hasApprovedPlan) { "/factory go $id" }
+            elseif ($commit -and $resultCommit -eq $commit) { "/factory review $id" }
             elseif ($isMachineHeld) { "/factory retry $id" }
             else { "/factory inspect $id" }
         }
@@ -521,6 +533,22 @@ function Write-CliInspect {
     $review = Get-CliProperty -InputObject $task -Name "review"
     $reviewVerdict = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "verdict")
     if ($reviewVerdict) { Add-CliInspectLine -Lines $lines -Text "Review: $reviewVerdict" }
+    $reviewSummary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "summary")
+    if ($reviewSummary) { Add-CliInspectLine -Lines $lines -Text "Review summary: $reviewSummary" }
+    foreach ($risk in @(Get-CliProperty -InputObject $review -Name "riskNotes" -Default @())) {
+        Add-CliInspectLine -Lines $lines -Text "Review risk: $(ConvertTo-CliLine -Value $risk)"
+    }
+    $integrationPlan = Get-CliProperty -InputObject $review -Name "integrationPlan"
+    $integrationPlanHash = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $integrationPlan -Name "planHash")
+    if ($integrationPlanHash) {
+        Add-CliInspectLine -Lines $lines -Text "Integration plan: $(Get-CliShortId -Value $integrationPlanHash) $($script:Tree.Horizontal) $([string](Get-CliProperty -InputObject $integrationPlan -Name 'remote'))/$([string](Get-CliProperty -InputObject $integrationPlan -Name 'developmentBranch')) at $(Get-CliShortId -Value (Get-CliProperty -InputObject $integrationPlan -Name 'developmentBase'))"
+        foreach ($command in @(Get-CliProperty -InputObject $integrationPlan -Name "integrationTestCommands" -Default @())) {
+            Add-CliInspectLine -Lines $lines -Text "Integration check: $(ConvertTo-CliLine -Value $command)"
+        }
+        foreach ($command in @(Get-CliProperty -InputObject $integrationPlan -Name "releaseTestCommands" -Default @())) {
+            Add-CliInspectLine -Lines $lines -Text "Release check: $(ConvertTo-CliLine -Value $command)"
+        }
+    }
     $approval = Get-CliProperty -InputObject $task -Name "approval"
     $approvedCommit = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $approval -Name "commit")
     if ($approvedCommit) { Add-CliInspectLine -Lines $lines -Text "Approved commit: $approvedCommit" }
@@ -626,6 +654,31 @@ function Write-CliHold {
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resume later: /factory answer $TaskId --text `"Continue`""
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) No AI call was used."
+}
+
+function Write-CliGo {
+    param($Context, $State, [string]$TaskId)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $result = Invoke-CliJsonScript -ScriptName "task-action.ps1" -Arguments @(
+        "-Repository", [string]$Repository,
+        "-Action", "go",
+        "-TaskId", $TaskId,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    $schedulerResult = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
+        "-Action", "start",
+        "-Repository", [string]$Context.repositoryRoot,
+        "-ClaudeCommand", $ClaudeCommand,
+        "-RuntimeHome", [string]$Context.runtimeHome
+    )
+    $scheduler = Get-CliProperty -InputObject $schedulerResult -Name "scheduler"
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Approved $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Commit: $([string]$result.approvedCommit)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Review plan: $(Get-CliShortId -Value $result.approvedPlanHash)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Native scheduler: $([string]$scheduler.status)"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Integration, checks, promotion, and cleanup will continue without an AI turn."
 }
 
 function Write-CliRejectResult {
@@ -795,16 +848,16 @@ function Write-CliSchedulerResult {
     param($Result, [string]$Action)
 
     if ($Action -eq "tick") {
-        Write-Output "Native tick: launched $([int](Get-CliProperty -InputObject $Result -Name 'launchedCount' -Default 0)); active $([int](Get-CliProperty -InputObject $Result -Name 'activeWorkers' -Default 0)); queued $([int](Get-CliProperty -InputObject $Result -Name 'queued' -Default 0))"
+        Write-Output "Native tick: integrated $([int](Get-CliProperty -InputObject $Result -Name 'integratedCount' -Default 0)); launched $([int](Get-CliProperty -InputObject $Result -Name 'launchedCount' -Default 0)); active $([int](Get-CliProperty -InputObject $Result -Name 'activeWorkers' -Default 0)); queued $([int](Get-CliProperty -InputObject $Result -Name 'queued' -Default 0))"
+        foreach ($pipeline in @(Get-CliProperty -InputObject $Result -Name "integrated" -Default @())) {
+            Write-Output "  published $([string]$pipeline.taskId): $([string]$pipeline.commit)"
+        }
         foreach ($launch in @(Get-CliProperty -InputObject $Result -Name "launched" -Default @())) {
             $session = Get-CliProperty -InputObject $launch -Name "backgroundSession"
             Write-Output "  launched $([string]$launch.taskId): claude attach $(Get-CliShortId -Value (Get-CliProperty -InputObject $session -Name 'id'))"
         }
         foreach ($errorText in @(Get-CliProperty -InputObject $Result -Name "errors" -Default @())) {
             Write-Output "  error: $(ConvertTo-CliLine -Value $errorText)"
-        }
-        if ([bool](Get-CliProperty -InputObject $Result -Name "aiIntegrationRequired" -Default $false)) {
-            Write-Output "  approved integration is waiting for the one-shot AI integration stage"
         }
         return
     }
@@ -894,6 +947,7 @@ function Write-CliHelp {
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory chat <task-id>",
+            "  factory go <task-id>",
             "  factory hold <task-id>",
             "  factory reject <task-id> [-Yes|-Keep] [reason]",
             "  factory cleanup <task-id>",
@@ -912,7 +966,7 @@ function Write-CliHelp {
             "  !factory inspect <task-id>",
             "",
             "PowerShell completes commands, status filters, and saved task IDs with Tab.",
-            "AI workflows still use /factory start|sync|review|go in the orchestrator.",
+            "AI is used for planning, implementation, conflict-aware sync, and review; approved publication is native.",
             "Run 'factory help <command>' for command-specific details."
         ) | Write-Output
         return
@@ -945,6 +999,13 @@ function Write-CliHelp {
             @(
                 "factory hold <task-id>",
                 "Moves an awaiting-review, approved, or awaiting-input task to held without AI."
+            ) | Write-Output
+        }
+        "go" {
+            @(
+                "factory go <task-id>",
+                "Approves the exact commit and formal review plan without AI interpretation.",
+                "The native scheduler then integrates, tests, pushes, promotes, verifies, and cleans up."
             ) | Write-Output
         }
         "reject" {
@@ -999,7 +1060,7 @@ function Write-CliHelp {
             @(
                 "factory scheduler [status|start|stop|tick]",
                 "Controls the deterministic local scheduler process.",
-                "'tick' reconciles workers and fills capacity once; code review and integration judgment remain AI-backed."
+                "'tick' reconciles workers, integrates one formally approved commit, and fills worker capacity once."
             ) | Write-Output
         }
         "purge" {
@@ -1122,6 +1183,10 @@ switch ($normalizedCommand) {
     "chat" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "chat accepts exactly one task ID." }
         Write-CliChat -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
+    }
+    "go" {
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "go accepts exactly one task ID." }
+        Write-CliGo -Context $context -State $state -TaskId $Target
     }
     "hold" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "hold accepts exactly one task ID." }

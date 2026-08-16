@@ -238,6 +238,72 @@ function Get-FactoryFileSha256 {
     }
 }
 
+function Get-FactoryIntegrationPlanCanonicalValue {
+    param([Parameter(Mandatory = $true)]$Plan)
+
+    return [ordered]@{
+        version = [int](Get-FactoryNestedValue -Target $Plan -Name "version" -Default 1)
+        taskId = [string](Get-FactoryNestedValue -Target $Plan -Name "taskId" -Default "")
+        taskCommit = [string](Get-FactoryNestedValue -Target $Plan -Name "taskCommit" -Default "")
+        remote = [string](Get-FactoryNestedValue -Target $Plan -Name "remote" -Default "")
+        developmentBranch = [string](Get-FactoryNestedValue -Target $Plan -Name "developmentBranch" -Default "")
+        developmentBase = [string](Get-FactoryNestedValue -Target $Plan -Name "developmentBase" -Default "")
+        productionBranch = [string](Get-FactoryNestedValue -Target $Plan -Name "productionBranch" -Default "")
+        productionBase = [string](Get-FactoryNestedValue -Target $Plan -Name "productionBase" -Default "")
+        productionMode = [string](Get-FactoryNestedValue -Target $Plan -Name "productionMode" -Default "")
+        allowUnrelatedDevelopCommitsToProduction = [bool](Get-FactoryNestedValue -Target $Plan -Name "allowUnrelatedDevelopCommitsToProduction" -Default $false)
+        integrationTestCommands = @((Get-FactoryNestedValue -Target $Plan -Name "integrationTestCommands" -Default @()) | ForEach-Object { [string]$_ })
+        releaseTestCommands = @((Get-FactoryNestedValue -Target $Plan -Name "releaseTestCommands" -Default @()) | ForEach-Object { [string]$_ })
+        autoPushDevelopment = [bool](Get-FactoryNestedValue -Target $Plan -Name "autoPushDevelopment" -Default $false)
+        autoPromoteToProduction = [bool](Get-FactoryNestedValue -Target $Plan -Name "autoPromoteToProduction" -Default $false)
+        createdAt = [string](Get-FactoryNestedValue -Target $Plan -Name "createdAt" -Default "")
+    }
+}
+
+function Get-FactoryIntegrationPlanHash {
+    param([Parameter(Mandatory = $true)]$Plan)
+
+    $canonical = Get-FactoryIntegrationPlanCanonicalValue -Plan $Plan
+    $json = $canonical | ConvertTo-Json -Depth 30 -Compress
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Assert-FactoryIntegrationPlan {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$Commit
+    )
+
+    if ([int](Get-FactoryNestedValue -Target $Plan -Name "version" -Default 0) -ne 1) {
+        throw "Task '$TaskId' has an unsupported integration plan version. Run review again."
+    }
+    if ([string](Get-FactoryNestedValue -Target $Plan -Name "taskId" -Default "") -ne $TaskId) {
+        throw "Task '$TaskId' has an integration plan for a different task. Run review again."
+    }
+    if ([string](Get-FactoryNestedValue -Target $Plan -Name "taskCommit" -Default "") -ne $Commit) {
+        throw "Task '$TaskId' integration plan does not pin commit '$Commit'. Run review again."
+    }
+    $savedHash = [string](Get-FactoryNestedValue -Target $Plan -Name "planHash" -Default "")
+    $computedHash = Get-FactoryIntegrationPlanHash -Plan $Plan
+    if (-not $savedHash -or $savedHash -ne $computedHash) {
+        throw "Task '$TaskId' integration plan hash is invalid. Run review again."
+    }
+    if (@(Get-FactoryNestedValue -Target $Plan -Name "integrationTestCommands" -Default @()).Count -eq 0) {
+        throw "Task '$TaskId' integration plan has no integration checks. Run review again."
+    }
+    if (@(Get-FactoryNestedValue -Target $Plan -Name "releaseTestCommands" -Default @()).Count -eq 0) {
+        throw "Task '$TaskId' integration plan has no release checks. Run review again."
+    }
+    return $computedHash
+}
+
 function ConvertTo-FactorySafeName {
     param(
         [Parameter(Mandatory = $true)][string]$Value,

@@ -16,8 +16,8 @@ The factory has four distinct layers:
    a short session ID such as `1a20569f` and a name such as
    `factory-1216632072822682-surface-pending-pto-requests`.
 4. **Native scheduler** — one hidden PowerShell process that reconciles workers,
-   fills capacity, publishes a heartbeat, and sleeps without consuming AI turns.
-   Explicitly approved commits still use one judgment-bearing integration turn.
+   fills capacity, executes formally approved publication plans, publishes a
+   heartbeat, and sleeps without consuming AI turns.
 
 Queue state, session metadata, and worker results are stored independently of
 the orchestrator conversation:
@@ -102,6 +102,7 @@ Deterministic operations also have a native fast path:
 !factory status [state|all]
 !factory inspect <task-id>
 !factory chat <task-id>
+!factory go <task-id>
 !factory hold <task-id>
 !factory reject <task-id> [-Yes|-Keep] [reason]
 !factory cleanup <task-id>
@@ -132,10 +133,10 @@ The second command selects `MenuComplete` for the current terminal only. To
 make it persistent, add the line reported by the command to `$PROFILE`
 yourself; Factory never edits a PowerShell profile automatically.
 
-`hold`, confirmed `reject`, safe `cleanup`, and concurrency changes are native
-because their validation is deterministic. Commands that require code judgment
-or orchestration (`start`, `sync`, `review`, and `go`) still use `/factory ...`
-in this phase. A plain native `factory reject <id>` is a preview when artifacts
+`go`, `hold`, confirmed `reject`, safe `cleanup`, and concurrency changes are
+native because their execution is deterministic. Commands that require code
+judgment (`start`, `sync`, and `review`) still use `/factory ...`. A plain native
+`factory reject <id>` is a preview when artifacts
 exist. Repeat with `-Yes` or `--yes` to remove the task and its artifacts, or
 use `-Keep` or `--keep` to retain artifacts in rejected state.
 
@@ -338,14 +339,16 @@ approval are still required before integration.
 
 ## 10. Review and approval
 
-Run a read-only review first:
+Run a code review first:
 
 ```text
 /factory review 1216632072822682
 ```
 
 The orchestrator checks the requirements, plan, transcript, exact diff,
-reported tests, and current commit SHA.
+reported tests, and current commit SHA. It then records a formal private review
+containing the verdict, residual risks, trusted integration/release checks,
+current development and production tips, and a hash of that immutable plan.
 
 If the result is acceptable:
 
@@ -353,8 +356,14 @@ If the result is acceptable:
 /factory go 1216632072822682
 ```
 
-`go` approves only the exact clean worker SHA. If the worker HEAD changes
-after approval, integration stops and requires a new review.
+`go` approves only the exact clean worker SHA and matching formal plan hash. It
+is also available directly as `factory go <id>` or `!factory go <id>`; those
+forms do not invoke AI. The native scheduler merges the approved SHA, runs all
+recorded checks in its isolated integrator/release worktrees, pushes without
+force, verifies both remotes, and performs guarded cleanup. If either remote
+moved since review, the worker HEAD changed, a check failed, or a conflict
+occurred, publication stops with an exact saved reason instead of asking AI to
+repair it implicitly.
 
 Other decisions:
 
@@ -558,8 +567,8 @@ Claude process environment. A retry or answer reuses it; a hold preserves it.
 the exact derived database before touching the worktree. If the database cannot
 be dropped, Git artifacts and task state remain available for a safe retry.
 
-Integration and release checks must use the bundled wrapper exactly as required
-by the internal tick skill. Their databases are `<prefix>_integrator` and
+Integration and release checks are executed by the native pipeline through the
+bundled wrapper. Their databases are `<prefix>_integrator` and
 `<prefix>_release`, so they cannot collide with running workers. PostgreSQL 13+
 is required for `DROP DATABASE ... WITH (FORCE)`.
 
