@@ -15,8 +15,9 @@ The factory has four distinct layers:
 3. **Worker** — a separate Claude Code background session for one task. It has
    a short session ID such as `1a20569f` and a name such as
    `factory-1216632072822682-surface-pending-pto-requests`.
-4. **Scheduler** — a recurring `/factory:tick` job that launches queued work,
-   reconciles worker results, and serially integrates approved commits.
+4. **Native scheduler** — one hidden PowerShell process that reconciles workers,
+   fills capacity, publishes a heartbeat, and sleeps without consuming AI turns.
+   Explicitly approved commits still use one judgment-bearing integration turn.
 
 Queue state, session metadata, and worker results are stored independently of
 the orchestrator conversation:
@@ -39,7 +40,7 @@ Start the factory from the target Git repository:
 
 ```powershell
 cd C:\laragon\www\motivehr
-C:\laragon\www\Projects\claude-factory-plugin\start-factory.ps1
+factory start
 ```
 
 Then check its state without waiting for AI interpretation:
@@ -63,8 +64,8 @@ The AI-backed compatibility form remains available:
 
 If orchestration was stopped or paused:
 
-```text
-/factory resume
+```powershell
+factory resume
 ```
 
 ### Why normal startup should not use `-Continue`
@@ -78,14 +79,14 @@ orchestrator exactly. For manual recovery of a legacy conversation that predates
 the stored identity, use:
 
 ```powershell
-start-factory.ps1 -Resume
+factory start -Resume
 ```
 
 In the resume picker, inspect the conversation preview instead of relying only
 on its name. An unrelated resumed session may previously have been renamed
 `Claude Factory Orchestrator`.
 
-Use `start-factory.ps1 -New` only to deliberately replace the stored
+Use `factory start -New` only to deliberately replace the stored
 conversation. The launcher still refuses to create a new one while a matching
 interactive or background orchestrator is live.
 
@@ -108,6 +109,10 @@ Deterministic operations also have a native fast path:
 !factory doctor
 !factory completion [status|enable]
 ```
+
+Outside Claude, `factory start`, `factory paths`, `factory config`, and
+`factory scheduler` replace the old root-script commands. The `.ps1` files
+remain internal implementations and compatibility entry points.
 
 The `!` is Claude Code shell mode, so those lines execute the PowerShell
 implementation directly. In an ordinary PowerShell terminal, omit it and run
@@ -170,7 +175,7 @@ counts. Every unfinished task is shown as a narrow card:
 
 ```text
 ╭─ Factory · MotiveHR
-│  ○ idle · workers 0/3 · scheduler sleeping
+│  ○ idle · workers 0/3 · native scheduler sleeping (PID 12345)
 ├─ ◆ NEEDS YOUR ACTION · 2
 │  ├─ REVIEW · 1216643944203164 — Team PTO: taken-YTD + overlaps
 │  │  ├─ State: ready for review
@@ -188,7 +193,7 @@ counts. Every unfinished task is shown as a narrow card:
 │     └─ Resume: /factory answer 1216606487211903 --text "Continue"
 ├─ ✓ COMPLETED · 3
 │  └─ History: /factory status done
-╰─ Factory enabled · no runnable tasks · scheduler sleeping
+╰─ Factory enabled · no runnable tasks · native scheduler sleeping
 ```
 
 Use filters when the default view is too broad:
@@ -205,9 +210,10 @@ completion summary, and the corresponding `inspect` command. It does not
 present an old attach command as the main action. The default view omits
 completed task rows.
 
-An absent scheduler is expected when every unfinished task requires an operator
-decision. It is recreated when work is queued, a task is approved, the factory
-is resumed, or concurrency is increased while queued work exists.
+The native scheduler normally remains alive and sleeps cheaply when every task
+requires an operator decision. `factory scheduler status` shows its exact PID,
+heartbeat, last tick, and last error. `factory start` and `factory resume`
+restart it when needed; no Claude cron job is created.
 
 ## 5. IDs shown in status output
 
@@ -442,29 +448,28 @@ preview confirmation unless `--yes` is supplied.
 
 Prevent new launches and integration while retaining all artifacts:
 
-```text
-/factory pause
+```powershell
+factory pause
 ```
 
 Resume orchestration:
 
-```text
-/factory resume
+```powershell
+factory resume
 ```
 
-Deactivate the queue and remove its scheduler while retaining sessions,
+Deactivate the queue and stop its scheduler while retaining sessions,
 branches, commits, and worktrees:
 
-```text
-/factory stop
+```powershell
+factory stop
 ```
 
-After restarting the computer or Claude Code, start the factory without
-`-Continue`, then run:
+After restarting the computer or Claude Code, run:
 
 ```text
-/factory status
-/factory resume
+factory start
+factory status
 ```
 
 If a background session stops without a valid `FACTORY_RESULT`, reconciliation
@@ -495,6 +500,7 @@ refreshes the file without duplicating the pointer or attempt.
 /factory inspect <task-id>
 /factory transcript <task-id>
 /factory doctor
+factory scheduler status
 ```
 
 - `status` reconciles sessions and summarizes the queue.
@@ -503,6 +509,8 @@ refreshes the file without duplicating the pointer or attempt.
 - `doctor` checks the CLI, PowerShell runtime and required cmdlets, parsed worker
   definition, agent-resolution cache, runtime files, locks, worktrees, and
   scheduler.
+- `factory scheduler status` validates the recorded PID/start time and reports
+  the native heartbeat without calling AI.
 
 A worker session reports `agentResolution: plugin` when Claude resolved the
 session-only plugin agent directly. `inline-fallback` means the launcher safely
@@ -580,14 +588,14 @@ workers that are already running.
 - Do not use `-Continue` for normal factory startup.
 - Do not manually delete worker worktrees or branches before review completes.
 - Do not push or merge from a worker branch.
-- Do not run `cleanup-project.ps1 -Force` without manual inspection; it can
+- Do not run `factory purge -Yes -Force` without reading its preview; it can
   remove uncommitted work.
 - Do not run `go` before reading `/factory review`.
 
 ## 16. Daily checklist
 
 ```text
-1. Start start-factory.ps1 without -Continue.
+1. Run factory start.
 2. Run /factory status.
 3. For awaiting-input: run /factory chat <id>, open the worker, and reply.
 4. For awaiting-review: run /factory review <id>.

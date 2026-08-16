@@ -1,6 +1,6 @@
 ---
 name: tick
-description: Reconcile conversational background worker sessions, integrate one explicitly approved commit, and refill the Claude Factory queue.
+description: Perform one judgment-bearing integration and production promotion for an explicitly approved Factory commit.
 argument-hint: ""
 user-invocable: true
 allowed-tools:
@@ -11,7 +11,6 @@ allowed-tools:
   - Grep
   - Bash
   - PowerShell
-  - CronCreate
   - CronList
   - CronDelete
 ---
@@ -46,8 +45,13 @@ integrating production done held rejected blocked failed review
 Never relaunch a task that retains a background session ID, usable worktree, or
 validated commit.
 
-If state is inactive, delete a stale matching cron job and stop. If paused,
-launch and integrate nothing.
+If state is inactive or paused, stop. The native scheduler owns recurring
+reconciliation and worker capacity; this skill is a one-shot integration stage.
+
+Before stopping, migrate a legacy scheduler exactly once: if `cronJobId` is
+non-empty, use `CronList`, delete only the matching job whose prompt is
+`/factory:tick`, then clear `cronJobId` atomically. Never create a replacement
+Claude cron job. This lets an old recurring tick remove itself after upgrade.
 
 ## 1. Integrate at most one explicitly approved task
 
@@ -144,45 +148,18 @@ After remote verification:
 
 Never delete uncommitted work or an unreachable commit.
 
-## 4. Fill dynamic capacity
+## 4. Return capacity control to the native scheduler
 
-Active capacity is the number of tasks in:
-
-```text
-starting planning running
-```
-
-`awaiting-input` and `awaiting-review` sessions are idle and do not consume a
-launch slot. While active capacity is below `config.concurrency`, select the
-oldest `queued` task and run:
+After integration/promotion finishes or stops at a review boundary, invoke one
+native tick so queued work can use newly available capacity:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/start-worker-session.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId "TASK_ID" -Mode "TASK_START_MODE"
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/factory-scheduler.ps1" -Action tick -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
-Launch one session per task. Each call creates or safely reuses the external
-worktree, starts `claude --bg --agent factory:worker`, saves both the
-short background ID and full session UUID, and returns immediately. Stop
-filling capacity on the first launch failure so repeated errors do not fan out.
+Never create, list, or delete Claude cron jobs. Never launch workers directly
+from this skill. The persistent native scheduler owns reconciliation, capacity,
+backoff, and idle sleeping without AI turns.
 
-A lower concurrency never kills existing workers. An increase takes effect in
-this loop immediately.
-
-## 5. Quiet idle behavior
-
-Keep the scheduler only while at least one task is:
-
-```text
-queued starting planning running approved integrating production
-```
-
-If only `awaiting-input`, `syncing`, `awaiting-review`, `held`, `rejected`,
-`blocked`, `failed`, `review`, or `done` remain:
-
-- set `active: false`;
-- delete the matching `/factory:tick` cron job;
-- clear `cronJobId`;
-- preserve every session, commit, branch, worktree, and transcript.
-
-New tasks, `go`, `resume`, or a concurrency increase restart it. When nothing
-changed, finish silently; otherwise report one compact queue summary.
+When nothing changed, finish silently; otherwise report one compact integration
+summary followed by any native launches returned by the tick.

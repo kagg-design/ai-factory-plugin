@@ -12,9 +12,6 @@ allowed-tools:
   - Bash
   - PowerShell
   - Skill(factory:tick)
-  - CronCreate
-  - CronList
-  - CronDelete
 ---
 
 Manage Claude Factory for the current Git repository. Keep operational
@@ -63,6 +60,11 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory cleanup <id>    remove published artifacts
   !factory concurrency [N] show or change worker limit
   !factory doctor          deterministic diagnostics
+
+PowerShell entry point (outside Claude)
+  factory start            open/reuse orchestrator + scheduler
+  factory paths|config     inspect private project runtime
+  factory scheduler        native process status/control
 
 Add work
   start|add <URL>          plan first, then wait
@@ -176,8 +178,13 @@ For every URL:
 ```
 
 Write state atomically beside `statePath`. Set `active: true` and
-`paused: false`, ensure the scheduler exists, and invoke
-`/factory:tick` immediately. Do not wait for workers to finish.
+`paused: false`, then start the native scheduler and run its immediate tick:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/factory-scheduler.ps1" -Action resume -Repository "${CLAUDE_PROJECT_DIR}"
+```
+
+Do not wait for workers to finish.
 
 Re-read state after the tick and show, for every launched task:
 
@@ -318,8 +325,8 @@ Without `N`, show the current and maximum configured concurrency. With `N`, run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/set-concurrency.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Value N
 ```
 
-If the limit increased and queued work exists, reactivate the scheduler and
-invoke the tick immediately. If it decreased, never stop running workers; new
+If the limit increased and queued work exists, run the native scheduler with
+`-Action resume` so it fills capacity immediately. If it decreased, never stop running workers; new
 launches wait until active workers fall below the new limit.
 
 ### `chat <task-id>`
@@ -428,9 +435,11 @@ For `rework`, pass the optional text with `-Instructions`. Because a top-level
 background session is independent, the command cannot inject that text into
 its live TUI. Print the attach command and the exact text for the user to paste.
 
-`go` approves the exact clean worker HEAD. It sets the task to `approved`,
-reactivates the scheduler, and invokes the tick. A later HEAD change invalidates
-integration. `hold` preserves the worktree, commit, transcript, and session.
+`go` approves the exact clean worker HEAD. It sets the task to `approved` and
+invokes `Skill(factory:tick)` once for the judgment-bearing integration and
+promotion stage. The persistent native scheduler does not spend AI turns on
+polling or capacity management. A later HEAD change invalidates integration.
+`hold` preserves the worktree, commit, transcript, and session.
 
 ### `reject <task-id> [reason] [--yes|--keep]`
 
@@ -473,8 +482,8 @@ Use `-File PATH` instead of `-Text TEXT` for a decision document. Add
 writes or refreshes the ignored `FACTORY-DECISIONS.md` in the retained worker
 worktree, replaces one brief pointer, stops the prior background row, and queues
 exactly one new attempt. It also removes superseded Agent View rows; their JSONL
-transcripts remain on disk. Repeating the same answer is idempotent. Ensure the
-scheduler exists and invoke the tick after the script succeeds.
+transcripts remain on disk. Repeating the same answer is idempotent. Run
+`factory-scheduler.ps1 -Action resume` after the script succeeds.
 
 ### `cleanup <task-id>`
 
@@ -504,13 +513,14 @@ editing state directly.
 
 ### `pause`
 
-Set `paused: true`. Keep existing sessions and worktrees; launch and integrate
-nothing new.
+Run `factory-scheduler.ps1 -Action pause`. It sets `paused: true` while keeping
+the low-cost scheduler process, existing sessions, and worktrees.
 
 ### `resume`
 
-Set `paused: false` and `active: true`, ensure the scheduler exists, and invoke
-the tick. This resumes orchestration, not a specific worker conversation.
+Run `factory-scheduler.ps1 -Action resume`. It sets `paused: false` and
+`active: true`, starts the scheduler if needed, and fills capacity immediately.
+This resumes orchestration, not a specific worker conversation.
 
 ### `retry <task-id>`
 
@@ -518,24 +528,26 @@ Run `task-action.ps1 -Action retry`. It accepts `blocked`, `failed`, and `held`
 only when `holdReason` identifies a background session that stopped without a
 `FACTORY_RESULT`. It refuses tasks with a validated result/commit or a missing
 worktree, clears obsolete session/error fields, retains the branch/worktree,
-and queues the task. Ensure the scheduler exists and tick afterward. A manual
+and queues the task. Run `factory-scheduler.ps1 -Action resume` afterward. A manual
 `hold` is never retryable through this path.
 
 ### `stop`
 
-Set `active: false`, `paused: true`, delete the matching scheduler job, and
-preserve sessions, commits, branches, and worktrees. Stop worker sessions only
-when the user explicitly asks to abort them.
+Run `factory-scheduler.ps1 -Action stop`. It sets `active: false`,
+`paused: true`, gracefully stops the exact recorded native scheduler process,
+and preserves sessions, commits, branches, and worktrees. Stop worker sessions
+only when the user explicitly asks to abort them.
 
 ## Scheduler
 
-Use `CronList` first. There must be at most one recurring job whose prompt is:
+The scheduler is a deterministic hidden PowerShell process managed by
+`scripts/factory-scheduler.ps1`; never create a Claude cron job. One named mutex
+and the recorded PID/start time enforce one scheduler per project. It reconciles
+worker sessions and fills queued capacity without AI calls, sleeps cheaply when
+idle, and starts automatically with `factory start`/`start-factory.ps1`.
 
-```text
-/factory:tick
-```
-
-Use `config.pollCron` and persist its job ID. When no tasks are queued, working,
-approved, integrating, or promoting, the tick removes the scheduler so
-review-only queues remain silent. Any new task, `go`, `resume`, or concurrency
-increase recreates it.
+Use `factory scheduler status` for process identity and heartbeat. New tasks,
+`answer`, `retry`, `resume`, or a concurrency increase run an immediate native
+tick. Explicit approval still invokes one `factory:tick` skill turn because
+integration review, test-command selection, and conflict decisions require
+judgment; periodic polling never does.

@@ -1,8 +1,21 @@
 {
-  "version": 3,
+  "version": 4,
   "active": false,
   "paused": false,
   "cronJobId": null,
+  "scheduler": {
+    "mode": "native",
+    "status": "stopped",
+    "pid": null,
+    "intervalSeconds": null,
+    "processStartTimeUtc": null,
+    "startedAt": null,
+    "heartbeatAt": null,
+    "lastTickAt": null,
+    "lastTransitionAt": null,
+    "lastError": null,
+    "failureCount": 0
+  },
   "createdAt": null,
   "agentResolutionCache": null,
   "updatedAt": null,

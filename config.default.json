@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -9,6 +9,12 @@
   "defaultStartMode": "interactive",
   "conversationLanguage": "English",
   "pollCron": "*/2 * * * *",
+  "nativeScheduler": {
+    "enabled": true,
+    "startWithOrchestrator": true,
+    "intervalSeconds": 15,
+    "maximumBackoffSeconds": 300
+  },
   "workerPermissionMode": "auto",
   "workerModel": "inherit",
   "workerEffort": "high",

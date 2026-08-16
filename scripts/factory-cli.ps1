@@ -5,6 +5,11 @@ param(
     [string[]]$Remaining = @(),
     [switch]$Yes,
     [switch]$Keep,
+    [switch]$Force,
+    [switch]$New,
+    [switch]$ResumeSession,
+    [switch]$Continue,
+    [string]$Model = "",
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -385,14 +390,28 @@ function Write-CliStatus {
     $concurrency = [int](Get-CliProperty -InputObject $Config -Name "concurrency" -Default 0)
     $paused = [bool](Get-CliProperty -InputObject $State -Name "paused" -Default $false)
     $active = [bool](Get-CliProperty -InputObject $State -Name "active" -Default $false)
+    $schedulerState = Get-CliProperty -InputObject $State -Name "scheduler"
+    $schedulerStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "status") -Fallback "stopped"
+    $schedulerPid = [int](Get-CliProperty -InputObject $schedulerState -Name "pid" -Default 0)
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
-    $scheduler = if ($cronId) { "scheduled" } elseif ($runnable -eq 0) { "sleeping; nothing runnable" } else { "missing" }
+    $scheduler = if ($schedulerStatus -eq "running") {
+        if ($runnable -eq 0) { "native sleeping (PID $schedulerPid)" } else { "native running (PID $schedulerPid)" }
+    } elseif ($cronId) {
+        "legacy cron $cronId"
+    } elseif ($runnable -eq 0) {
+        "native stopped; nothing runnable"
+    } else {
+        "native stopped"
+    }
     $projectName = Split-Path ([string]$Context.repositoryRoot) -Leaf
 
     $lines = New-Object Collections.Generic.List[string]
     $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory $($script:Tree.Horizontal) $projectName")
     $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) workers $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
+    if ($cronId -and $schedulerStatus -eq "running") {
+        $lines.Add("$($script:Tree.Vertical)  Legacy Claude cron $cronId will remove itself on its next one-shot tick.")
+    }
     if ($ReconcileWarning) { $lines.Add("$($script:Tree.Vertical)  Warning: $ReconcileWarning") }
 
     $groups = @(
@@ -686,7 +705,7 @@ function Write-CliCleanup {
 }
 
 function Write-CliConcurrency {
-    param($Config, $State, [string]$Value)
+    param($Context, $Config, $State, [string]$Value)
 
     $current = [int](Get-CliProperty -InputObject $Config -Name "concurrency" -Default 1)
     $maximum = [int](Get-CliProperty -InputObject $Config -Name "maxConcurrency" -Default 20)
@@ -706,9 +725,13 @@ function Write-CliConcurrency {
     Write-Output "Factory concurrency: $([int]$result.previous) $($script:Tree.Arrow) $([int]$result.current) (maximum $([int]$result.maximum))"
     Write-Output (ConvertTo-CliLine -Value $result.note)
     $queuedCount = @($State.tasks | Where-Object { [string]$_.status -eq "queued" }).Count
-    $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
-    if ($queuedCount -gt 0 -and -not $cronId) {
-        Write-Output "Queued tasks exist but no scheduler is attached. In the orchestrator run: /factory resume"
+    $schedulerState = Get-CliProperty -InputObject $State -Name "scheduler"
+    $schedulerStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "status") -Fallback "stopped"
+    if ([bool]$result.increased -and $queuedCount -gt 0 -and [bool]$State.active -and -not [bool]$State.paused) {
+        $schedulerAction = if ($schedulerStatus -eq "running") { "tick" } else { "resume" }
+        Invoke-CliSchedulerAction -Context $Context -Action $schedulerAction
+    } elseif ($queuedCount -gt 0 -and $schedulerStatus -ne "running") {
+        Write-Output "Queued tasks exist but the native scheduler is stopped. Run: factory resume"
     }
 }
 
@@ -739,6 +762,125 @@ function Write-CliCompletion {
     Write-Output "  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete"
 }
 
+function Write-CliPaths {
+    param($Context)
+
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory paths $($script:Tree.Horizontal) $([string]$Context.projectKey)"
+    foreach ($item in @(
+        [pscustomobject]@{ Label = "Repository"; Value = $Context.repositoryRoot },
+        [pscustomobject]@{ Label = "Config"; Value = $Context.configPath },
+        [pscustomobject]@{ Label = "State"; Value = $Context.statePath },
+        [pscustomobject]@{ Label = "Sessions"; Value = $Context.sessionsPath },
+        [pscustomobject]@{ Label = "Events"; Value = $Context.eventsPath },
+        [pscustomobject]@{ Label = "Worktrees"; Value = $Context.worktreeRoot }
+    )) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) $($item.Label): $([string]$item.Value)"
+    }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Runtime is private and outside the target repository."
+}
+
+function Write-CliConfig {
+    param($Context, [string]$Action)
+
+    $configAction = if ($Action) { $Action.ToLowerInvariant() } else { "path" }
+    if ($configAction -notin @("path", "edit")) { throw "Unknown config action '$Action'. Use: factory config [path|edit]" }
+    if ($configAction -eq "path") {
+        Write-Output ([string]$Context.configPath)
+        return
+    }
+    & (Join-Path $pluginRoot "edit-project-config.ps1") -Repository ([string]$Context.repositoryRoot) -RuntimeHome ([string]$Context.runtimeHome)
+}
+
+function Write-CliSchedulerResult {
+    param($Result, [string]$Action)
+
+    if ($Action -eq "tick") {
+        Write-Output "Native tick: launched $([int](Get-CliProperty -InputObject $Result -Name 'launchedCount' -Default 0)); active $([int](Get-CliProperty -InputObject $Result -Name 'activeWorkers' -Default 0)); queued $([int](Get-CliProperty -InputObject $Result -Name 'queued' -Default 0))"
+        foreach ($launch in @(Get-CliProperty -InputObject $Result -Name "launched" -Default @())) {
+            $session = Get-CliProperty -InputObject $launch -Name "backgroundSession"
+            Write-Output "  launched $([string]$launch.taskId): claude attach $(Get-CliShortId -Value (Get-CliProperty -InputObject $session -Name 'id'))"
+        }
+        foreach ($errorText in @(Get-CliProperty -InputObject $Result -Name "errors" -Default @())) {
+            Write-Output "  error: $(ConvertTo-CliLine -Value $errorText)"
+        }
+        if ([bool](Get-CliProperty -InputObject $Result -Name "aiIntegrationRequired" -Default $false)) {
+            Write-Output "  approved integration is waiting for the one-shot AI integration stage"
+        }
+        return
+    }
+    $scheduler = Get-CliProperty -InputObject $Result -Name "scheduler"
+    if ($null -eq $scheduler) { $scheduler = $Result }
+    Write-Output "Native scheduler: $([string]$scheduler.status)"
+    Write-Output "Factory: $(if ([bool]$scheduler.paused) { 'paused' } elseif ([bool]$scheduler.active) { 'active' } else { 'idle' })"
+    if ([bool]$scheduler.running) { Write-Output "Process: PID $([int]$scheduler.pid); interval $([int]$scheduler.intervalSeconds)s" }
+    if ([string]$scheduler.heartbeatAt) { Write-Output "Heartbeat: $([string]$scheduler.heartbeatAt)" }
+    if ([string]$scheduler.lastTickAt) { Write-Output "Last tick: $([string]$scheduler.lastTickAt)" }
+    if ([string]$scheduler.lastError) { Write-Output "Last error: $(ConvertTo-CliLine -Value $scheduler.lastError)" }
+}
+
+function Invoke-CliSchedulerAction {
+    param($Context, [string]$Action)
+
+    $result = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
+        "-Action", $Action,
+        "-Repository", [string]$Context.repositoryRoot,
+        "-ClaudeCommand", $ClaudeCommand,
+        "-RuntimeHome", [string]$Context.runtimeHome
+    )
+    if ($Action -eq "resume") {
+        Write-CliSchedulerResult -Result (Get-CliProperty -InputObject $result -Name "scheduler") -Action "status"
+        $tickResult = Get-CliProperty -InputObject $result -Name "tick"
+        if ($null -ne $tickResult) { Write-CliSchedulerResult -Result $tickResult -Action "tick" }
+        return
+    }
+    Write-CliSchedulerResult -Result $result -Action $Action
+}
+
+function Start-CliFactory {
+    param($Context)
+
+    $arguments = @{
+        Repository = [string]$Context.repositoryRoot
+        ClaudeCommand = $ClaudeCommand
+        RuntimeHome = [string]$Context.runtimeHome
+    }
+    if ($New) { $arguments.New = $true }
+    if ($ResumeSession) { $arguments.Resume = $true }
+    if ($Continue) { $arguments.Continue = $true }
+    if ($Model) { $arguments.Model = $Model }
+    & (Join-Path $pluginRoot "start-factory.ps1") @arguments
+    $script:CliExitCode = $LASTEXITCODE
+}
+
+function Write-CliPurge {
+    param($Context, [bool]$Confirm, [bool]$ForceRemoval)
+
+    $registered = New-Object Collections.Generic.List[string]
+    foreach ($line in @(& git -C ([string]$Context.repositoryRoot) worktree list --porcelain)) {
+        if ($line -like "worktree *") {
+            $path = [IO.Path]::GetFullPath($line.Substring(9))
+            if ($path.StartsWith([string]$Context.worktreeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                $registered.Add($path)
+            }
+        }
+    }
+    if (-not $Confirm) {
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Project purge preview $($script:Tree.Horizontal) $([string]$Context.projectKey)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Private runtime: $([string]$Context.projectData)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Worktree root: $([string]$Context.worktreeRoot)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Registered factory worktrees: $($registered.Count)"
+        foreach ($path in $registered) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Worktree: $path" }
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Safe confirmation: factory purge -Yes"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Emergency dirty-worktree removal: factory purge -Yes -Force"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Nothing was removed."
+        return
+    }
+    $cleanupArguments = @("-Repository", [string]$Context.repositoryRoot, "-RuntimeHome", [string]$Context.runtimeHome)
+    if ($ForceRemoval) { $cleanupArguments += "-Force" }
+    & (Join-Path $pluginRoot "cleanup-project.ps1") @cleanupArguments
+    if ($LASTEXITCODE -ne 0) { throw "Project cleanup failed with exit code $LASTEXITCODE." }
+}
+
 function Write-CliHelp {
     param([string]$Topic)
 
@@ -748,6 +890,7 @@ function Write-CliHelp {
             "Factory CLI - deterministic local commands (no AI interpretation)",
             "",
             "PowerShell:",
+            "  factory start [-New|-Resume|-Continue] [-Model name]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory chat <task-id>",
@@ -757,6 +900,11 @@ function Write-CliHelp {
             "  factory concurrency [number]",
             "  factory doctor",
             "  factory completion [status|enable]",
+            "  factory paths",
+            "  factory config [path|edit]",
+            "  factory scheduler [status|start|stop|tick]",
+            "  factory pause|resume|stop",
+            "  factory purge [-Yes] [-Force]",
             "  factory help [command]",
             "",
             "Claude Orchestrator shell mode:",
@@ -828,6 +976,46 @@ function Write-CliHelp {
                 "'enable' selects PSReadLine MenuComplete for this terminal only; it never edits your profile."
             ) | Write-Output
         }
+        "start" {
+            @(
+                "factory start [-New|-Resume|-Continue] [-Model name]",
+                "Starts or reuses the repository's Claude Factory Orchestrator and starts its native scheduler.",
+                "Run this from PowerShell, not from inside an already open orchestrator."
+            ) | Write-Output
+        }
+        "paths" {
+            @(
+                "factory paths",
+                "Shows the repository, private config/state/session paths, and external worktree root."
+            ) | Write-Output
+        }
+        "config" {
+            @(
+                "factory config [path|edit]",
+                "Prints the private per-project config path or opens it in the configured editor."
+            ) | Write-Output
+        }
+        "scheduler" {
+            @(
+                "factory scheduler [status|start|stop|tick]",
+                "Controls the deterministic local scheduler process.",
+                "'tick' reconciles workers and fills capacity once; code review and integration judgment remain AI-backed."
+            ) | Write-Output
+        }
+        "purge" {
+            @(
+                "factory purge [-Yes] [-Force]",
+                "Previews removal of this project's entire private runtime and all factory worktrees.",
+                "-Yes performs guarded cleanup; -Force additionally permits dirty/unpublished worktree loss."
+            ) | Write-Output
+        }
+        { $_ -in @("tick", "pause", "resume", "stop") } {
+            @(
+                "factory tick | factory pause | factory resume | factory stop",
+                "Controls the native scheduler without an AI request.",
+                "pause keeps the process and artifacts; resume starts it and ticks immediately; stop pauses the factory and ends the process."
+            ) | Write-Output
+        }
         "doctor" {
             @(
                 "factory doctor",
@@ -845,60 +1033,112 @@ $remainingValues = New-Object Collections.Generic.List[string]
 foreach ($value in @($Remaining)) {
     if ($value -eq "--yes") { $Yes = $true }
     elseif ($value -eq "--keep") { $Keep = $true }
+    elseif ($value -eq "--force") { $Force = $true }
+    elseif ($value -eq "--new") { $New = $true }
+    elseif ($value -eq "--resume") { $ResumeSession = $true }
+    elseif ($value -eq "--continue") { $Continue = $true }
     else { $remainingValues.Add([string]$value) }
 }
+$startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model)
+$anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 
 if ($normalizedCommand -eq "help") {
-    if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "help accepts only one command topic." }
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "help accepts only one command topic." }
     Write-CliHelp -Topic $Target
     exit 0
 }
 
 if ($normalizedCommand -eq "completion") {
-    if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "completion accepts only status or enable." }
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "completion accepts only status or enable." }
     Write-CliCompletion -Action $Target
     exit 0
 }
 
 $context = Get-CliContext
 if ($normalizedCommand -eq "doctor") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "doctor does not accept arguments. Use: factory doctor" }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "doctor does not accept arguments. Use: factory doctor" }
     Write-CliDoctor -Context $context
     exit $script:CliExitCode
 }
 
+if ($normalizedCommand -eq "start") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed) { throw "start accepts only -New, -Resume, -Continue, and -Model." }
+    if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
+    Start-CliFactory -Context $context
+    exit $script:CliExitCode
+}
+
+if ($normalizedCommand -eq "paths") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "paths does not accept arguments." }
+    Write-CliPaths -Context $context
+    exit 0
+}
+
+if ($normalizedCommand -eq "config") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "config accepts only path or edit." }
+    Write-CliConfig -Context $context -Action $Target
+    exit 0
+}
+
+if ($normalizedCommand -eq "scheduler") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "scheduler accepts only status, start, stop, or tick." }
+    $schedulerAction = if ($Target) { $Target.ToLowerInvariant() } else { "status" }
+    if ($schedulerAction -notin @("status", "start", "stop", "tick")) { throw "Unknown scheduler action '$Target'." }
+    Invoke-CliSchedulerAction -Context $context -Action $schedulerAction
+    exit 0
+}
+
+if ($normalizedCommand -in @("tick", "pause", "resume", "stop")) {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "$normalizedCommand does not accept arguments." }
+    Invoke-CliSchedulerAction -Context $context -Action $normalizedCommand
+    exit 0
+}
+
+if ($normalizedCommand -eq "purge") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $Keep -or $startOptionsUsed) { throw "purge accepts only -Yes and optional -Force." }
+    Write-CliPurge -Context $context -Confirm ([bool]$Yes) -ForceRemoval ([bool]$Force)
+    exit 0
+}
+
 $reconcileWarning = Invoke-CliReconcile -Context $context
+if ($normalizedCommand -eq "status") {
+    $null = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
+        "-Action", "status", "-Repository", [string]$context.repositoryRoot,
+        "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
+    )
+}
 $state = Read-FactoryJson -Path ([string]$context.statePath)
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 
 switch ($normalizedCommand) {
     "status" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "status accepts at most one state filter." }
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "status accepts at most one state filter." }
         Write-CliStatus -Context $context -Config $config -State $state -Filter $Target.ToLowerInvariant() -ReconcileWarning $reconcileWarning
     }
     "inspect" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "inspect accepts exactly one task ID." }
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "inspect accepts exactly one task ID." }
         Write-CliInspect -Context $context -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
     }
     "chat" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "chat accepts exactly one task ID." }
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "chat accepts exactly one task ID." }
         Write-CliChat -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
     }
     "hold" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "hold accepts exactly one task ID." }
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "hold accepts exactly one task ID." }
         Write-CliHold -State $state -TaskId $Target
     }
     "reject" {
+        if ($startOptionsUsed -or $Force) { throw "reject accepts -Yes or -Keep, not -Force or start options." }
         $reason = ($remainingValues -join " ").Trim()
         Write-CliReject -State $state -TaskId $Target -Reason $reason -Confirm ([bool]$Yes) -Preserve ([bool]$Keep)
     }
     "cleanup" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "cleanup accepts exactly one task ID." }
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "cleanup accepts exactly one task ID." }
         Write-CliCleanup -State $state -TaskId $Target
     }
     "concurrency" {
-        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "concurrency accepts at most one number." }
-        Write-CliConcurrency -Config $config -State $state -Value $Target
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "concurrency accepts at most one number." }
+        Write-CliConcurrency -Context $context -Config $config -State $state -Value $Target
     }
     default { throw "Unknown command '$Command'. Run 'factory help'." }
 }

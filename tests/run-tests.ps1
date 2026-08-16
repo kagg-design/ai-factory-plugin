@@ -103,6 +103,8 @@ try {
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
     Assert-True ($publicSkill.Contains("Skill(factory:tick)")) "The public skill does not reference the internal tick."
+    Assert-True ($publicSkill.Contains("factory-scheduler.ps1")) "The public skill does not use the native scheduler."
+    Assert-True (-not $publicSkill.Contains("CronCreate")) "The public skill still provisions an AI cron scheduler."
     Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
     Assert-True ($publicSkill.Contains('### `help [command]`')) "The public skill does not expose factory help."
@@ -131,6 +133,10 @@ try {
     Assert-True ($launcherSource.Contains('"--add-dir", $standaloneRoot')) "Launcher does not load the /factory standalone skill."
     Assert-True ($launcherSource.Contains('"--session-id", $newSessionId')) "Launcher does not assign a durable orchestrator session ID."
     Assert-True ($launcherSource.Contains('@("--resume", $storedSessionId)')) "Launcher does not resume the stored orchestrator conversation."
+    Assert-True ($launcherSource.Contains('"-Action", "start"')) "Launcher does not start the native scheduler."
+    $tickSkillSource = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\tick\SKILL.md") -Raw
+    Assert-True (-not $tickSkillSource.Contains("CronCreate")) "The internal tick still owns an AI cron scheduler."
+    Assert-True ($tickSkillSource.Contains("factory-scheduler.ps1")) "The integration tick does not return capacity to the native scheduler."
     Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
 
     $orchestratorRows = @(
@@ -209,8 +215,11 @@ try {
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 4 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
-    Assert-Equal 3 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    Assert-Equal 5 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 4 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    $launcherTestConfig = Read-FactoryJson -Path $context.configPath
+    $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
 
     $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $orchestratorArgv
@@ -251,6 +260,22 @@ try {
     Assert-True ($newOrchestratorArgs[$replacementSessionIndex + 1] -ne $orchestratorSessionId) "-New reused the previous orchestrator UUID."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
 
+    $schedulerScript = Join-Path $pluginRoot "scripts\factory-scheduler.ps1"
+    $schedulerStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+    Assert-True ([bool]$schedulerStart.started) "Native scheduler did not start."
+    Assert-True ([int]$schedulerStart.scheduler.pid -gt 0) "Native scheduler did not report its PID."
+    $schedulerStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-True ([bool]$schedulerStatus.running) "Native scheduler status did not find the live process."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action run -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2
+    if ($LASTEXITCODE -ne 0) { throw "Duplicate scheduler run probe failed." }
+    $schedulerAfterDuplicateRun = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-True ([bool]$schedulerAfterDuplicateRun.running) "A losing scheduler process cleared the winner's identity."
+    Assert-Equal ([int]$schedulerStart.scheduler.pid) ([int]$schedulerAfterDuplicateRun.pid) "Duplicate scheduler run replaced the active process."
+    $schedulerSecondStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+    Assert-True ([bool]$schedulerSecondStart.alreadyRunning) "Native scheduler allowed a duplicate process."
+    $schedulerStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-True ([bool]$schedulerStop.stopped) "Native scheduler did not stop gracefully."
+
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
     $legacyConfig.autoPushDevelopment = $false
@@ -261,11 +286,12 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 4 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 5 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
     Assert-Equal $false ([bool]$migratedConfig.testDatabaseIsolation.enabled) "Test database isolation was not migrated safely as opt-in."
+    Assert-Equal $false ([bool]$migratedConfig.nativeScheduler.startWithOrchestrator) "Migration overwrote a repository-specific scheduler setting."
     $migratedConfig.testDatabaseIsolation.enabled = $true
     $migratedConfig.testDatabaseIsolation.databasePrefix = "factory_test"
     $migratedConfig.testDatabaseIsolation.clientCommand = $fakePsql
@@ -359,7 +385,8 @@ try {
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal 3 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-Equal 4 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
     Assert-True ($null -ne $migratedState.PSObject.Properties["agentResolutionCache"]) "Legacy state agent resolution cache field was not added."
@@ -454,6 +481,14 @@ try {
     $cliCompletion = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath completion status | Out-String)
     Assert-True ($cliCompletion.Contains("Factory completion: available")) "Factory CLI completion diagnostics are unavailable."
 
+    $cliPaths = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath paths -Repository $repository | Out-String)
+    Assert-True ($cliPaths.Contains([string]$context.configPath)) "Factory CLI paths omitted the private config path."
+    $cliScheduler = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath scheduler status -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($cliScheduler.Contains("Native scheduler: stopped")) "Factory CLI did not render native scheduler status."
+    $cliPurgePreview = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath purge -Repository $repository | Out-String)
+    Assert-True ($cliPurgePreview.Contains("Project purge preview")) "Factory CLI purge did not require an explicit preview."
+    Assert-True (Test-Path -LiteralPath $context.statePath) "Factory CLI purge preview changed private state."
+
     $previousPath = $env:PATH
     try {
         $env:PATH = "$pluginRoot;$previousPath"
@@ -461,6 +496,7 @@ try {
         try {
             $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
+            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge") "PowerShell did not complete the unified phase-3 commands."
             Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
@@ -484,8 +520,10 @@ try {
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
     $databaseEnvironmentCapture = Join-Path $testRoot "worker-test-database.txt"
     $env:CLAUDE_FACTORY_TEST_DB_ENV_FILE = $databaseEnvironmentCapture
-    $launch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "test-task" -Mode "auto" -ClaudeCommand $fakeClaude) |
+    $nativeTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) |
         ConvertFrom-Json
+    Assert-Equal 1 ([int]$nativeTick.launchedCount) "Native scheduler tick did not fill available capacity."
+    $launch = @($nativeTick.launched)[0]
     Assert-Equal "test1234" ([string]$launch.backgroundSession.id) "Background ID was not captured."
     Assert-Equal $fakeSessionId ([string]$launch.backgroundSession.sessionId) "Launcher did not bind the authoritative session UUID."
     Assert-Equal "plugin" ([string]$launch.backgroundSession.agentResolution) "Native agent success was not audited."
@@ -1160,6 +1198,11 @@ try {
 
     Write-Host "All factory runtime tests passed." -ForegroundColor Green
 } finally {
+    try {
+        if (Test-Path -LiteralPath $repository) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null 2> $null
+        }
+    } catch {}
     Remove-Item Env:\CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_NO_AGENTS -ErrorAction SilentlyContinue

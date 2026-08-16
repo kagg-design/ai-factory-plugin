@@ -33,12 +33,12 @@ claude --version
 
 ## Start the factory
 
-Add the plugin directory to `PATH`, then run the launcher from the target Git
-repository:
+Add the plugin directory to `PATH`, then use the single `factory` entry point
+from the target Git repository:
 
 ```powershell
 cd D:\Projects\MotiveHR
-start-factory
+factory start
 ```
 
 When `-Repository` is omitted, the current directory is used and resolved to
@@ -46,7 +46,7 @@ its primary Git worktree. An explicit path remains available when launching
 from elsewhere:
 
 ```powershell
-start-factory -Repository D:\Projects\MotiveHR
+factory start -Repository D:\Projects\MotiveHR
 ```
 
 The launcher:
@@ -54,11 +54,12 @@ The launcher:
 1. resolves the repository's primary Git worktree;
 2. creates or migrates private per-repository config and state;
 3. creates the external factory worktree root;
-4. acquires a per-repository process lock;
-5. changes to the target repository;
-6. starts Claude Code with hooks and workers loaded through `--plugin-dir`;
-7. names the lead session `Claude Factory Orchestrator`;
-8. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
+4. starts or reuses one hidden native scheduler process;
+5. acquires a per-repository orchestrator lock;
+6. changes to the target repository;
+7. starts Claude Code with hooks and workers loaded through `--plugin-dir`;
+8. names the lead session `Claude Factory Orchestrator`;
+9. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
 
 It does not add a task, create a task commit, merge, or push by itself.
 
@@ -79,6 +80,7 @@ operations that do not need AI interpretation:
 
 ```powershell
 cd D:\Projects\MotiveHR
+factory start
 factory status
 factory inspect 1216632072822682
 factory chat 1216632072822682
@@ -88,6 +90,9 @@ factory cleanup 1216632072822682
 factory concurrency 5
 factory doctor
 factory completion status
+factory paths
+factory config edit
+factory scheduler status
 factory help
 ```
 
@@ -108,9 +113,11 @@ enable PSReadLine's menu for the current terminal with
 `factory completion enable`. The command reports the exact persistent profile
 line but never edits the profile automatically.
 
-Native commands cover deterministic reads plus `hold`, confirmed `reject`, safe
-`cleanup`, and concurrency changes. Judgment-heavy workflows such as `start`,
-`sync`, `review`, and `go` still use `/factory ...` inside the orchestrator. A
+Native commands cover launcher/runtime/scheduler control, deterministic reads,
+`hold`, confirmed `reject`, safe `cleanup`, and concurrency changes.
+`factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
+inside that orchestrator adds work. Judgment-heavy workflows such as task
+intake, `sync`, `review`, and `go` still use `/factory ...`. A
 plain `factory reject <id>` prints the exact destructive preview; repeat it with
 `-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
 rejection. The leading `!` is required inside Claude: without it, Claude
@@ -144,13 +151,13 @@ start-factory -New
 Continue the repository's most recent conversation:
 
 ```powershell
-start-factory -Continue
+factory start -Continue
 ```
 
 Choose the lead and inherited worker model:
 
 ```powershell
-start-factory -Model sonnet
+factory start -Model sonnet
 ```
 
 `-Resume` and `-Continue` are mutually exclusive.
@@ -169,10 +176,12 @@ the private per-repository config:
 Open the correct config with:
 
 ```powershell
-.\edit-project-config.ps1 -Repository D:\Projects\MotiveHR
+factory config edit -Repository D:\Projects\MotiveHR
 ```
 
-The setting applies to subsequent orchestrator commands and scheduler ticks.
+The setting applies to subsequent orchestrator commands and newly launched
+workers. The native scheduler itself emits operational English only and does
+not consume conversation turns.
 New workers receive it in their trusted task payload. Existing worker sessions
 retain the instructions with which they were launched.
 
@@ -547,13 +556,13 @@ configuration private; it does not belong in the target repository.
 Show the paths for one repository:
 
 ```powershell
-.\show-project-paths.ps1 -Repository D:\Projects\MotiveHR
+factory paths -Repository D:\Projects\MotiveHR
 ```
 
 Open its config:
 
 ```powershell
-.\edit-project-config.ps1 -Repository D:\Projects\MotiveHR
+factory config edit -Repository D:\Projects\MotiveHR
 ```
 
 Private data is stored under:
@@ -563,10 +572,14 @@ Private data is stored under:
 ```
 
 It includes config, queue state, background-session metadata, captured Stop
-events, transcript paths, and resolved test commands. Older config is migrated
-to v4 and state to v3 by adding missing fields; repository-specific settings are
-preserved. Test database isolation remains disabled unless explicitly enabled
-per repository.
+events, transcript paths, scheduler identity/heartbeat, and resolved test
+commands. Older config is migrated to v5 and state to v4 by adding missing
+fields; repository-specific settings are preserved. Test database isolation
+remains disabled unless explicitly enabled per repository.
+
+The root `.ps1` files remain implementation entry points for compatibility and
+testing. Normal operation uses `factory start`, `factory paths`, `factory
+config`, and the other `factory ...` subcommands.
 
 ## Tests
 
@@ -586,17 +599,19 @@ exact-SHA approval, linked-worktree project identity, and dynamic concurrency.
 Stop and review the factory first:
 
 ```powershell
-.\cleanup-project.ps1 -Repository D:\Projects\MotiveHR
+factory purge -Repository D:\Projects\MotiveHR
+factory purge -Repository D:\Projects\MotiveHR -Yes
 ```
 
-Without `-Force`, cleanup refuses to remove registered factory worktrees.
+The first command is a preview. Without `-Force`, confirmed cleanup refuses to
+remove registered factory worktrees.
 This preserves active sessions, uncommitted changes, and commits that still
 need review.
 
 Emergency cleanup:
 
 ```powershell
-.\cleanup-project.ps1 -Repository D:\Projects\MotiveHR -Force
+factory purge -Repository D:\Projects\MotiveHR -Yes -Force
 ```
 
 `-Force` may remove registered worktrees and their uncommitted changes. Use it

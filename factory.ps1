@@ -3,7 +3,8 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet(
         "help", "status", "inspect", "doctor", "chat", "hold", "reject",
-        "cleanup", "concurrency", "completion"
+        "cleanup", "concurrency", "completion", "start", "paths", "config",
+        "scheduler", "tick", "pause", "resume", "stop", "purge"
     )]
     [string]$Command = "help",
 
@@ -24,7 +25,9 @@ param(
             "help" {
                 @(
                     "status", "inspect", "doctor", "chat", "hold", "reject",
-                    "cleanup", "concurrency", "completion", "help"
+                    "cleanup", "concurrency", "completion", "start", "paths",
+                    "config", "scheduler", "tick", "pause", "resume", "stop",
+                    "purge", "help"
                 )
             }
             "status" {
@@ -36,6 +39,8 @@ param(
                 )
             }
             "completion" { "status", "enable" }
+            "config" { "path", "edit" }
+            "scheduler" { "status", "start", "stop", "tick" }
         })
 
         if ($staticValues.Count -gt 0) {
@@ -95,6 +100,12 @@ param(
 
     [switch]$Yes,
     [switch]$Keep,
+    [switch]$Force,
+    [switch]$New,
+    [Alias("Resume")]
+    [switch]$ResumeSession,
+    [switch]$Continue,
+    [string]$Model = "",
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
@@ -112,6 +123,11 @@ try {
         -Remaining $Remaining `
         -Yes:$Yes `
         -Keep:$Keep `
+        -Force:$Force `
+        -New:$New `
+        -ResumeSession:$ResumeSession `
+        -Continue:$Continue `
+        -Model $Model `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -NoReconcile:$NoReconcile

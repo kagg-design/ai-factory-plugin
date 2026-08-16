@@ -26,6 +26,7 @@
     "scripts/create-worktree.ps1",
     "scripts/factory-common.ps1",
     "scripts/factory-cli.ps1",
+    "scripts/factory-scheduler.ps1",
     "scripts/factory-doctor.ps1",
     "scripts/orchestrator-session.ps1",
     "scripts/project-context.ps1",

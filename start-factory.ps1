@@ -83,11 +83,31 @@ try {
     $background = Select-FactoryBackgroundOrchestrator `
         -Rows $matchingRows `
         -PreferredSessionId $storedSessionId
+    if ($null -ne $background -and $New) {
+        $backgroundId = [string]$background.id
+        throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Attach to it or stop/remove it first."
+    }
+
+    $factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
+    $nativeScheduler = if ($null -ne $factoryConfig.PSObject.Properties["nativeScheduler"]) {
+        $factoryConfig.nativeScheduler
+    } else { $null }
+    if ($null -eq $nativeScheduler -or ([bool]$nativeScheduler.enabled -and [bool]$nativeScheduler.startWithOrchestrator)) {
+        $schedulerResult = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\factory-scheduler.ps1"),
+            "-Action", "start", "-Repository", [string]$context.repositoryRoot,
+            "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
+        )
+        if ([int]$schedulerResult.exitCode -eq 0) {
+            $schedulerStart = [string]$schedulerResult.stdout | ConvertFrom-Json
+            Write-Host "Native scheduler: PID $($schedulerStart.scheduler.pid)" -ForegroundColor Green
+        } else {
+            Write-Warning "Native scheduler did not start: $($schedulerResult.output)"
+        }
+    }
+
     if ($null -ne $background) {
         $backgroundId = [string]$background.id
-        if ($New) {
-            throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Attach to it or stop/remove it first."
-        }
         $liveBackgroundRows = @($matchingRows | Where-Object {
             [string]$_.kind -eq "background" -and
             $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -and

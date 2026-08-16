@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Replaced recurring AI cron polling with one hidden native PowerShell scheduler
+  per repository. It reconciles workers, fills capacity, records heartbeat and
+  bounded backoff, starts with the orchestrator, and sleeps without model calls;
+  judgment-bearing integration remains a one-shot skill turn. Added unified
+  `factory start`, `paths`, `config`, scheduler/control, and guarded project
+  `purge` commands over the compatibility `.ps1` implementations.
 - Preserved UTF-8 across Windows PowerShell 5.1 hook stdin and redirected
   Claude CLI output, added safe display-only repair for legacy CP437 mojibake,
   and stopped review cards from presenting stale plan questions as reasons.

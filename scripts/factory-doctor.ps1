@@ -200,7 +200,23 @@ $mcpText = ([string]$mcpResult.output).Trim()
 $asanaMentioned = $mcpText -match '(?i)\basana\b'
 Add-DoctorCheck -Name "asanaConnector" -Passed $asanaMentioned -Severity "warning" -Detail $(if ($asanaMentioned) { "Asana appears in Claude MCP configuration." } else { "Asana was not found in 'claude mcp list'; confirm it inside the factory session with /mcp." })
 
-Add-DoctorCheck -Name "scheduler" -Passed $true -Severity "info" -Detail $(if ([string]$state.cronJobId) { "job $($state.cronJobId)" } else { "not scheduled" })
+$schedulerCheck = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-scheduler.ps1"),
+    "-Action", "status", "-Repository", [string]$context.repositoryRoot,
+    "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
+)
+$schedulerPassed = [int]$schedulerCheck.exitCode -eq 0
+$schedulerDetail = if ($schedulerPassed) {
+    $schedulerInfo = [string]$schedulerCheck.stdout | ConvertFrom-Json
+    if ([bool]$schedulerInfo.running) {
+        "native PID $($schedulerInfo.pid), heartbeat $($schedulerInfo.heartbeatAt)"
+    } else {
+        "native scheduler stopped"
+    }
+} else {
+    ([string]$schedulerCheck.output -replace '[\r\n\t]+', ' ').Trim()
+}
+Add-DoctorCheck -Name "scheduler" -Passed $schedulerPassed -Severity "info" -Detail $schedulerDetail
 
 $requiredFailures = @($checks | Where-Object { $_.severity -eq "required" -and -not $_.passed })
 $warnings = @($checks | Where-Object { $_.severity -eq "warning" -and -not $_.passed })
