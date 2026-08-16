@@ -3,11 +3,13 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$ClaudeCommand = "",
+    [string]$CodexCommand = "",
     [switch]$FinalizeProduction
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -105,6 +107,7 @@ function Remove-FactoryLongPathDirectory {
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $mutex = $null
 $removedReparsePoints = @()
 
@@ -226,10 +229,13 @@ try {
     # A terminal-looking row can still own a live process (and therefore hold
     # the worktree on Windows). Stop and verify every matching session before
     # touching the directory. Agent View rm failures remain best effort.
-    $sessionCleanup = Remove-FactoryTaskAgentSessions `
+    $sessionCleanup = Close-FactoryTaskWorkerSessions `
+        -Session $task.backgroundSession `
         -ClaudeCommand $ClaudeCommand `
+        -CodexCommand $CodexCommand `
         -TaskId $TaskId `
-        -Worktree $(if ($worktree) { $worktree } else { "" })
+        -Worktree $(if ($worktree) { $worktree } else { "" }) `
+        -CodexDisposition "archive"
     if (@($sessionCleanup.stopFailures).Count -gt 0) {
         $blocked = @($sessionCleanup.stopFailures | ForEach-Object {
             "session $($_.id): $($_.warning)"

@@ -1,10 +1,13 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "worker-event.ps1")
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -16,6 +19,8 @@ if (-not $ClaudeCommand) {
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 
 $agentRows = @()
 try {
@@ -27,6 +32,7 @@ try {
 $mutex = $null
 $changes = New-Object System.Collections.Generic.List[object]
 $metadataChanged = $false
+$codexSessionsSeen = 0
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
@@ -39,13 +45,20 @@ try {
         $before = [string]$task.status
         $taskId = [string]$task.id
         $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
+        $sessionRuntime = if ($null -ne $task.backgroundSession.PSObject.Properties["runtime"] -and [string]$task.backgroundSession.runtime) {
+            [string]$task.backgroundSession.runtime
+        } else { "claude" }
         # Identity match wins over the name+cwd fallback, in two passes. A relaunched task
         # leaves the previous session listed under the SAME name and worktree, so a single
         # first-match loop can bind a live worker's task to the dead attempt's row and then
         # "reconcile" a working session into held.
         $sessionRow = $null
-        foreach ($pass in @("backgroundId", "sessionId", "shape")) {
-            foreach ($candidateSessionRow in @($agentRows)) {
+        if ($sessionRuntime -eq "codex") {
+            $sessionRow = Get-FactoryCodexSessionSnapshot -Session $task.backgroundSession
+            $codexSessionsSeen++
+        } else {
+            foreach ($pass in @("backgroundId", "sessionId", "shape")) {
+                foreach ($candidateSessionRow in @($agentRows)) {
                 $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
                 $rowSessionId = if ($null -ne $candidateSessionRow.PSObject.Properties["sessionId"]) { [string]$candidateSessionRow.sessionId } else { "" }
                 $rowName = if ($null -ne $candidateSessionRow.PSObject.Properties["name"]) { [string]$candidateSessionRow.name } else { "" }
@@ -63,13 +76,14 @@ try {
                     $rowCwd -and $expectedCwd -and
                     $rowCwd.TrimEnd("\").Equals($expectedCwd.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
                 }
-                if ($matchesSession) {
-                    $sessionRow = $candidateSessionRow
+                    if ($matchesSession) {
+                        $sessionRow = $candidateSessionRow
+                        break
+                    }
+                }
+                if ($null -ne $sessionRow) {
                     break
                 }
-            }
-            if ($null -ne $sessionRow) {
-                break
             }
         }
 
@@ -106,6 +120,35 @@ try {
             }
             if ($rowIsAuthoritative -and $null -ne $sessionRow.PSObject.Properties["name"] -and [string]$sessionRow.name) {
                 Set-FactoryProperty -Target $task.backgroundSession -Name "name" -Value ([string]$sessionRow.name)
+            }
+            if ($sessionRuntime -eq "codex") {
+                Set-FactoryProperty -Target $task.backgroundSession -Name "transcriptPath" -Value ([string]$sessionRow.transcriptPath)
+                if ([string]$sessionRow.sessionId) {
+                    $resumeScript = Join-Path ([string]$context.pluginRoot) "scripts\resume-codex-worker.ps1"
+                    $codexAttach = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$resumeScript`" -Repository `"$([string]$context.repositoryRoot)`" -TaskId `"$taskId`""
+                    Set-FactoryProperty -Target $task.backgroundSession -Name "attachCommand" -Value $codexAttach
+                    Set-FactoryProperty -Target $task.backgroundSession -Name "nativeResumeCommand" -Value "codex resume -C `"$([string]$task.worktree)`" $([string]$sessionRow.sessionId)"
+                }
+                if ([string]$sessionRow.error -and [string]$sessionRow.state -eq "failed") {
+                    Set-FactoryProperty -Target $task -Name "error" -Value ([string]$sessionRow.error)
+                }
+                $lastCapturedHash = if ($null -ne $task.backgroundSession.PSObject.Properties["lastCapturedMessageHash"]) {
+                    [string]$task.backgroundSession.lastCapturedMessageHash
+                } else { "" }
+                if (
+                    [string]$sessionRow.sessionId -and [string]$sessionRow.lastAssistantMessage -and
+                    [string]$sessionRow.messageHash -ne $lastCapturedHash
+                ) {
+                    $null = Publish-FactoryWorkerEvent `
+                        -Context $context `
+                        -Task $task `
+                        -SessionId ([string]$sessionRow.sessionId) `
+                        -Worktree ([string]$task.worktree) `
+                        -Message ([string]$sessionRow.lastAssistantMessage) `
+                        -TranscriptPath ([string]$sessionRow.transcriptPath) `
+                        -EventName "CodexExecStop"
+                    Set-FactoryProperty -Target $task.backgroundSession -Name "lastCapturedMessageHash" -Value ([string]$sessionRow.messageHash)
+                }
             }
         }
 
@@ -268,7 +311,7 @@ try {
                 Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
             } elseif ($sessionState -eq "failed" -and [string]$task.status -notin @("awaiting-review", "approved", "done")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
-                Set-FactoryProperty -Target $task -Name "error" -Value "Claude background session failed before a valid FACTORY_RESULT was captured."
+                Set-FactoryProperty -Target $task -Name "error" -Value "Worker session failed before a valid FACTORY_RESULT was captured."
             } elseif ($sessionState -eq "stopped" -and [string]$task.status -notin @("awaiting-review", "approved", "done")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "held"
                 Set-FactoryProperty -Target $task -Name "holdReason" -Value "background session stopped without a FACTORY_RESULT"
@@ -308,7 +351,9 @@ try {
         changed = $changes.Count
         metadataChanged = $metadataChanged
         transitions = @($changes | ForEach-Object { $_ })
-        sessionsSeen = $agentRows.Count
+        sessionsSeen = $agentRows.Count + $codexSessionsSeen
+        claudeSessionsSeen = $agentRows.Count
+        codexSessionsSeen = $codexSessionsSeen
     } | ConvertTo-Json -Depth 20
 } finally {
     Exit-FactoryMutex -Mutex $mutex

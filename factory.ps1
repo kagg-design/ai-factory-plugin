@@ -106,12 +106,14 @@ param(
     [switch]$ResumeSession,
     [switch]$Continue,
     [string]$Model = "",
+    [ValidateSet("claude", "codex")][string]$Agent = "",
     [string]$File = "",
     [switch]$Auto,
     [switch]$Direct,
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
+    [string]$CodexCommand = "",
     [switch]$NoReconcile
 )
 
@@ -131,11 +133,13 @@ try {
         -ResumeSession:$ResumeSession `
         -Continue:$Continue `
         -Model $Model `
+        -Agent $Agent `
         -File $File `
         -Auto:$Auto `
         -Direct:$Direct `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
+        -CodexCommand $CodexCommand `
         -NoReconcile:$NoReconcile
     exit $LASTEXITCODE
 } catch {

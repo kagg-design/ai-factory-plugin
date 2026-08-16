@@ -2,12 +2,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [ValidateSet("auto", "interactive")][string]$Mode = "auto",
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "worker-launch.ps1")
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -20,6 +22,9 @@ if (-not $ClaudeCommand) {
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
+$workerRuntime = if ([string]$config.workerAgent) { [string]$config.workerAgent } else { "claude" }
+if ($workerRuntime -notin @("claude", "codex")) { throw "Unsupported workerAgent '$workerRuntime' in private project config." }
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $now = Get-FactoryUtcTimestamp
 $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
 $mutex = $null
@@ -108,38 +113,43 @@ try {
 }
 
 try {
-    $versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
-    $versionText = ([string]$versionResult.output).Trim()
-    if ([int]$versionResult.exitCode -ne 0) {
-        throw "Could not run Claude Code: $versionText"
-    }
-    $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
-    if (-not $versionMatch.Success) {
-        throw "Could not parse the Claude Code version from: $versionText"
-    }
-    if ([version]$versionMatch.Groups[1].Value -lt [version]"2.1.139") {
-        throw "Claude Code 2.1.139 or newer is required for background sessions; found $versionText."
-    }
-    $claudeVersion = $versionMatch.Groups[1].Value
-    $resolutionState = Read-FactoryJson -Path $context.statePath
-    $resolutionCache = if (
-        $null -ne $resolutionState.PSObject.Properties["agentResolutionCache"] -and
-        $null -ne $resolutionState.agentResolutionCache
-    ) { $resolutionState.agentResolutionCache } else { $null }
-    if (
-        $null -ne $resolutionCache -and
-        $null -ne $resolutionCache.PSObject.Properties["claudeVersion"] -and
-        [string]$resolutionCache.claudeVersion -eq $claudeVersion
-    ) {
-        $cachedPreference = if ($null -ne $resolutionCache.PSObject.Properties["preferredResolution"]) {
-            [string]$resolutionCache.preferredResolution
-        } else { "" }
-        $agentResolutionPreference = switch ($cachedPreference) {
-            "system-prompt" { "system-prompt"; break }
-            # Legacy inline cache entries are known-bad on the affected CLI and
-            # migrate directly to the system-prompt path for the same version.
-            "inline-fallback" { "system-prompt"; break }
-            default { "plugin" }
+    if ($workerRuntime -eq "claude") {
+        $versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
+        $versionText = ([string]$versionResult.output).Trim()
+        if ([int]$versionResult.exitCode -ne 0) {
+            throw "Could not run Claude Code: $versionText"
+        }
+        $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
+        if (-not $versionMatch.Success) {
+            throw "Could not parse the Claude Code version from: $versionText"
+        }
+        if ([version]$versionMatch.Groups[1].Value -lt [version]"2.1.139") {
+            throw "Claude Code 2.1.139 or newer is required for background sessions; found $versionText."
+        }
+        $claudeVersion = $versionMatch.Groups[1].Value
+        $resolutionState = Read-FactoryJson -Path $context.statePath
+        $resolutionCache = if (
+            $null -ne $resolutionState.PSObject.Properties["agentResolutionCache"] -and
+            $null -ne $resolutionState.agentResolutionCache
+        ) { $resolutionState.agentResolutionCache } else { $null }
+        if (
+            $null -ne $resolutionCache -and
+            $null -ne $resolutionCache.PSObject.Properties["claudeVersion"] -and
+            [string]$resolutionCache.claudeVersion -eq $claudeVersion
+        ) {
+            $cachedPreference = if ($null -ne $resolutionCache.PSObject.Properties["preferredResolution"]) {
+                [string]$resolutionCache.preferredResolution
+            } else { "" }
+            $agentResolutionPreference = switch ($cachedPreference) {
+                "system-prompt" { "system-prompt"; break }
+                "inline-fallback" { "system-prompt"; break }
+                default { "plugin" }
+            }
+        }
+    } else {
+        $codexCapabilities = Get-FactoryCodexCapabilities -CodexCommand $CodexCommand
+        if (-not [bool]$codexCapabilities.supported) {
+            throw "Could not use Codex worker runtime: $($codexCapabilities.detail)"
         }
     }
 
@@ -245,7 +255,7 @@ attach to this session and interrupt or redirect you at any time.
     }
 
     $prompt = @"
-You are the dedicated worker session for one Claude Factory task.
+You are the dedicated worker session for one Factory task.
 
 $modeInstruction
 
@@ -262,12 +272,18 @@ FACTORY_TASK
 $payloadJson
 "@
 
+    if ($workerRuntime -eq "codex") {
+        $codexContractPath = Join-Path ([string]$context.pluginRoot) "resources\codex-worker-instructions.md"
+        $codexContract = [IO.File]::ReadAllText($codexContractPath, (New-Object Text.UTF8Encoding($false)))
+        $prompt = $codexContract + "`n`n---`n`n" + $prompt
+    }
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($promptPath, $prompt, $utf8WithoutBom)
     $promptSha256 = Get-FactoryFileSha256 -Path $promptPath
 
     $metadata = [ordered]@{
         taskId = $TaskId
+        runtime = $workerRuntime
         mode = $Mode
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)
@@ -289,6 +305,76 @@ $payloadJson
         testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
+
+    if ($workerRuntime -eq "codex") {
+        $artifactPrefix = Join-Path $context.sessionsPath "$safeTaskId-a$attempt"
+        $codexLaunch = Start-FactoryCodexWorkerProcess `
+            -CodexCommand $CodexCommand `
+            -PluginRoot ([string]$context.pluginRoot) `
+            -Worktree $worktree `
+            -PromptPath $promptPath `
+            -ArtifactPrefix $artifactPrefix `
+            -SessionName $sessionName `
+            -Capabilities $codexCapabilities `
+            -Environment $workerEnvironment `
+            -Model ([string]$config.codexModel) `
+            -Effort ([string]$config.codexReasoningEffort)
+        $codexAttach = "codex resume --include-non-interactive --all"
+        $session = [ordered]@{
+            runtime = "codex"
+            id = [string]$codexLaunch.id
+            sessionId = $null
+            name = $sessionName
+            state = "working"
+            startedAt = $now
+            lastSeenAt = $now
+            processId = [int]$codexLaunch.processId
+            processStartTimeUtc = [string]$codexLaunch.processStartTimeUtc
+            transcriptPath = [string]$codexLaunch.transcriptPath
+            stderrPath = [string]$codexLaunch.stderrPath
+            lastMessagePath = [string]$codexLaunch.lastMessagePath
+            shimDirectory = [string]$codexLaunch.shimDirectory
+            lastAssistantMessage = $null
+            attachCommand = $codexAttach
+            cliVersion = [string]$codexLaunch.cliVersion
+            agentResolution = "codex-exec-jsonl"
+        }
+        $metadata.backgroundId = [string]$codexLaunch.id
+        $metadata.processId = [int]$codexLaunch.processId
+        $metadata.processStartTimeUtc = [string]$codexLaunch.processStartTimeUtc
+        $metadata.transcriptPath = [string]$codexLaunch.transcriptPath
+        $metadata.stderrPath = [string]$codexLaunch.stderrPath
+        $metadata.lastMessagePath = [string]$codexLaunch.lastMessagePath
+        $metadata.codexVersion = [string]$codexLaunch.cliVersion
+        $metadata.agentResolution = "codex-exec-jsonl"
+        Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
+
+        $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+        try {
+            $state = Read-FactoryJson -Path $context.statePath
+            $task = Get-FactoryTask -State $state -TaskId $TaskId
+            Set-FactoryProperty -Target $task -Name "backgroundSession" -Value ([pscustomobject]$session)
+            Set-FactoryProperty -Target $task -Name "agentId" -Value ([string]$codexLaunch.id)
+            Set-FactoryProperty -Target $task -Name "status" -Value $(if ($Mode -eq "interactive") { "planning" } else { "running" })
+            Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
+            Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        } finally {
+            Exit-FactoryMutex -Mutex $mutex
+            $mutex = $null
+        }
+        [ordered]@{
+            reused = $false
+            taskId = $TaskId
+            mode = $Mode
+            runtime = "codex"
+            branch = $branch
+            worktree = [IO.Path]::GetFullPath($worktree)
+            backgroundSession = $session
+            testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
+        } | ConvertTo-Json -Depth 20
+        exit 0
+    }
 
     $permissionMode = if ([string]$config.workerPermissionMode) {
         [string]$config.workerPermissionMode
@@ -364,6 +450,7 @@ $payloadJson
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
         $session = [ordered]@{
+            runtime = "claude"
             id = $backgroundId
             sessionId = $sessionId
             name = $resolvedSessionName

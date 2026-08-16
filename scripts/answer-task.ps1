@@ -5,11 +5,13 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "File")][string]$File,
     [Parameter(Mandatory = $true, ParameterSetName = "Text")][string]$Text,
     [ValidateSet("auto", "interactive")][string]$Mode = "auto",
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) { $env:CLAUDE_FACTORY_CLAUDE_COMMAND } else { "claude" }
 }
@@ -21,6 +23,8 @@ $answers = if ($PSCmdlet.ParameterSetName -eq "File") {
 if (-not $answers.Trim()) { throw "Answers cannot be empty." }
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) | ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $answerBytes = [Text.Encoding]::UTF8.GetBytes($answers)
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $answerHash = ([BitConverter]::ToString($sha.ComputeHash($answerBytes))).Replace("-", "").ToLowerInvariant() } finally { $sha.Dispose() }
@@ -49,10 +53,13 @@ try {
     if ($backgroundId -and -not $isSameQueuedAnswer) {
         # Removing the Agent View row does not remove the JSONL transcript;
         # Claude Code 2.1.228 was verified to retain it under ~/.claude/projects.
-        $sessionCleanup = Remove-FactoryTaskAgentSessions `
+        $sessionCleanup = Close-FactoryTaskWorkerSessions `
+            -Session $task.backgroundSession `
             -ClaudeCommand $ClaudeCommand `
+            -CodexCommand $CodexCommand `
             -TaskId $TaskId `
-            -Worktree $worktree
+            -Worktree $worktree `
+            -CodexDisposition "archive"
         if (@($sessionCleanup.stopFailures).Count -gt 0) {
             $blockedIds = @($sessionCleanup.stopFailures | ForEach-Object { [string]$_.id }) -join ", "
             throw "Failed to stop task session(s) $blockedIds; the retained worktree was not changed."

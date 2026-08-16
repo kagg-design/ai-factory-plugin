@@ -178,6 +178,32 @@ factory start -Model sonnet
 
 `-Resume` and `-Continue` are mutually exclusive.
 
+### Worker runtime selection
+
+Claude remains the Factory Orchestrator, but newly launched task workers can
+use either Claude Code or Codex:
+
+```powershell
+factory start -Agent claude
+factory start -Agent codex
+```
+
+The selection is written only to the private per-project runtime config; it is
+not added to the target repository. Omitting `-Agent` preserves the stored
+selection. Changing it affects new worker attempts only and never converts a
+session that is already running. `factory status` shows the selected runtime
+beside worker capacity, and `factory doctor` verifies the selected CLI.
+
+Codex workers use the supported non-interactive JSONL session interface. Their
+thread UUID, PID, transcript, and exact resume command are stored in private
+runtime state. They do not appear in Claude Agent View. Use `factory chat
+<task-id>` to obtain the capture-aware PowerShell command; it opens `codex
+resume` and, after the interactive TUI exits, performs one short resume turn so
+the resulting `FACTORY_PLAN` or `FACTORY_RESULT` is reconciled into Factory.
+The ordinary Codex picker can also show these sessions with `codex resume --all
+--include-non-interactive`, but a raw picker/resume does not run Factory's
+post-chat capture step.
+
 ### Conversation language
 
 Set the language used for orchestrator, scheduler, and worker conversation in
@@ -203,9 +229,9 @@ retain the instructions with which they were launched.
 
 ## Start modes
 
-Every worker is a full Claude Code background session, not a one-shot
-subagent. It has its own persistent conversation, branch, and external
-worktree.
+Every worker has its own persistent CLI session, branch, and external worktree.
+Claude workers use Claude Code background sessions; Codex workers use durable
+Codex exec threads.
 
 ### Interactive start
 
@@ -298,7 +324,7 @@ for this native command and cannot be imported through `factory add --file`.
 
 ## Enter and steer a worker conversation
 
-Open Agent View:
+For a Claude worker, open Agent View:
 
 ```powershell
 claude agents
@@ -328,6 +354,10 @@ The factory also prints these commands:
 
 Worker sessions are named `factory-<task-id>-<title>`, so they are easy to find
 in Agent View.
+
+For a Codex worker, run `factory chat <task-id>` and then execute the printed
+PowerShell command in a separate terminal. Codex sessions are deliberately not
+listed in Claude Agent View.
 
 ## Human review gate
 

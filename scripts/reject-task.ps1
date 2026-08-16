@@ -5,11 +5,13 @@ param(
     [string]$Reason = "",
     [switch]$Keep,
     [switch]$Yes,
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 
 function Test-FactoryPathInsideRoot {
     param(
@@ -103,6 +105,7 @@ if (-not $ClaudeCommand) {
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path ([string]$context.configPath)
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $mutex = $null
 
 try {
@@ -157,6 +160,13 @@ try {
                 $_.Name -eq "$safeTaskId.sync-tests.json"
             }
     )
+    $sessionDirectories = @(
+        Get-ChildItem -LiteralPath ([string]$context.sessionsPath) -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name.StartsWith("$safeTaskId-a", [StringComparison]::OrdinalIgnoreCase) -and
+                $_.Name.EndsWith("-codex-bin", [StringComparison]::OrdinalIgnoreCase)
+            }
+    )
     $eventDirectory = Join-Path ([string]$context.eventsPath) $safeTaskId
     $sessionId = if ($null -ne $task.backgroundSession) {
         [string]$task.backgroundSession.id
@@ -181,6 +191,7 @@ try {
         $branchExists -or
         $sessionId -or
         $sessionFiles.Count -gt 0 -or
+        $sessionDirectories.Count -gt 0 -or
         (Test-Path -LiteralPath $eventDirectory) -or
         [string]$task.commit -or
         $testDatabaseName
@@ -199,6 +210,7 @@ try {
         commit = if ([string]$task.commit) { [string]$task.commit } else { $null }
         testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }
         metadataFiles = @($sessionFiles | ForEach-Object { $_.FullName })
+        metadataDirectories = @($sessionDirectories | ForEach-Object { $_.FullName })
         eventDirectory = if (Test-Path -LiteralPath $eventDirectory) { $eventDirectory } else { $null }
         result = "Task will be removed from active factory state. This cannot be undone by the factory."
     }
@@ -207,10 +219,13 @@ try {
         exit 0
     }
 
-    $sessionCleanup = Remove-FactoryTaskAgentSessions `
+    $sessionCleanup = Close-FactoryTaskWorkerSessions `
+        -Session $task.backgroundSession `
         -ClaudeCommand $ClaudeCommand `
+        -CodexCommand $CodexCommand `
         -TaskId $TaskId `
-        -Worktree $(if ($worktree) { $worktree } else { "" })
+        -Worktree $(if ($worktree) { $worktree } else { "" }) `
+        -CodexDisposition "delete"
     if (@($sessionCleanup.stopFailures).Count -gt 0) {
         $blockedIds = @($sessionCleanup.stopFailures | ForEach-Object { [string]$_.id }) -join ", "
         throw "Failed to stop task session(s) $blockedIds. No artifacts were removed."
@@ -275,6 +290,9 @@ try {
     foreach ($sessionFile in $sessionFiles) {
         Remove-Item -LiteralPath $sessionFile.FullName -Force
     }
+    foreach ($sessionDirectory in $sessionDirectories) {
+        Remove-Item -LiteralPath $sessionDirectory.FullName -Recurse -Force
+    }
     if (Test-Path -LiteralPath $eventDirectory) {
         Remove-Item -LiteralPath $eventDirectory -Recurse -Force
     }
@@ -296,6 +314,7 @@ try {
         removedWorktree = $removedWorktree
         deletedBranch = $deletedBranch
         removedMetadataFiles = @($sessionFiles | ForEach-Object { $_.FullName })
+        removedMetadataDirectories = @($sessionDirectories | ForEach-Object { $_.FullName })
         removedEventDirectory = -not (Test-Path -LiteralPath $eventDirectory)
         removedReparsePoints = @($removedReparsePoints)
         testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }

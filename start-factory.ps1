@@ -7,7 +7,9 @@ param(
     [switch]$New,
     [string]$ClaudeCommand = "claude",
     [string]$RuntimeHome = "",
-    [string]$Model = ""
+    [string]$Model = "",
+    [ValidateSet("claude", "codex")][string]$Agent = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +23,7 @@ $standaloneRoot = Join-Path $pluginRoot "standalone"
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
+. (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
 $env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) {
     [IO.Path]::GetFullPath($RuntimeHome)
 } else {
@@ -32,6 +35,20 @@ if ($Model) {
 
 $contextJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $Repository -Initialize
 $context = $contextJson | ConvertFrom-Json
+$factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
+if ($Agent) {
+    if ($Agent -eq "codex") {
+        $resolvedCodexCommand = Resolve-FactoryCodexCommand -Config $factoryConfig -ExplicitCommand $CodexCommand
+        $capabilities = Get-FactoryCodexCapabilities -CodexCommand $resolvedCodexCommand
+        if (-not [bool]$capabilities.supported) {
+            throw "Cannot select the Codex worker runtime: $($capabilities.detail)"
+        }
+        Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $resolvedCodexCommand
+    }
+    Set-FactoryProperty -Target $factoryConfig -Name "workerAgent" -Value $Agent
+    Write-FactoryJsonAtomic -Path ([string]$context.configPath) -Value $factoryConfig
+}
+$workerAgent = if ([string]$factoryConfig.workerAgent) { [string]$factoryConfig.workerAgent } else { "claude" }
 
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")
@@ -51,6 +68,7 @@ try {
     Write-Host "Factory state: $($context.statePath)" -ForegroundColor Cyan
     Write-Host "Worktrees: $($context.worktreeRoot)" -ForegroundColor Cyan
     Write-Host "Agent View: claude agents" -ForegroundColor Cyan
+    Write-Host "Worker runtime: $workerAgent" -ForegroundColor Cyan
     Write-Host "Command: /factory" -ForegroundColor Cyan
     Write-Host ""
 

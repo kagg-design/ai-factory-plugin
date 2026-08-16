@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -16,8 +16,12 @@
     "maximumBackoffSeconds": 300
   },
   "workerPermissionMode": "auto",
+  "workerAgent": "claude",
   "workerModel": "inherit",
   "workerEffort": "high",
+  "codexCommand": "codex",
+  "codexModel": "inherit",
+  "codexReasoningEffort": "inherit",
   "autoPushDevelopment": true,
   "autoPromoteToProduction": true,
   "productionMode": "merge-develop",

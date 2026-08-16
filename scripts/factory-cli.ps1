@@ -10,11 +10,13 @@ param(
     [switch]$ResumeSession,
     [switch]$Continue,
     [string]$Model = "",
+    [string]$Agent = "",
     [string]$File = "",
     [switch]$Auto,
     [switch]$Direct,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
+    [string]$CodexCommand = "",
     [switch]$NoReconcile
 )
 
@@ -144,7 +146,12 @@ function Invoke-CliReconcile {
 
     if ($NoReconcile) { return "" }
     try {
-        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "reconcile-worker-sessions.ps1") -Repository ([string]$Context.repositoryRoot) -ClaudeCommand $ClaudeCommand | Out-String)
+        $reconcileArguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "reconcile-worker-sessions.ps1"),
+            "-Repository", [string]$Context.repositoryRoot, "-ClaudeCommand", $ClaudeCommand
+        )
+        if ($CodexCommand) { $reconcileArguments += @("-CodexCommand", $CodexCommand) }
+        $null = (& powershell @reconcileArguments | Out-String)
         if ($LASTEXITCODE -ne 0) {
             return "Session reconciliation exited with code $LASTEXITCODE; showing saved state."
         }
@@ -182,7 +189,7 @@ function Get-CliSessionInfo {
 
     $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
     if ($null -eq $session) {
-        return [pscustomobject]@{ Exists = $false; Id = ""; ShortId = ""; Name = ""; State = "none" }
+        return [pscustomobject]@{ Exists = $false; Runtime = ""; Id = ""; ShortId = ""; Name = ""; State = "none"; AttachCommand = "" }
     }
     $id = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "id")
     if (-not $id) {
@@ -190,10 +197,12 @@ function Get-CliSessionInfo {
     }
     return [pscustomobject]@{
         Exists = [bool]$id
+        Runtime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "runtime") -Fallback "claude"
         Id = $id
         ShortId = Get-CliShortId -Value $id
         Name = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "name")
         State = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "state") -Fallback "unknown"
+        AttachCommand = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "attachCommand")
     }
 }
 
@@ -367,7 +376,7 @@ function Add-CliTaskTree {
     $session = Get-CliSessionInfo -Task $Task
     if ($session.Exists) {
         $sessionName = if ($session.Name) { "$($session.Name) $($script:Tree.Horizontal) " } else { "" }
-        $details.Add("Session: $sessionName$($session.ShortId) / $($session.State)")
+        $details.Add("Session: $($session.Runtime) $sessionName$($session.ShortId) / $($session.State)")
     } else {
         $details.Add("Session: none")
     }
@@ -457,7 +466,8 @@ function Write-CliStatus {
 
     $lines = New-Object Collections.Generic.List[string]
     $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory $($script:Tree.Horizontal) $projectName")
-    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) workers $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
+    $workerRuntime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
+    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) workers $activeWorkers/$concurrency ($workerRuntime) $($script:Tree.Horizontal) scheduler $scheduler")
     if ($cronId -and $schedulerStatus -eq "running") {
         $lines.Add("$($script:Tree.Vertical)  Legacy Claude cron $cronId will remove itself on its next one-shot tick.")
     }
@@ -539,9 +549,10 @@ function Write-CliInspect {
     if ($reason) { Add-CliInspectLine -Lines $lines -Text "Reason: $reason" }
     $session = Get-CliSessionInfo -Task $task
     if ($session.Exists) {
-        Add-CliInspectLine -Lines $lines -Text "Session: $($session.Id) / $($session.State)"
+        Add-CliInspectLine -Lines $lines -Text "Session: $($session.Runtime) / $($session.Id) / $($session.State)"
         if ($session.Name) { Add-CliInspectLine -Lines $lines -Text "Session name: $($session.Name)" }
-        Add-CliInspectLine -Lines $lines -Text "Attach: claude attach $($session.ShortId)"
+        $inspectAttach = if ($session.AttachCommand) { $session.AttachCommand } elseif ($session.Runtime -eq "codex") { "codex resume --include-non-interactive --all" } else { "claude attach $($session.ShortId)" }
+        Add-CliInspectLine -Lines $lines -Text "Attach: $inspectAttach"
     } else {
         Add-CliInspectLine -Lines $lines -Text "Session: none"
     }
@@ -615,7 +626,12 @@ function Write-CliInspect {
 function Write-CliDoctor {
     param($Context)
 
-    $doctorText = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "factory-doctor.ps1") -Repository ([string]$Context.repositoryRoot) -ClaudeCommand $ClaudeCommand | Out-String).Trim()
+    $doctorArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-doctor.ps1"),
+        "-Repository", [string]$Context.repositoryRoot, "-ClaudeCommand", $ClaudeCommand
+    )
+    if ($CodexCommand) { $doctorArguments += @("-CodexCommand", $CodexCommand) }
+    $doctorText = (& powershell @doctorArguments | Out-String).Trim()
     if (-not $doctorText) { throw "Factory doctor returned no data." }
     $doctor = $doctorText | ConvertFrom-Json
     Write-Output "Factory doctor - $($doctor.projectKey)"
@@ -674,17 +690,17 @@ function Write-CliChat {
     Add-CliWrappedLine -Lines $lines -FirstPrefix "$($script:Tree.Top)$($script:Tree.Horizontal) " -ContinuationPrefix "$($script:Tree.Vertical)  " -Text "Task $TaskId $($script:Tree.Horizontal) $title"
     Add-CliInspectLine -Lines $lines -Text "State: $(Get-CliStateText -Status $status) ($status)"
     if ($session.Exists) {
-        Add-CliInspectLine -Lines $lines -Text "Session: $($session.Id) / $($session.State)"
+        Add-CliInspectLine -Lines $lines -Text "Session: $($session.Runtime) / $($session.Id) / $($session.State)"
         if ($session.Name) { Add-CliInspectLine -Lines $lines -Text "Session name: $($session.Name)" }
-        $attachCommand = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "backgroundSession") -Name "attachCommand")
-        if (-not $attachCommand) { $attachCommand = "claude attach $($session.ShortId)" }
+        $attachCommand = $session.AttachCommand
+        if (-not $attachCommand) { $attachCommand = if ($session.Runtime -eq "codex") { "codex resume --include-non-interactive --all" } else { "claude attach $($session.ShortId)" } }
         Add-CliInspectLine -Lines $lines -Text "PowerShell: $attachCommand"
         Add-CliInspectLine -Lines $lines -Text "Orchestrator: /factory chat $TaskId"
     } else {
         Add-CliInspectLine -Lines $lines -Text "Session: none; there is nothing to attach."
     }
     if ($ReconcileWarning) { Add-CliInspectLine -Lines $lines -Text "Warning: $ReconcileWarning" }
-    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) This command resolves the session; it does not start a nested Claude process.")
+    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) This command resolves the session; run the printed PowerShell command outside the orchestrator.")
     $lines | Write-Output
 }
 
@@ -965,7 +981,9 @@ function Write-CliSchedulerResult {
         }
         foreach ($launch in @(Get-CliProperty -InputObject $Result -Name "launched" -Default @())) {
             $session = Get-CliProperty -InputObject $launch -Name "backgroundSession"
-            Write-Output "  launched $([string]$launch.taskId): claude attach $(Get-CliShortId -Value (Get-CliProperty -InputObject $session -Name 'id'))"
+            $attach = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $session -Name "attachCommand")
+            if (-not $attach) { $attach = "session $(Get-CliShortId -Value (Get-CliProperty -InputObject $session -Name 'id')) is starting" }
+            Write-Output "  launched $([string]$launch.taskId): $attach"
         }
         foreach ($errorText in @(Get-CliProperty -InputObject $Result -Name "errors" -Default @())) {
             Write-Output "  error: $(ConvertTo-CliLine -Value $errorText)"
@@ -1006,12 +1024,14 @@ function Start-CliFactory {
     $arguments = @{
         Repository = [string]$Context.repositoryRoot
         ClaudeCommand = $ClaudeCommand
+        CodexCommand = $CodexCommand
         RuntimeHome = [string]$Context.runtimeHome
     }
     if ($New) { $arguments.New = $true }
     if ($ResumeSession) { $arguments.Resume = $true }
     if ($Continue) { $arguments.Continue = $true }
     if ($Model) { $arguments.Model = $Model }
+    if ($Agent) { $arguments.Agent = $Agent }
     & (Join-Path $pluginRoot "start-factory.ps1") @arguments
     $script:CliExitCode = $LASTEXITCODE
 }
@@ -1054,7 +1074,7 @@ function Write-CliHelp {
             "Factory CLI - deterministic local commands (no AI interpretation)",
             "",
             "PowerShell:",
-            "  factory start [-New|-Resume|-Continue] [-Model name]",
+            "  factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory chat <task-id>",
@@ -1104,8 +1124,8 @@ function Write-CliHelp {
         "chat" {
             @(
                 "factory chat <task-id>",
-                "Resolves the saved Claude session and prints exact attach commands.",
-                "It deliberately does not start a nested Claude process."
+                "Resolves the saved Claude or Codex worker session and prints the exact attach command.",
+                "Run the printed command in PowerShell; the orchestrator does not start a nested interactive process."
             ) | Write-Output
         }
         "hold" {
@@ -1169,8 +1189,9 @@ function Write-CliHelp {
         }
         "start" {
             @(
-                "factory start [-New|-Resume|-Continue] [-Model name]",
+                "factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
                 "Starts or reuses the repository's Claude Factory Orchestrator and starts its native scheduler.",
+                "-Agent changes the private per-project runtime for newly launched workers; it does not replace the Claude orchestrator.",
                 "Run this from PowerShell, not from inside an already open orchestrator."
             ) | Write-Output
         }
@@ -1232,7 +1253,7 @@ foreach ($value in @($Remaining)) {
     elseif ($value -eq "--direct") { $Direct = $true }
     else { $remainingValues.Add([string]$value) }
 }
-$startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model)
+$startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model -or $Agent)
 $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 $fileOptionUsed = [bool]$File
 $autoOptionUsed = [bool]$Auto
@@ -1265,7 +1286,7 @@ if ($normalizedCommand -eq "doctor") {
 }
 
 if ($normalizedCommand -eq "start") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, and -Model." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, -Model, -Agent, and -CodexCommand." }
     if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
     Start-CliFactory -Context $context
     exit $script:CliExitCode

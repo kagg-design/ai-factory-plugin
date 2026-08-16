@@ -39,7 +39,8 @@ decision command, run:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/reconcile-worker-sessions.ps1" -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
-This imports hook events, Claude background-session state, transcript paths,
+This imports hook events, Claude background-session state, Codex JSONL session
+state, transcript paths,
 and validated Git results into factory state.
 
 ## Commands
@@ -64,7 +65,7 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory doctor          deterministic diagnostics
 
 PowerShell entry point (outside Claude)
-  factory start            open/reuse orchestrator + scheduler
+  factory start [-Agent]   open/reuse orchestrator + scheduler; select workers
   factory paths|config     inspect private project runtime
   factory scheduler        native process status/control
 

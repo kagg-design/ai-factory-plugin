@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Added private per-project worker runtime selection with `factory start
+  -Agent claude|codex`. Claude remains the orchestrator; Codex workers use the
+  supported `codex exec --json` session contract, isolated worktrees and test
+  databases, PID-aware reconciliation, a prohibited-operation Git proxy,
+  capture-aware interactive resume, doctor/status visibility, and guarded
+  archive/delete lifecycle handling. Codex threads remain outside Claude Agent
+  View and can be browsed with `codex resume --all --include-non-interactive`.
 - Added native `factory go <task-id> --direct` for explicit operator approval
   without a separate AI code-review turn. Direct approval records an audited
   mode while preserving exact-SHA, clean-worktree, current-base, worker-check,

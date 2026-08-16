@@ -3,16 +3,20 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry")][string]$Action,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$Instructions = "",
-    [string]$ClaudeCommand = ""
+    [string]$ClaudeCommand = "",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) { $env:CLAUDE_FACTORY_CLAUDE_COMMAND } else { "claude" }
 }
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 
 $mutex = $null
 try {
@@ -109,9 +113,15 @@ try {
                 throw "Task '$TaskId' still has a working background session."
             }
             if ($oldBackgroundId -and $oldBackgroundState -notin @("stopped", "done", "failed")) {
-                & $ClaudeCommand stop $oldBackgroundId 1> $null 2> $null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Failed to stop old background session '$oldBackgroundId'."
+                $sessionCleanup = Close-FactoryTaskWorkerSessions `
+                    -Session $task.backgroundSession `
+                    -TaskId $TaskId `
+                    -Worktree ([string]$task.worktree) `
+                    -ClaudeCommand $ClaudeCommand `
+                    -CodexCommand $CodexCommand `
+                    -CodexDisposition "archive"
+                if (@($sessionCleanup.stopFailures).Count -gt 0) {
+                    throw "Failed to stop old worker session '$oldBackgroundId'."
                 }
             }
             Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null

@@ -44,6 +44,17 @@ cd C:\laragon\www\motivehr
 factory start
 ```
 
+Select the runtime for newly launched workers when needed:
+
+```powershell
+factory start -Agent claude
+factory start -Agent codex
+```
+
+The lead/orchestrator remains Claude in both cases. The selection is stored in
+the private project `config.json`, survives restart, and affects only new
+attempts. Existing Claude and Codex workers can coexist while they finish.
+
 Then check its state without waiting for AI interpretation:
 
 ```powershell
@@ -291,7 +302,7 @@ Ask the orchestrator for connection details:
 /factory chat 1216632072822682
 ```
 
-Then:
+For a Claude worker, then:
 
 1. press `←`;
 2. find `factory-1216632072822682-...`;
@@ -309,6 +320,13 @@ If the session has stopped, `/factory chat` also prints the appropriate
 
 Do not start a nested interactive `claude attach` TUI from inside the
 orchestrator. Use Agent View or a second terminal.
+
+Codex workers do not appear in Claude Agent View. `/factory chat <id>` prints a
+capture-aware PowerShell command. Run it in a second terminal: it opens the
+exact Codex thread and, after the TUI exits, asks that same thread for its
+current `FACTORY_PLAN` or `FACTORY_RESULT` and reconciles the JSONL output.
+`codex resume --all --include-non-interactive` is useful for browsing, but raw
+resume bypasses this post-chat Factory capture.
 
 ## 8. Interactive task flow
 
@@ -616,7 +634,7 @@ factory scheduler status
 - `status` reconciles sessions and summarizes the queue.
 - `inspect` shows all normalized data for one task.
 - `transcript` summarizes the worker conversation.
-- `doctor` checks the CLI, PowerShell runtime and required cmdlets, parsed worker
+- `doctor` checks the selected worker CLI, PowerShell runtime and required cmdlets, parsed worker
   definition, agent-resolution cache, runtime files, locks, worktrees, and
   scheduler.
 - `factory scheduler status` validates the recorded PID/start time and reports

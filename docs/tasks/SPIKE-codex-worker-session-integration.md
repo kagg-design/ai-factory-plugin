@@ -35,6 +35,17 @@ These workers will be available in Codex's saved-session picker when
 non-interactive sessions are included, but they will not appear as children in
 the orchestrator's `/agent` picker.
 
+## Implementation update
+
+Implemented on 2026-08-16. `factory start -Agent codex` now persists the
+private worker selection, launches Codex through `exec --json`, reconciles the
+saved UUID/PID/JSONL stream, exposes runtime-aware status and doctor output,
+and uses guarded archive/delete lifecycle actions. `factory chat` prints a
+capture-aware resume wrapper: after the interactive Codex TUI exits, the same
+thread emits a machine-readable plan/result so Factory state catches up. The
+synthetic E2E uses a fake Codex executable and makes no authenticated model
+call.
+
 ## Evidence
 
 ### Public CLI behavior

@@ -13,6 +13,7 @@ $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
 $runtime = Join-Path $testRoot "runtime"
 $fakeClaude = Join-Path $testRoot "claude-fake.exe"
+$fakeCodex = Join-Path $testRoot "codex-fake.exe"
 $fakePsql = Join-Path $testRoot "psql-fake.exe"
 
 function Assert-Equal {
@@ -101,6 +102,7 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
     }
     Assert-True (@($bundleManifest.files) -contains "scripts/approve-direct.ps1") "The plugin manifest omits native direct approval."
+    Assert-True (@($bundleManifest.files) -contains "scripts/codex-runtime.ps1") "The plugin manifest omits the Codex worker adapter."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -176,7 +178,7 @@ try {
 
     $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
     Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
-    Assert-True ($cleanupSource.Contains("Remove-FactoryTaskAgentSessions")) "Task cleanup does not remove all completed Agent View sessions."
+    Assert-True ($cleanupSource.Contains("Close-FactoryTaskWorkerSessions")) "Task cleanup does not close the selected worker runtime session."
     Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
     $rejectSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\reject-task.ps1") -Raw
     Assert-True ($rejectSource.Contains("worktree remove --force")) "Task rejection does not remove abandoned worktrees."
@@ -223,6 +225,7 @@ try {
 
     $fakeSessionId = "11111111-2222-4333-8444-555555555555"
     Add-Type -Path (Join-Path $PSScriptRoot "FakeClaude.cs") -OutputAssembly $fakeClaude -OutputType ConsoleApplication
+    Add-Type -Path (Join-Path $PSScriptRoot "FakeCodex.cs") -OutputAssembly $fakeCodex -OutputType ConsoleApplication
     Add-Type -Path (Join-Path $PSScriptRoot "FakePsql.cs") -OutputAssembly $fakePsql -OutputType ConsoleApplication
 
     $unicodeFixture = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0KLQtdGB0YIg0LrQuNGA0LjQu9C70LjRhtGLIOKAlCDQs9C+0YLQvtCy0L4="))
@@ -246,7 +249,7 @@ try {
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 5 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 6 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 6 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
@@ -317,7 +320,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 5 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 6 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
@@ -652,7 +655,7 @@ try {
 
     $cliChat = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath chat held-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cliChat.Contains("claude attach held1234")) "Factory CLI chat did not resolve the exact task session."
-    Assert-True ($cliChat.Contains("does not start a nested Claude process")) "Factory CLI chat did not explain its safe non-nested behavior."
+    Assert-True ($cliChat.Contains("run the printed PowerShell command outside the orchestrator")) "Factory CLI chat did not explain its safe non-nested behavior."
 
     $cliRejectPreview = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath reject held-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cliRejectPreview.Contains("Reject preview")) "Factory CLI reject skipped its destructive preview."
@@ -1470,6 +1473,78 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $argvCapture
 
+    $codexConfig = Read-FactoryJson -Path $context.configPath
+    $codexConfig.codexCommand = $fakeCodex
+    $codexConfig.codexModel = "inherit"
+    $codexConfig.codexReasoningEffort = "inherit"
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $codexConfig
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Public factory start could not select the Codex worker runtime."
+    $codexConfig = Read-FactoryJson -Path $context.configPath
+    Assert-Equal "codex" ([string]$codexConfig.workerAgent) "Public factory start did not persist the private Codex selection."
+    $codexState = Read-FactoryJson -Path $context.statePath
+    $codexTask = New-FactoryTestTask -Id "codex-task" -Title "Codex interactive worker" -Now $now
+    $codexTask.startMode = "interactive"
+    $codexState.tasks = @($codexState.tasks) + @($codexTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $codexState
+    $codexLog = Join-Path $testRoot "codex-events.tsv"
+    $env:CLAUDE_FACTORY_TEST_CODEX_LOG = $codexLog
+    $codexLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "codex-task" -Mode interactive -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-Equal "codex" ([string]$codexLaunch.runtime) "Codex worker launch did not report its runtime."
+    Assert-Equal "codex" ([string]$codexLaunch.backgroundSession.runtime) "Codex worker session lost its runtime identity."
+    Assert-True ([int]$codexLaunch.backgroundSession.processId -gt 0) "Codex worker did not record a process ID."
+    $codexDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 100
+        try { $codexAlive = $null -ne (Get-Process -Id ([int]$codexLaunch.backgroundSession.processId) -ErrorAction Stop) } catch { $codexAlive = $false }
+    } while ($codexAlive -and [DateTime]::UtcNow -lt $codexDeadline)
+    Assert-True (-not $codexAlive) "Fake Codex worker did not finish."
+    $codexReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-Equal 1 ([int]$codexReconcile.codexSessionsSeen) "Codex reconciliation did not inspect the saved session."
+    $codexRecordedState = Read-FactoryJson -Path $context.statePath
+    $codexRecordedTask = @($codexRecordedState.tasks | Where-Object { [string]$_.id -eq "codex-task" })[0]
+    Assert-Equal "awaiting-input" ([string]$codexRecordedTask.status) "Codex FACTORY_PLAN did not reach awaiting-input."
+    Assert-Equal "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" ([string]$codexRecordedTask.backgroundSession.sessionId) "Codex thread UUID was not captured from JSONL."
+    Assert-True ([string]$codexRecordedTask.backgroundSession.attachCommand -match 'resume-codex-worker\.ps1') "Codex attach command did not use the capture-aware wrapper."
+    Assert-True ([string]$codexRecordedTask.backgroundSession.nativeResumeCommand -match '^codex resume -C .*aaaaaaaa-') "Codex native resume command did not target the exact thread."
+    Assert-Equal "Inspect the requested change" ([string]$codexRecordedTask.plan.understanding) "Codex plan payload was not recorded."
+    $codexStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") status -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex | Out-String)
+    Assert-True ($codexStatus.Contains("workers") -and $codexStatus.Contains("(codex)")) "Factory status hid the selected Codex worker runtime."
+    $codexChat = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") chat codex-task -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex | Out-String)
+    Assert-True ($codexChat.Contains("resume-codex-worker.ps1")) "Factory chat did not resolve the capture-aware Codex session command."
+    $codexResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\resume-codex-worker.ps1") -Repository $repository -TaskId "codex-task" -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-Equal "awaiting-input" ([string]$codexResume.status) "Capture-aware Codex resume changed a still-pending plan incorrectly."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t-C.*aaaaaaaa-' }).Count -eq 1) "Codex worker wrapper did not open the exact interactive thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\tresume\t--json.*aaaaaaaa-' }).Count -eq 1) "Codex worker wrapper did not capture the post-chat state."
+    $codexDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
+    $codexDoctorCheck = @($codexDoctor.checks | Where-Object { [string]$_.name -eq "codexWorkerRuntime" })[0]
+    Assert-True ([bool]$codexDoctorCheck.passed) "Doctor rejected the supported Codex CLI contract."
+    $env:CLAUDE_FACTORY_REAL_GIT = [string](Get-Command git -CommandType Application | Select-Object -First 1).Source
+    $env:CLAUDE_FACTORY_WORKTREE = [string]$codexRecordedTask.worktree
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\codex-git-proxy.ps1") status --porcelain 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Codex Git proxy blocked a harmless status command."
+    $previousCodexProxyErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $codexProxyDenied = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\codex-git-proxy.ps1") push origin HEAD 2>&1)
+        $codexProxyExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousCodexProxyErrorAction
+    }
+    Assert-Equal 2 $codexProxyExit "Codex Git proxy allowed a worker push."
+    Remove-Item Env:\CLAUDE_FACTORY_REAL_GIT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_WORKTREE -ErrorAction SilentlyContinue
+    $codexDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "codex-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-True ([bool]$codexDiscard.removedFromState) "Codex task rejection did not forget the task."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$codexRecordedTask.backgroundSession.shimDirectory))) "Codex task rejection left its private Git shim directory behind."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^delete\t--force\taaaaaaaa-' }).Count -eq 1) "Confirmed rejection did not delete the Codex session."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_LOG -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_REAL_GIT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_WORKTREE -ErrorAction SilentlyContinue
+    $codexConfig = Read-FactoryJson -Path $context.configPath
+    $codexConfig.workerAgent = "claude"
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $codexConfig
+
     $missingAgentState = Read-FactoryJson -Path $context.statePath
     $missingAgentState.tasks = @($missingAgentState.tasks) + @([pscustomobject]@{
         id = "missing-agent-task"
@@ -1503,6 +1578,7 @@ try {
     }
     $missingAgentFailed = $missingAgentExitCode -ne 0
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
     Assert-True $missingAgentFailed "Missing-agent warning did not abort launch."
     $failedAgentState = Read-FactoryJson -Path $context.statePath

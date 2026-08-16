@@ -1,14 +1,18 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [string]$ClaudeCommand = "claude"
+    [string]$ClaudeCommand = "claude",
+    [string]$CodexCommand = ""
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "worker-launch.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
+$workerRuntime = if ([string]$config.workerAgent) { [string]$config.workerAgent } else { "claude" }
+$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $state = Read-FactoryJson -Path $context.statePath
 $checks = New-Object System.Collections.Generic.List[object]
 
@@ -96,7 +100,22 @@ $resolutionDetail = if ($noWorkingResolution) {
 } else {
     "not probed; the next worker launch will try plugin -> inline -> additive system-prompt file"
 }
-Add-DoctorCheck -Name "workerAgentResolution" -Passed ($workerAgentOk -and $versionOk -and -not $noWorkingResolution) -Severity "required" -Detail $resolutionDetail
+Add-DoctorCheck `
+    -Name "workerAgentResolution" `
+    -Passed $(if ($workerRuntime -eq "codex") { $true } else { $workerAgentOk -and $versionOk -and -not $noWorkingResolution }) `
+    -Severity $(if ($workerRuntime -eq "codex") { "info" } else { "required" }) `
+    -Detail $(if ($workerRuntime -eq "codex") { "Claude worker resolution is inactive; selected runtime is Codex." } else { $resolutionDetail })
+
+$codexCapabilities = if ($workerRuntime -eq "codex") {
+    Get-FactoryCodexCapabilities -CodexCommand $CodexCommand
+} else {
+    [pscustomobject]@{ supported = $true; version = ""; detail = "not selected" }
+}
+Add-DoctorCheck `
+    -Name "codexWorkerRuntime" `
+    -Passed ([bool]$codexCapabilities.supported) `
+    -Severity $(if ($workerRuntime -eq "codex") { "required" } else { "info" }) `
+    -Detail $(if ($workerRuntime -eq "codex") { "$([string]$codexCapabilities.version); $([string]$codexCapabilities.detail)" } else { "not selected" })
 
 $manifestPath = Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
 $manifestOk = $false
@@ -113,7 +132,7 @@ Add-DoctorCheck -Name "pluginManifest" -Passed $manifestOk -Detail $manifestDeta
 Add-DoctorCheck -Name "repositoryRoot" -Passed (Test-Path -LiteralPath $context.repositoryRoot) -Detail ([string]$context.repositoryRoot)
 Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.projectData) -Detail ([string]$context.projectData)
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
-Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency)"
+Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency), workers=$workerRuntime"
 
 $databaseIsolationSettings = $null
 try {
