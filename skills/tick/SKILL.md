@@ -81,8 +81,17 @@ the integrator base, and mark `review`.
 ### Integration tests and development push
 
 Run `integrationTestCommands`. If empty, infer canonical full checks once from
-repository docs and CI files and store them in private state. Every required
-command must exit 0.
+repository docs and CI files and store them in private state. Run every command
+through the bundled isolation wrapper, passing the exact command text:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/scripts/run-isolated-test-command.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Scope integrator -WorkingDirectory "INTEGRATOR_WORKTREE" -Command "EXACT_COMMAND"
+```
+
+The wrapper is a transparent command runner when database isolation is disabled.
+When enabled, it creates or reuses the dedicated integrator database and exports
+the configured database variable only to that command. Every required command
+must exit 0.
 
 Immediately before push, fetch development again. If its remote SHA moved,
 rebuild the integration on the new tip and rerun all tests. Push only:
@@ -110,8 +119,9 @@ For `merge-develop`, merge remote development with `--no-ff`. Honor
 `allowUnrelatedDevelopCommitsToProduction`. For `task-only`, promote only this
 task's tested integration and exclude unrelated development commits.
 
-Run all `releaseTestCommands`, inferring and saving canonical commands once
-when empty. Before push, fetch development and production again. If tested
+Run all `releaseTestCommands` through the same wrapper with `-Scope release`
+and the release worktree, inferring and saving canonical commands once when
+empty. Before push, fetch development and production again. If tested
 inputs moved, rebuild and retest. Push only `HEAD:<productionBranch>`, never
 force. Verify the task commit is reachable from all required remote branches.
 If automatic promotion is disabled, set `review`.

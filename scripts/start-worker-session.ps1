@@ -35,6 +35,9 @@ $eventDirectory = Join-Path $context.eventsPath $safeTaskId
 $previousFactoryPromptPath = $env:CLAUDE_FACTORY_PROMPT_PATH
 $claudeVersion = $null
 $agentResolutionPreference = "plugin"
+$testDatabaseName = $null
+$testDatabase = [pscustomobject]@{ enabled = $false; name = $null; environmentVariable = $null; created = $false }
+$workerEnvironment = @{}
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -52,6 +55,7 @@ try {
             branch = [string]$task.branch
             worktree = [string]$task.worktree
             backgroundSession = $task.backgroundSession
+            testDatabase = if ($null -ne $task.PSObject.Properties["testDatabase"]) { $task.testDatabase } else { $null }
         } | ConvertTo-Json -Depth 20
         exit 0
     }
@@ -77,6 +81,10 @@ try {
     } else {
         Join-Path $context.worktreeRoot "worker-$safeTaskId-a$attempt"
     }
+    $testDatabaseSettings = Get-FactoryTestDatabaseSettings -Config $config -RepositoryRoot ([string]$context.repositoryRoot)
+    if ($null -ne $testDatabaseSettings) {
+        $testDatabaseName = Get-FactoryTestDatabaseName -Settings $testDatabaseSettings -Scope "worker" -TaskId $TaskId
+    }
 
     $titleSlug = ConvertTo-FactorySafeName -Value ([string]$task.title) -Fallback "task"
     if ($titleSlug.Length -gt 28) { $titleSlug = $titleSlug.Substring(0, 28).TrimEnd("-") }
@@ -91,6 +99,7 @@ try {
     Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
     Set-FactoryProperty -Target $task -Name "error" -Value $null
     Set-FactoryProperty -Target $task -Name "attemptPrepared" -Value $false
+    Set-FactoryProperty -Target $task -Name "testDatabase" -Value $testDatabaseName
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -184,6 +193,20 @@ try {
         Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
     }
 
+    $testDatabase = Initialize-FactoryTestDatabase `
+        -Config $config `
+        -RepositoryRoot ([string]$context.repositoryRoot) `
+        -Scope "worker" `
+        -TaskId $TaskId
+    if ($testDatabase.enabled) {
+        if ([string]$testDatabase.name -ne [string]$testDatabaseName) {
+            throw "Initialized test database '$($testDatabase.name)' does not match recorded database '$testDatabaseName'."
+        }
+        $workerEnvironment = Get-FactoryTestDatabaseProcessEnvironment `
+            -Settings $testDatabaseSettings `
+            -DatabaseName ([string]$testDatabase.name)
+    }
+
     New-Item -ItemType Directory -Path $eventDirectory -Force | Out-Null
 
     $taskPayload = [ordered]@{
@@ -200,6 +223,7 @@ try {
         productionBranch = [string]$config.productionBranch
         conversationLanguage = [string]$config.conversationLanguage
         requiredChecks = @($config.workerRequiredChecks)
+        testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
     }
     $payloadJson = $taskPayload | ConvertTo-Json -Depth 30
     $modeInstruction = if ($Mode -eq "interactive") {
@@ -258,6 +282,7 @@ $payloadJson
         agentDefinitionDeviations = @()
         resolutionOutcomes = $null
         agentSessionWarnings = @()
+        testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
     }
     Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
 
@@ -288,7 +313,8 @@ $payloadJson
         -SystemPromptPath $systemPromptPath `
         -PreferredResolution $agentResolutionPreference `
         -Model $workerModel `
-        -Effort ([string]$config.workerEffort)
+        -Effort ([string]$config.workerEffort) `
+        -Environment $workerEnvironment
     $backgroundId = [string]$launch.backgroundId
     $launchOutput = [string]$launch.launchOutput
     $agentResolutionPreference = [string]$launch.agentResolution
@@ -380,6 +406,7 @@ $payloadJson
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)
         backgroundSession = $session
+        testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
     } | ConvertTo-Json -Depth 20
 } catch {
     $nativeAgentUnsupported = (

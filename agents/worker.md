@@ -81,6 +81,9 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 ## Verify and commit
 
 - Run focused tests and the nearest relevant lint or static-analysis check.
+- When `FACTORY_TASK.testDatabase` is non-empty, the worker process already
+  carries that isolated database through its configured environment variable.
+  Never replace it with the repository's shared test database.
 - Review `git diff` and include no unrelated files.
 - Create exactly one final task commit.
 - Suggested message: `fix(<task-id>): <task title>`.

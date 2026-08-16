@@ -13,6 +13,7 @@ $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
 $runtime = Join-Path $testRoot "runtime"
 $fakeClaude = Join-Path $testRoot "claude-fake.exe"
+$fakePsql = Join-Path $testRoot "psql-fake.exe"
 
 function Assert-Equal {
     param($Expected, $Actual, [string]$Message)
@@ -142,7 +143,13 @@ try {
         "initial`n",
         (New-Object Text.UTF8Encoding($false))
     )
-    & git -C $repository add README.md
+    [IO.File]::WriteAllText((Join-Path $repository ".gitignore"), ".env`n", (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText(
+        (Join-Path $repository ".env"),
+        "DB_HOST=127.0.0.1`nDB_PORT=5432`nDB_USERNAME=factory_test`nDB_PASSWORD=fake-secret`nDB_DATABASE=shared_test`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    & git -C $repository add README.md .gitignore
     & git -C $repository commit -m "initial" 1> $null
     & git -C $repository branch -M develop
     & git -C $repository branch master
@@ -152,12 +159,15 @@ try {
 
     $fakeSessionId = "11111111-2222-4333-8444-555555555555"
     Add-Type -Path (Join-Path $PSScriptRoot "FakeClaude.cs") -OutputAssembly $fakeClaude -OutputType ConsoleApplication
+    Add-Type -Path (Join-Path $PSScriptRoot "FakePsql.cs") -OutputAssembly $fakePsql -OutputType ConsoleApplication
 
     $env:CLAUDE_FACTORY_HOME = $runtime
     $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE = Join-Path $testRoot "agent-session-events.tsv"
+    $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE = Join-Path $testRoot "test-database-events.tsv"
+    $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 3 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 4 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 3 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
 
     $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
@@ -205,13 +215,59 @@ try {
     $legacyConfig.PSObject.Properties.Remove("maxConcurrency")
     $legacyConfig.PSObject.Properties.Remove("defaultStartMode")
     $legacyConfig.PSObject.Properties.Remove("conversationLanguage")
+    $legacyConfig.PSObject.Properties.Remove("testDatabaseIsolation")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 3 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 4 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
+    Assert-Equal $false ([bool]$migratedConfig.testDatabaseIsolation.enabled) "Test database isolation was not migrated safely as opt-in."
+    $migratedConfig.testDatabaseIsolation.enabled = $true
+    $migratedConfig.testDatabaseIsolation.databasePrefix = "factory_test"
+    $migratedConfig.testDatabaseIsolation.clientCommand = $fakePsql
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $migratedConfig
+    $databaseSettings = Get-FactoryTestDatabaseSettings -Config $migratedConfig -RepositoryRoot $repository
+    $firstWorkerDatabase = Get-FactoryTestDatabaseName -Settings $databaseSettings -Scope worker -TaskId "task-one"
+    $secondWorkerDatabase = Get-FactoryTestDatabaseName -Settings $databaseSettings -Scope worker -TaskId "task-two"
+    Assert-True ($firstWorkerDatabase -ne $secondWorkerDatabase) "Different tasks resolved to the same test database."
+
+    $integratorWorktree = Join-Path ([string]$context.worktreeRoot) "factory-integrator"
+    New-Item -ItemType Directory -Path $integratorWorktree -Force | Out-Null
+    $integratorDatabaseCapture = Join-Path $testRoot "integrator-test-database.txt"
+    $captureLiteral = $integratorDatabaseCapture.Replace("'", "''")
+    $isolatedCommand = "[IO.File]::WriteAllText('$captureLiteral', `$env:DB_DATABASE)"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\run-isolated-test-command.ps1") `
+        -Repository $repository `
+        -Scope integrator `
+        -WorkingDirectory $integratorWorktree `
+        -Command $isolatedCommand
+    if ($LASTEXITCODE -ne 0) { throw "Isolated integrator command fixture failed." }
+    Assert-Equal "factory_test_integrator" ([IO.File]::ReadAllText($integratorDatabaseCapture)) "Integrator checks did not receive their own database."
+    $dropFailureTask = "drop-failure-task"
+    $dropFailureDatabase = Initialize-FactoryTestDatabase -Config $migratedConfig -RepositoryRoot $repository -Scope worker -TaskId $dropFailureTask
+    $env:CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP = [string]$dropFailureDatabase.name
+    $dropFailureObserved = $false
+    try {
+        $null = Remove-FactoryTestDatabase `
+            -Config $migratedConfig `
+            -RepositoryRoot $repository `
+            -Scope worker `
+            -TaskId $dropFailureTask `
+            -DatabaseName ([string]$dropFailureDatabase.name)
+    } catch {
+        $dropFailureObserved = $true
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP -ErrorAction SilentlyContinue
+    }
+    Assert-True $dropFailureObserved "A PostgreSQL drop failure was silently accepted."
+    $null = Remove-FactoryTestDatabase `
+        -Config $migratedConfig `
+        -RepositoryRoot $repository `
+        -Scope worker `
+        -TaskId $dropFailureTask `
+        -DatabaseName ([string]$dropFailureDatabase.name)
 
     $now = [DateTime]::UtcNow.ToString("o")
     $state = [pscustomobject]@{
@@ -273,11 +329,18 @@ try {
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $argvCapture
     $env:CLAUDE_FACTORY_TEST_PROMPT_COPY = $promptCopy
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
+    $databaseEnvironmentCapture = Join-Path $testRoot "worker-test-database.txt"
+    $env:CLAUDE_FACTORY_TEST_DB_ENV_FILE = $databaseEnvironmentCapture
     $launch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "test-task" -Mode "auto" -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Assert-Equal "test1234" ([string]$launch.backgroundSession.id) "Background ID was not captured."
     Assert-Equal $fakeSessionId ([string]$launch.backgroundSession.sessionId) "Launcher did not bind the authoritative session UUID."
     Assert-Equal "plugin" ([string]$launch.backgroundSession.agentResolution) "Native agent success was not audited."
+    Assert-Equal "factory_test_worker_test_task" ([string]$launch.testDatabase) "Worker did not receive its deterministic isolated database."
+    Assert-Equal "factory_test_worker_test_task" ((Get-Content -LiteralPath $databaseEnvironmentCapture | Select-Object -Last 1).Trim()) "Claude worker process did not inherit its isolated database."
+    $databaseEvents = @(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE)
+    Assert-Equal 1 (@($databaseEvents | Where-Object { $_ -eq "create`tfactory_test_worker_test_task" }).Count) "Worker database was not created exactly once."
+    Assert-True (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE | Where-Object { $_ -match 'password-present$' }).Count -gt 0) "PostgreSQL maintenance did not receive the password through process environment."
     $launchMetadata = Read-FactoryJson -Path (Join-Path $context.sessionsPath "test-task.json")
     Assert-True ([string]$launchMetadata.launchOutput -match 'benign background-launch warning') "Benign stderr warning was not captured."
     Assert-Equal "plugin" ([string]$launchMetadata.agentResolution) "Launch metadata did not record native agent resolution."
@@ -557,6 +620,9 @@ try {
     Assert-True ($blockedCleanupExitCode -ne 0) "Cleanup continued after a task session failed to stop."
     Assert-True (Test-Path -LiteralPath $launch.worktree) "Cleanup touched the worktree after a session stop failure."
     Assert-True (@(& git -C $repository branch --list ([string]$launch.branch)).Count -gt 0) "Cleanup deleted the branch after a session stop failure."
+    Assert-Equal 0 (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE | Where-Object {
+        $_ -eq "drop`tfactory_test_worker_test_task"
+    }).Count) "Cleanup dropped the test database before the worker session stopped."
 
     $agentSessionRemoval = Join-Path $testRoot "removed-agent-session.txt"
     $cleanupStopCapture = Join-Path $testRoot "cleanup-stopped-session.txt"
@@ -580,8 +646,14 @@ try {
     Assert-Equal "test1234" (@(Get-Content -LiteralPath $agentSessionRemoval | Where-Object { $_ })[0]) "Cleanup removed the wrong Agent View session."
     Assert-Equal "test1234" ((Get-Content -LiteralPath $cleanupStopCapture -Raw).Trim()) "Cleanup did not stop a terminal-looking live process before removal."
     Assert-True (Test-Path -LiteralPath $answerTranscript) "Cleanup deleted the transcript retained by answer."
+    Assert-True ([bool]$cleanup.removedTestDatabase) "Cleanup did not remove the worker test database."
+    Assert-Equal "factory_test_worker_test_task" ([string]$cleanup.testDatabase) "Cleanup reported the wrong test database."
     $cleanedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal "done" ([string]$cleanedState.tasks[0].status) "Task cleanup state was not persisted."
+    Assert-True ($null -eq $cleanedState.tasks[0].testDatabase) "Cleanup retained a removed test database in task state."
+    Assert-Equal 1 (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE | Where-Object {
+        $_ -eq "drop`tfactory_test_worker_test_task"
+    }).Count) "Cleanup did not drop the worker database exactly once."
     $rowsAfterCleanup = @(Get-FactoryClaudeAgentRows -ClaudeCommand $fakeClaude)
     Assert-Equal 0 (@($rowsAfterCleanup | Where-Object {
         $null -ne $_.PSObject.Properties["name"] -and [string]$_.name -like "factory-test-task-*"
@@ -689,6 +761,7 @@ try {
         ConvertFrom-Json
     Assert-True ([bool]$preview.confirmationRequired) "Reject did not preview potentially unique work."
     Assert-Equal ([string]$discardLaunch.worktree) ([string]$preview.worktree) "Reject preview named the wrong worktree."
+    Assert-Equal "factory_test_worker_discard_task" ([string]$preview.testDatabase) "Reject preview omitted the isolated test database."
     Assert-True (Test-Path -LiteralPath $discardLaunch.worktree) "Reject preview mutated the worktree."
     $previewState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 1 (@($previewState.tasks | Where-Object { [string]$_.id -eq "discard-task" }).Count) "Reject preview removed the task."
@@ -710,6 +783,10 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL -ErrorAction SilentlyContinue
     Assert-True ([bool]$discarded.removedFromState) "Confirmed reject did not forget the task."
     Assert-True ([bool]$discarded.stoppedSession) "Confirmed reject did not stop the session."
+    Assert-True ([bool]$discarded.removedTestDatabase) "Confirmed reject did not drop the isolated test database."
+    Assert-Equal 1 (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE | Where-Object {
+        $_ -eq "drop`tfactory_test_worker_discard_task"
+    }).Count) "Reject did not drop the task database exactly once."
     Assert-Equal 2 (@($discarded.removedAgentSessions).Count) "Reject did not remove every matching Agent View row."
     Assert-Equal "test1234" ((Get-Content -LiteralPath $stopCapture -Raw).Trim()) "Reject stopped the wrong session."
     $discardRemovedIds = @(Get-Content -LiteralPath $discardRmCapture | Where-Object { $_ })
@@ -816,11 +893,13 @@ try {
     $runtimeCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "powershellRuntime" })[0]
     $agentDefinitionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentDefinition" })[0]
     $resolutionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
+    $databaseIsolationCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "testDatabaseIsolation" })[0]
     Assert-True ([bool]$runtimeCheck.passed) "Factory doctor did not verify PowerShell dependencies."
     Assert-True ([bool]$agentDefinitionCheck.passed) "Factory doctor did not verify the worker definition."
     Assert-True ([string]$agentDefinitionCheck.detail -match 'additive system-prompt') "Factory doctor hid the additive fallback semantics."
     Assert-Equal "required" ([string]$resolutionCheck.severity) "Worker resolution is not a required doctor check."
     Assert-True ([string]$resolutionCheck.detail -match 'system-prompt') "Factory doctor hid the active system fallback."
+    Assert-True ([bool]$databaseIsolationCheck.passed) "Factory doctor did not validate isolated database prerequisites."
 
     $failureState = Read-FactoryJson -Path $context.statePath
     $failureState.agentResolutionCache = $null
@@ -930,6 +1009,10 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FAIL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_DB_ENV_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue

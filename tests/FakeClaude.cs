@@ -209,6 +209,15 @@ public static class FakeClaude
         {
             File.WriteAllLines(argvFile, args, new UTF8Encoding(false));
         }
+        string databaseCapture = Env("CLAUDE_FACTORY_TEST_DB_ENV_FILE");
+        if (!String.IsNullOrEmpty(databaseCapture))
+        {
+            File.AppendAllText(
+                databaseCapture,
+                Env("DB_DATABASE") + Environment.NewLine,
+                new UTF8Encoding(false)
+            );
+        }
         string promptCopy = Env("CLAUDE_FACTORY_TEST_PROMPT_COPY");
         string promptPath = Env("CLAUDE_FACTORY_PROMPT_PATH");
         if (!String.IsNullOrEmpty(promptCopy) && !String.IsNullOrEmpty(promptPath))

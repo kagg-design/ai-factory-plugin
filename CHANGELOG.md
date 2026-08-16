@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Added opt-in PostgreSQL test-database isolation: every worker task receives a
+  deterministic private database through its process environment, integration
+  and release commands have separate databases, and final cleanup/rejection
+  drops worker databases only after their sessions stop.
 - Removed every completed attempt of a closed task from Agent View during
   `answer`, `reject`, and `cleanup`; fallback-launch strays are now removed
   immediately. Cleanup verifies live processes are gone before touching their

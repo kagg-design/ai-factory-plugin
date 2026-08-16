@@ -139,6 +139,9 @@ try {
     } else {
         ""
     }
+    $testDatabaseName = if ($null -ne $task.PSObject.Properties["testDatabase"]) {
+        [string]$task.testDatabase
+    } else { "" }
     if (-not $commit) {
         throw "Task '$TaskId' has no recorded commit. Cleanup refuses to discard unpublished work."
     }
@@ -226,6 +229,16 @@ try {
         throw "Task cleanup stopped before removing artifacts because $blocked"
     }
 
+    # Once no task process can reconnect, drop its isolated database before
+    # removing the worktree. A database failure leaves all Git artifacts intact
+    # so cleanup can be retried safely.
+    $testDatabaseCleanup = Remove-FactoryTestDatabase `
+        -Config $config `
+        -RepositoryRoot $repositoryRoot `
+        -Scope "worker" `
+        -TaskId $TaskId `
+        -DatabaseName $testDatabaseName
+
     $removedWorktree = $false
     if ($worktree -and (Test-Path -LiteralPath $worktree)) {
         $removedReparsePoints = @(Remove-FactoryReparsePointsInTree -Path $worktree)
@@ -277,6 +290,7 @@ try {
     Set-FactoryProperty -Target $task -Name "approval" -Value $null
     Set-FactoryProperty -Target $task -Name "status" -Value "done"
     Set-FactoryProperty -Target $task -Name "error" -Value $null
+    Set-FactoryProperty -Target $task -Name "testDatabase" -Value $null
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -302,6 +316,8 @@ try {
         stoppedAgentSessions = @($sessionCleanup.stoppedAgentSessions)
         removedAgentSessions = @($sessionCleanup.removedAgentSessions)
         agentSessionWarning = $agentSessionWarning
+        testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }
+        removedTestDatabase = [bool]$testDatabaseCleanup.removed
     } | ConvertTo-Json -Depth 10
 } finally {
     Exit-FactoryMutex -Mutex $mutex

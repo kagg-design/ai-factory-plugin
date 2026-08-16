@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -18,6 +18,19 @@
   "allowUnrelatedDevelopCommitsToProduction": true,
   "integrationTestCommands": [],
   "releaseTestCommands": [],
+  "testDatabaseIsolation": {
+    "enabled": false,
+    "provider": "postgresql",
+    "databasePrefix": "",
+    "connectionEnvironmentFile": ".env",
+    "databaseEnvironmentVariable": "DB_DATABASE",
+    "hostEnvironmentVariable": "DB_HOST",
+    "portEnvironmentVariable": "DB_PORT",
+    "usernameEnvironmentVariable": "DB_USERNAME",
+    "passwordEnvironmentVariable": "DB_PASSWORD",
+    "maintenanceDatabase": "postgres",
+    "clientCommand": "psql"
+  },
   "copyIgnoredFiles": [
     ".env",
     ".env.local",

@@ -106,7 +106,8 @@ function Invoke-FactoryWorkerLaunch {
         [Parameter(Mandatory = $true)][string]$SystemPromptPath,
         [ValidateSet("plugin", "inline-fallback", "system-prompt")][string]$PreferredResolution = "plugin",
         [string]$Model = "",
-        [string]$Effort = ""
+        [string]$Effort = "",
+        [hashtable]$Environment = @{}
     )
 
     $baseArguments = @("--plugin-dir", $PluginRoot)
@@ -131,7 +132,7 @@ function Invoke-FactoryWorkerLaunch {
     try {
         if ($PreferredResolution -eq "plugin") {
             $nativeArguments = @($baseArguments + @("--agent", "factory:worker") + $tailArguments)
-            $nativeResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $nativeArguments -WorkingDirectory $Worktree
+            $nativeResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $nativeArguments -WorkingDirectory $Worktree -Environment $Environment
             if ($nativeResult.exitCode -ne 0) {
                 $outcomes.plugin = "failed"
                 $failedNativeId = Get-FactoryBackgroundId -Output $nativeResult.output
@@ -180,7 +181,7 @@ function Invoke-FactoryWorkerLaunch {
             $inlineBytes = [Text.Encoding]::UTF8.GetBytes([string]$workerAgent.json)
             $inlineHash = Get-FactorySha256Hex -Bytes $inlineBytes
             $inlineArguments = @($baseArguments + @("--agents", [string]$workerAgent.json, "--agent", "worker") + $tailArguments)
-            $inlineResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $inlineArguments -WorkingDirectory $Worktree
+            $inlineResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $inlineArguments -WorkingDirectory $Worktree -Environment $Environment
             if ($inlineResult.exitCode -ne 0) {
                 $outcomes.inlineFallback = "failed"
                 $failedInlineId = Get-FactoryBackgroundId -Output $inlineResult.output
@@ -243,7 +244,7 @@ function Invoke-FactoryWorkerLaunch {
         $systemPromptHash = Get-FactorySha256Hex -Bytes $systemPromptBytes
 
         $systemArguments = @($baseArguments + @("--append-system-prompt-file", $systemPromptFullPath) + $tailArguments)
-        $systemResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $systemArguments -WorkingDirectory $Worktree
+        $systemResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $systemArguments -WorkingDirectory $Worktree -Environment $Environment
         if ($systemResult.exitCode -ne 0) {
             $outcomes.systemPrompt = "failed"
             $failedSystemId = Get-FactoryBackgroundId -Output $systemResult.output

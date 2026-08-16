@@ -114,6 +114,28 @@ Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.pro
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
 Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency)"
 
+$databaseIsolationSettings = $null
+try {
+    $databaseIsolationSettings = Get-FactoryTestDatabaseSettings -Config $config -RepositoryRoot ([string]$context.repositoryRoot)
+    if ($null -eq $databaseIsolationSettings) {
+        Add-DoctorCheck -Name "testDatabaseIsolation" -Passed $true -Severity "info" -Detail "disabled"
+    } else {
+        $roleCheck = Invoke-FactoryPostgresMaintenance `
+            -Settings $databaseIsolationSettings `
+            -Sql "SELECT CASE WHEN rolcreatedb THEN 1 ELSE 0 END FROM pg_roles WHERE rolname = current_user"
+        $versionCheck = Invoke-FactoryPostgresMaintenance -Settings $databaseIsolationSettings -Sql "SHOW server_version_num"
+        $canCreate = ([string]$roleCheck.stdout).Trim() -eq "1"
+        $serverVersion = 0
+        [void][int]::TryParse(([string]$versionCheck.stdout).Trim(), [ref]$serverVersion)
+        Add-DoctorCheck `
+            -Name "testDatabaseIsolation" `
+            -Passed ($canCreate -and $serverVersion -ge 130000) `
+            -Detail "PostgreSQL server_version_num=$serverVersion; CREATEDB=$canCreate; prefix=$($databaseIsolationSettings.databasePrefix)"
+    }
+} catch {
+    Add-DoctorCheck -Name "testDatabaseIsolation" -Passed $false -Detail $_.Exception.Message
+}
+
 $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
 $remoteUrl = (& git -C $context.repositoryRoot remote get-url $remote 2>$null | Out-String).Trim()
 Add-DoctorCheck -Name "gitRemote" -Passed ($LASTEXITCODE -eq 0 -and [bool]$remoteUrl) -Detail $(if ($remoteUrl) { "$remote = $remoteUrl" } else { "Missing remote '$remote'" })

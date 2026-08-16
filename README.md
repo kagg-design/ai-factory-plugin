@@ -462,6 +462,42 @@ Set canonical project checks explicitly when possible:
 }
 ```
 
+### Isolated PostgreSQL test databases
+
+Git worktrees isolate files, not external services. Enable per-worktree test
+database isolation in the private repository config when concurrent workers use
+PostgreSQL:
+
+```json
+{
+  "testDatabaseIsolation": {
+    "enabled": true,
+    "provider": "postgresql",
+    "databasePrefix": "project_test"
+  }
+}
+```
+
+Connection values are read from the ignored `.env` by default. The configured
+PostgreSQL role must have `CREATEDB`; credentials are passed to `psql` through
+process environment and are never written to factory state. Each worker gets a
+deterministic database such as `project_test_worker_1217492299682856` through
+`DB_DATABASE`. The dedicated Claude process and every command it starts inherit
+that value, including PHPUnit, whose non-forced XML value does not replace an
+existing process variable.
+
+Worker databases survive `held`, `answer`, and retry so the retained worktree
+keeps its test state. Confirmed `reject` and successful `cleanup` stop all task
+processes first, then drop the database with PostgreSQL `WITH (FORCE)` before
+removing Git artifacts. Integration and release checks run through
+`scripts/run-isolated-test-command.ps1` and use the persistent, separate
+`<prefix>_integrator` and `<prefix>_release` databases. PostgreSQL 13 or newer is
+required for forced cleanup.
+
+The full object in `config.default.json` allows custom environment-variable
+names, connection file, maintenance database, and `psql` command. Keep this
+configuration private; it does not belong in the target repository.
+
 ## Private state
 
 Show the paths for one repository:
@@ -483,9 +519,10 @@ Private data is stored under:
 ```
 
 It includes config, queue state, background-session metadata, captured Stop
-events, transcript paths, and resolved test commands. Existing v2 config and
-state are migrated by adding missing v3 fields; repository-specific settings
-are preserved.
+events, transcript paths, and resolved test commands. Older config is migrated
+to v4 and state to v3 by adding missing fields; repository-specific settings are
+preserved. Test database isolation remains disabled unless explicitly enabled
+per repository.
 
 ## Tests
 

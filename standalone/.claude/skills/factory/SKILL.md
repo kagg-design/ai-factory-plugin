@@ -294,7 +294,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 Report Claude and PowerShell versions, required cmdlet availability, the parsed
 worker-agent definition, active agent-resolution path, plugin manifest,
 repository and remote branches, private runtime JSON, factory session lock,
-worktree registry, Agent View, scheduler, and Asana connector warning. An
+worktree registry, Agent View, scheduler, configured test-database isolation
+and its PostgreSQL prerequisites, and Asana connector warning. An
 `inline-fallback` resolution is an active compatibility workaround, not a
 default-template worker. The launcher supplies both the public skill and its
 companion plugin. Doctor is diagnostic and must not launch, integrate, push, or
@@ -438,6 +439,7 @@ The public `--yes` flag maps directly to `-Yes` and skips this question.
 
 Confirmed rejection stops every live background session belonging to the task,
 removes all matching Agent View rows from current and previous attempts,
+force-drops its exact isolated worker test database when configured,
 unlinks reparse points without traversing their targets, force-removes the task
 worktree even when it contains unpublished or dirty work, deletes its local
 `factory-worker/*` branch and private prompt/event/session metadata, and removes
@@ -478,7 +480,8 @@ must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
 from both configured remote development and production branches. After those
 checks, it must stop and verify every live process belonging to the task before
-touching the worktree, then remove every matching Agent View row. A stop failure
+touching the worktree, remove every matching Agent View row, and drop the exact
+isolated worker test database when configured. A stop or database failure
 must abort before artifact removal. It removes only the task's external worker
 worktree and local `factory-worker/*` branch. Preserve the factory's result
 metadata in private state and report the task as `done`. If an individual Agent

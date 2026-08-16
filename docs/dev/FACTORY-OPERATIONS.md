@@ -471,7 +471,42 @@ If the launcher reports that a factory is already running, inspect Agent View
 and other terminals first. Only one lead factory process may run for a
 repository.
 
-## 13. Concurrency
+## 13. Test database isolation
+
+Separate worktrees still share any database named by their copied `.env` or
+test-runner configuration. For a PostgreSQL project, enable isolation in the
+private runtime config:
+
+```json
+{
+  "testDatabaseIsolation": {
+    "enabled": true,
+    "provider": "postgresql",
+    "databasePrefix": "project_test"
+  }
+}
+```
+
+The connection defaults to the ignored `.env` and its standard `DB_HOST`,
+`DB_PORT`, `DB_USERNAME`, and `DB_PASSWORD` keys. The role must have `CREATEDB`.
+Do not put credentials in factory config.
+
+Worker `TASK_ID` receives `<prefix>_worker_<task_id>` as `DB_DATABASE` in the
+Claude process environment. A retry or answer reuses it; a hold preserves it.
+`cleanup` and confirmed `reject` stop every matching task process and then drop
+the exact derived database before touching the worktree. If the database cannot
+be dropped, Git artifacts and task state remain available for a safe retry.
+
+Integration and release checks must use the bundled wrapper exactly as required
+by the internal tick skill. Their databases are `<prefix>_integrator` and
+`<prefix>_release`, so they cannot collide with running workers. PostgreSQL 13+
+is required for `DROP DATABASE ... WITH (FORCE)`.
+
+If isolation is disabled, the wrapper runs commands normally. Until isolation
+is enabled, concurrent database-backed test runs are unsafe; lower factory
+concurrency or serialize those checks externally.
+
+## 14. Concurrency
 
 Show or change the current worker limit:
 
@@ -486,7 +521,7 @@ workers that are already running.
 `planning`, `starting`, and `running` consume capacity. `awaiting-input` and
 `awaiting-review` do not.
 
-## 14. Operations to avoid
+## 15. Operations to avoid
 
 - Do not enter `/factory ...` commands directly in Agent View.
 - Do not use `-Continue` for normal factory startup.
@@ -496,7 +531,7 @@ workers that are already running.
   remove uncommitted work.
 - Do not run `go` before reading `/factory review`.
 
-## 15. Daily checklist
+## 16. Daily checklist
 
 ```text
 1. Start start-factory.ps1 without -Continue.

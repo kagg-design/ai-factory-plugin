@@ -87,6 +87,7 @@ if ($Initialize) {
                 holdReason = $null
                 attemptPrepared = $false
                 answerHash = $null
+                testDatabase = $null
             }.GetEnumerator()) {
                 if ($null -eq $task.PSObject.Properties[$property.Key]) {
                     $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value

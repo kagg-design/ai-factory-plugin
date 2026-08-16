@@ -102,6 +102,7 @@ if (-not $ClaudeCommand) {
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
+$config = Read-FactoryJson -Path ([string]$context.configPath)
 $mutex = $null
 
 try {
@@ -170,6 +171,9 @@ try {
     } else {
         ""
     }
+    $testDatabaseName = if ($null -ne $task.PSObject.Properties["testDatabase"]) {
+        [string]$task.testDatabase
+    } else { "" }
     $branchExists = $false
     if ($branch) {
         & git -C $repositoryRoot show-ref --verify --quiet "refs/heads/$branch"
@@ -181,7 +185,8 @@ try {
         $sessionId -or
         $sessionFiles.Count -gt 0 -or
         (Test-Path -LiteralPath $eventDirectory) -or
-        [string]$task.commit
+        [string]$task.commit -or
+        $testDatabaseName
     )
 
     $preview = [ordered]@{
@@ -195,6 +200,7 @@ try {
         worktree = $worktree
         branch = if ($branch) { $branch } else { $null }
         commit = if ([string]$task.commit) { [string]$task.commit } else { $null }
+        testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }
         metadataFiles = @($sessionFiles | ForEach-Object { $_.FullName })
         eventDirectory = if (Test-Path -LiteralPath $eventDirectory) { $eventDirectory } else { $null }
         result = "Task will be removed from active factory state. This cannot be undone by the factory."
@@ -213,6 +219,15 @@ try {
         throw "Failed to stop task session(s) $blockedIds. No artifacts were removed."
     }
     $stoppedSession = @($sessionCleanup.stoppedAgentSessions).Count -gt 0
+
+    # Do not forget a task until its isolated database is gone. The forced drop
+    # runs only after every matching worker process has been stopped.
+    $testDatabaseCleanup = Remove-FactoryTestDatabase `
+        -Config $config `
+        -RepositoryRoot $repositoryRoot `
+        -Scope "worker" `
+        -TaskId $TaskId `
+        -DatabaseName $testDatabaseName
 
     $removedReparsePoints = @()
     $registeredPaths = @(Get-FactoryRegisteredWorktreePaths -RepositoryRoot $repositoryRoot)
@@ -286,6 +301,8 @@ try {
         removedMetadataFiles = @($sessionFiles | ForEach-Object { $_.FullName })
         removedEventDirectory = -not (Test-Path -LiteralPath $eventDirectory)
         removedReparsePoints = @($removedReparsePoints)
+        testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }
+        removedTestDatabase = [bool]$testDatabaseCleanup.removed
     } | ConvertTo-Json -Depth 10
 } finally {
     Exit-FactoryMutex -Mutex $mutex

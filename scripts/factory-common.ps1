@@ -36,7 +36,8 @@ function Invoke-FactoryNativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$Command,
         [string[]]$Arguments = @(),
-        [string]$WorkingDirectory = ""
+        [string]$WorkingDirectory = "",
+        [hashtable]$Environment = @{}
     )
 
     $resolvedCommand = Get-Command $Command -ErrorAction Stop
@@ -58,6 +59,9 @@ function Invoke-FactoryNativeProcess {
     $startInfo.RedirectStandardError = $true
     if ($WorkingDirectory) {
         $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
     }
 
     $process = New-Object Diagnostics.Process
@@ -227,6 +231,260 @@ function ConvertTo-FactorySafeName {
     $safe = ($safe -replace '-+', '-').Trim('-', '.')
     if (-not $safe) { return $Fallback }
     return $safe
+}
+
+function Get-FactoryNestedValue {
+    param(
+        $Target,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Target -or $null -eq $Target.PSObject.Properties[$Name]) {
+        return $Default
+    }
+    $value = $Target.$Name
+    if ($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
+        return $Default
+    }
+    return $value
+}
+
+function Read-FactoryEnvironmentFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Test database connection environment file not found: $Path"
+    }
+
+    $values = @{}
+    foreach ($line in [IO.File]::ReadAllLines([IO.Path]::GetFullPath($Path))) {
+        if ($line -notmatch '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { continue }
+        $name = [string]$matches[1]
+        $value = [string]$matches[2]
+        if (
+            $value.Length -ge 2 -and
+            (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+             ($value.StartsWith("'") -and $value.EndsWith("'")))
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        } elseif ($value -match '^(.*?)\s+#.*$') {
+            $value = [string]$matches[1]
+        }
+        $values[$name] = $value.Trim()
+    }
+    return $values
+}
+
+function Get-FactoryTestDatabaseSettings {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $section = Get-FactoryNestedValue -Target $Config -Name "testDatabaseIsolation"
+    if ($null -eq $section -or -not [bool](Get-FactoryNestedValue -Target $section -Name "enabled" -Default $false)) {
+        return $null
+    }
+
+    $provider = ([string](Get-FactoryNestedValue -Target $section -Name "provider" -Default "postgresql")).ToLowerInvariant()
+    if ($provider -notin @("postgresql", "postgres")) {
+        throw "Unsupported test database isolation provider '$provider'. Only PostgreSQL is currently supported."
+    }
+
+    $prefix = ([string](Get-FactoryNestedValue -Target $section -Name "databasePrefix" -Default "")).ToLowerInvariant()
+    $prefix = ($prefix -replace '[^a-z0-9_]', '_') -replace '_+', '_'
+    $prefix = $prefix.Trim('_')
+    if (-not $prefix) { throw "testDatabaseIsolation.databasePrefix is required when isolation is enabled." }
+    if ($prefix[0] -match '[0-9]') { $prefix = "factory_$prefix" }
+
+    $repositoryFull = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
+    $environmentFile = [string](Get-FactoryNestedValue -Target $section -Name "connectionEnvironmentFile" -Default ".env")
+    $environmentPath = [IO.Path]::GetFullPath((Join-Path $repositoryFull $environmentFile))
+    $repositoryPrefix = $repositoryFull + [IO.Path]::DirectorySeparatorChar
+    if (
+        -not $environmentPath.Equals($repositoryFull, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $environmentPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "Test database connection environment file must stay inside the repository: $environmentFile"
+    }
+
+    return [pscustomobject]@{
+        enabled = $true
+        provider = "postgresql"
+        databasePrefix = $prefix
+        connectionEnvironmentPath = $environmentPath
+        databaseEnvironmentVariable = [string](Get-FactoryNestedValue -Target $section -Name "databaseEnvironmentVariable" -Default "DB_DATABASE")
+        hostEnvironmentVariable = [string](Get-FactoryNestedValue -Target $section -Name "hostEnvironmentVariable" -Default "DB_HOST")
+        portEnvironmentVariable = [string](Get-FactoryNestedValue -Target $section -Name "portEnvironmentVariable" -Default "DB_PORT")
+        usernameEnvironmentVariable = [string](Get-FactoryNestedValue -Target $section -Name "usernameEnvironmentVariable" -Default "DB_USERNAME")
+        passwordEnvironmentVariable = [string](Get-FactoryNestedValue -Target $section -Name "passwordEnvironmentVariable" -Default "DB_PASSWORD")
+        maintenanceDatabase = [string](Get-FactoryNestedValue -Target $section -Name "maintenanceDatabase" -Default "postgres")
+        clientCommand = [string](Get-FactoryNestedValue -Target $section -Name "clientCommand" -Default "psql")
+    }
+}
+
+function Get-FactoryTestDatabaseName {
+    param(
+        [Parameter(Mandatory = $true)]$Settings,
+        [ValidateSet("worker", "integrator", "release")][string]$Scope,
+        [string]$TaskId = ""
+    )
+
+    $suffix = switch ($Scope) {
+        "worker" {
+            if (-not $TaskId) { throw "TaskId is required for worker test database isolation." }
+            $safeTask = ($TaskId.ToLowerInvariant() -replace '[^a-z0-9]', '_') -replace '_+', '_'
+            $safeTask = $safeTask.Trim('_')
+            if (-not $safeTask) { throw "TaskId '$TaskId' cannot produce a safe PostgreSQL database name." }
+            "worker_$safeTask"
+            break
+        }
+        default { $Scope }
+    }
+
+    $candidate = "$([string]$Settings.databasePrefix)_$suffix"
+    if ($candidate.Length -le 63) { return $candidate }
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($candidate)
+        $hash = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant().Substring(0, 10)
+    } finally {
+        $algorithm.Dispose()
+    }
+    return $candidate.Substring(0, 52).TrimEnd('_') + "_" + $hash
+}
+
+function Invoke-FactoryPostgresMaintenance {
+    param(
+        [Parameter(Mandatory = $true)]$Settings,
+        [Parameter(Mandatory = $true)][string]$Sql
+    )
+
+    $values = Read-FactoryEnvironmentFile -Path ([string]$Settings.connectionEnvironmentPath)
+    $hostName = [string]$values[[string]$Settings.hostEnvironmentVariable]
+    if (-not $hostName) { $hostName = "127.0.0.1" }
+    $port = [string]$values[[string]$Settings.portEnvironmentVariable]
+    if (-not $port) { $port = "5432" }
+    $username = [string]$values[[string]$Settings.usernameEnvironmentVariable]
+    if (-not $username) {
+        throw "Test database connection file has no $($Settings.usernameEnvironmentVariable)."
+    }
+    $password = [string]$values[[string]$Settings.passwordEnvironmentVariable]
+
+    $processEnvironment = @{
+        PGPASSWORD = $password
+        PGCONNECT_TIMEOUT = "10"
+        PGAPPNAME = "claude-factory"
+    }
+    $result = Invoke-FactoryNativeProcess `
+        -Command ([string]$Settings.clientCommand) `
+        -Arguments @(
+            "-X", "-q", "-v", "ON_ERROR_STOP=1",
+            "-h", $hostName,
+            "-p", $port,
+            "-U", $username,
+            "-d", ([string]$Settings.maintenanceDatabase),
+            "-tAc", $Sql
+        ) `
+        -Environment $processEnvironment
+    if ([int]$result.exitCode -ne 0) {
+        throw "PostgreSQL test database command failed: $($result.output)"
+    }
+    return $result
+}
+
+function Get-FactoryTestDatabaseProcessEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]$Settings,
+        [Parameter(Mandatory = $true)][string]$DatabaseName
+    )
+
+    $values = Read-FactoryEnvironmentFile -Path ([string]$Settings.connectionEnvironmentPath)
+    $environment = @{}
+    foreach ($property in @(
+        "hostEnvironmentVariable",
+        "portEnvironmentVariable",
+        "usernameEnvironmentVariable",
+        "passwordEnvironmentVariable"
+    )) {
+        $variableName = [string]$Settings.$property
+        if ($variableName -and $values.ContainsKey($variableName)) {
+            $environment[$variableName] = [string]$values[$variableName]
+        }
+    }
+    $environment[[string]$Settings.databaseEnvironmentVariable] = $DatabaseName
+    return $environment
+}
+
+function Initialize-FactoryTestDatabase {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [ValidateSet("worker", "integrator", "release")][string]$Scope,
+        [string]$TaskId = ""
+    )
+
+    $settings = Get-FactoryTestDatabaseSettings -Config $Config -RepositoryRoot $RepositoryRoot
+    if ($null -eq $settings) {
+        return [pscustomobject]@{ enabled = $false; name = $null; environmentVariable = $null; created = $false }
+    }
+
+    $name = Get-FactoryTestDatabaseName -Settings $settings -Scope $Scope -TaskId $TaskId
+    $exists = Invoke-FactoryPostgresMaintenance -Settings $settings -Sql "SELECT 1 FROM pg_database WHERE datname = '$name'"
+    $created = $false
+    if (-not ([string]$exists.stdout).Trim()) {
+        try {
+            $null = Invoke-FactoryPostgresMaintenance -Settings $settings -Sql "CREATE DATABASE $name"
+            $created = $true
+        } catch {
+            # A concurrent idempotent initializer may win the create race.
+            $recheck = Invoke-FactoryPostgresMaintenance -Settings $settings -Sql "SELECT 1 FROM pg_database WHERE datname = '$name'"
+            if (-not ([string]$recheck.stdout).Trim()) { throw }
+        }
+    }
+
+    return [pscustomobject]@{
+        enabled = $true
+        name = $name
+        environmentVariable = [string]$settings.databaseEnvironmentVariable
+        created = $created
+    }
+}
+
+function Remove-FactoryTestDatabase {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [ValidateSet("worker", "integrator", "release")][string]$Scope,
+        [string]$TaskId = "",
+        [string]$DatabaseName = ""
+    )
+
+    $settings = Get-FactoryTestDatabaseSettings -Config $Config -RepositoryRoot $RepositoryRoot
+    if ($null -eq $settings) {
+        if ($DatabaseName) {
+            throw "Task records isolated test database '$DatabaseName', but testDatabaseIsolation is disabled. Re-enable its configuration before cleanup."
+        }
+        return [pscustomobject]@{ enabled = $false; name = $null; removed = $false }
+    }
+    if (-not $DatabaseName) {
+        return [pscustomobject]@{ enabled = $true; name = $null; removed = $false }
+    }
+
+    $expected = Get-FactoryTestDatabaseName -Settings $settings -Scope $Scope -TaskId $TaskId
+    if ($DatabaseName -ne $expected) {
+        throw "Refusing to drop unexpected test database '$DatabaseName'; expected '$expected'."
+    }
+
+    $exists = Invoke-FactoryPostgresMaintenance -Settings $settings -Sql "SELECT 1 FROM pg_database WHERE datname = '$DatabaseName'"
+    if (-not ([string]$exists.stdout).Trim()) {
+        return [pscustomobject]@{ enabled = $true; name = $DatabaseName; removed = $false }
+    }
+
+    $null = Invoke-FactoryPostgresMaintenance -Settings $settings -Sql "DROP DATABASE $DatabaseName WITH (FORCE)"
+    return [pscustomobject]@{ enabled = $true; name = $DatabaseName; removed = $true }
 }
 
 function Test-FactorySamePath {
