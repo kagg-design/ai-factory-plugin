@@ -100,6 +100,7 @@ try {
     foreach ($relativeFile in @($bundleManifest.files)) {
         Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
     }
+    Assert-True (@($bundleManifest.files) -contains "scripts/approve-direct.ps1") "The plugin manifest omits native direct approval."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -120,6 +121,8 @@ try {
     Assert-True ($publicSkill.Contains('Details: /factory help <command>')) "Factory help does not advertise command-specific help."
     Assert-True ($publicSkill.Contains('!factory reject <id>')) "Factory help does not advertise the native reject path."
     Assert-True ($publicSkill.Contains('!factory concurrency [N]')) "Factory help does not advertise native concurrency control."
+    Assert-True ($publicSkill.Contains('!factory go <id> [--direct]')) "Factory help does not advertise direct approval."
+    Assert-True ($publicSkill.Contains('### `go <task-id> [--direct]`')) "The public skill does not document direct approval safeguards."
     Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
     Assert-True ($publicSkill.Contains('one continuous Unicode tree')) "Factory status is not rendered as one tree."
     Assert-True ($publicSkill.Contains('There must be no physically empty line anywhere inside the tree')) "Factory status allows broken connector lines."
@@ -182,6 +185,9 @@ try {
     $taskActionSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\task-action.ps1") -Raw
     Assert-True ($taskActionSource.Contains("State-only rejection now requires")) "Legacy task-action reject still bypasses final discard semantics."
     Assert-True ($taskActionSource.Contains("Assert-FactoryIntegrationPlan")) "Native go does not validate the formal integration plan."
+    Assert-True ($taskActionSource.Contains('"operator-direct"')) "Native go does not audit direct approval mode."
+    $directApprovalSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Raw
+    Assert-True ($directApprovalSource.Contains('"-Mode", "operator-direct"')) "Direct approval does not use the trusted native review mode."
     $integrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Raw
     Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", $Commit')) "Native integration does not merge the immutable approved SHA."
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
@@ -581,6 +587,7 @@ try {
     Assert-True ($cliSource.Contains('"go"')) "Factory CLI does not expose native go."
     Assert-True ($cliSource.Contains('"add"') -and $cliSource.Contains('[string]$File')) "Factory CLI does not expose native file intake."
     Assert-True ($cliSource.Contains('"new"') -and $cliSource.Contains('[switch]$Auto')) "Factory CLI does not expose native local task intake."
+    Assert-True ($cliSource.Contains('[switch]$Direct')) "Factory CLI does not expose direct approval."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -613,6 +620,9 @@ try {
     $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
     Assert-True ($cliHelp.Contains("!factory status")) "Factory CLI help does not explain direct orchestrator shell mode."
     Assert-True ($cliHelp.Contains("no AI interpretation")) "Factory CLI help hides its deterministic execution model."
+    Assert-True ($cliHelp.Contains("factory go <task-id> [--direct]")) "Factory CLI help omits direct approval."
+    $cliGoHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help go | Out-String)
+    Assert-True ($cliGoHelp.Contains("skips independent AI code review")) "Factory go help hides direct approval semantics."
 
     $cliStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cliStatus.Contains(([char]0x256D).ToString() + ([char]0x2500).ToString() + " Factory")) "Factory CLI status does not use the continuous Unicode tree."
@@ -623,6 +633,7 @@ try {
     Assert-True (-not $cliStatus.Contains($mojibakeFixture)) "Factory CLI status printed raw mojibake."
     Assert-True (-not $cliStatus.Contains($staleQuestion)) "Factory CLI status presented a stale plan question as the review reason."
     Assert-True ($cliStatus.Contains("/factory inspect held-cli-task")) "Factory CLI status omitted the exact next orchestrator command."
+    Assert-True ($cliStatus.Contains("!factory go review-cli-task --direct")) "Factory CLI status omitted direct approval as a review alternative."
     Assert-True ($cliStatus.Contains("History: factory status done")) "Factory CLI status does not collapse completed history."
     Assert-True (-not $cliStatus.Contains("Completed CLI history task")) "Factory CLI default status expanded completed history."
 
@@ -1103,15 +1114,36 @@ try {
     $pipelineTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-pipeline-task" }
     $pipelineState.tasks = @($pipelineState.tasks) + @($pipelineTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $pipelineState
-    $pipelineReviewPath = Join-Path $context.sessionsPath "pipeline-task.review.json"
-    Write-FactoryJsonAtomic -Path $pipelineReviewPath -Value ([pscustomobject]@{
-        commit = $pipelineCommit; verdict = "approved"; summary = "Native pipeline fixture approved."
-        riskNotes = @(); integrationTestCommands = @("git diff --check"); releaseTestCommands = @("git diff --check")
-    })
-    $pipelineReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "pipeline-task" -ReviewPath $pipelineReviewPath) | ConvertFrom-Json
-    Assert-Equal "approved" ([string]$pipelineReview.verdict) "Native pipeline review was not recorded."
-    $pipelineGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task") | ConvertFrom-Json
-    Assert-Equal "approved" ([string]$pipelineGo.status) "Native pipeline fixture was not approved."
+    $knownIssueState = Read-FactoryJson -Path $context.statePath
+    $knownIssueTask = @($knownIssueState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    $knownIssueTask.review = [pscustomobject]@{
+        verdict = "changes-required"; commit = $pipelineCommit; summary = "Known issue."; riskNotes = @("Must be fixed.")
+        reviewedAt = Get-FactoryUtcTimestamp; mode = "ai"; integrationPlan = $null
+    }
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $knownIssueState
+    $previousDirectErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId "pipeline-task" 2>&1)
+        $knownIssueDirectExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousDirectErrorAction
+    }
+    Assert-True ($knownIssueDirectExit -ne 0) "Direct approval overrode a changes-required review."
+    $directReadyState = Read-FactoryJson -Path $context.statePath
+    $directReadyTask = @($directReadyState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    Assert-Equal "changes-required" ([string]$directReadyTask.review.verdict) "Rejected direct approval mutated the known review."
+    $directReadyTask.review = $null
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $directReadyState
+
+    $pipelineGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId "pipeline-task") | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$pipelineGo.status) "Direct approval did not approve the native pipeline fixture."
+    Assert-Equal "operator-direct" ([string]$pipelineGo.reviewMode) "Direct approval did not audit its review mode."
+    Assert-Equal "operator-direct" ([string]$pipelineGo.approvalMode) "Direct approval did not audit its approval mode."
+    Assert-Equal 64 ([string]$pipelineGo.approvedPlanHash).Length "Direct approval did not pin a hashed integration plan."
+    $directApprovedState = Read-FactoryJson -Path $context.statePath
+    $directApprovedTask = @($directApprovedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    Assert-True ([string]$directApprovedTask.review.summary -match "skipped") "Direct approval did not preserve its review warning."
     $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-Equal 1 ([int]$pipelineTick.integratedCount) "Native scheduler did not integrate exactly one approved task."
     Assert-Equal 0 @($pipelineTick.errors).Count "Native pipeline reported an error."

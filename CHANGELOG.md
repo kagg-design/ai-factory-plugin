@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Added native `factory go <task-id> --direct` for explicit operator approval
+  without a separate AI code-review turn. Direct approval records an audited
+  mode while preserving exact-SHA, clean-worktree, current-base, worker-check,
+  trusted-command, immutable-plan, isolated-test, and no-force push
+  safeguards. It refuses to override known `changes-required` or `blocked`
+  reviews.
 - Added native `factory new [--auto] [text]` intake for operator-authored work.
   It creates collision-safe `local:...` tasks without Asana, AI normalization,
   or an intermediate JSON file; empty interactive tasks wait for instructions

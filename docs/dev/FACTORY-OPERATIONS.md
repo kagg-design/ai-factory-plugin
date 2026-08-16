@@ -105,7 +105,7 @@ Deterministic operations also have a native fast path:
 !factory chat <task-id>
 !factory new [--auto] [text]
 !factory add --file <task.json>
-!factory go <task-id>
+!factory go <task-id> [--direct]
 !factory hold <task-id>
 !factory reject <task-id> [-Yes|-Keep] [reason]
 !factory cleanup <task-id>
@@ -265,7 +265,7 @@ active factory tasks.
 | `awaiting-input`  | worker needs a reply                          | open its conversation               |
 | `running`         | implementation or tests are in progress       | monitor or steer                    |
 | `syncing`         | task was rebased and checks must be recorded  | rerun `/factory sync <id>`          |
-| `awaiting-review` | a validated commit is ready                   | `/factory review <id>`              |
+| `awaiting-review` | a validated commit is ready                   | review, or explicit direct approval |
 | `approved`        | the exact SHA was approved                    | scheduler begins integration        |
 | `integrating`     | development merge and checks are running      | do not interfere                    |
 | `production`      | production promotion is running               | wait for the result                 |
@@ -438,6 +438,33 @@ force, verifies both remotes, and performs guarded cleanup. If either remote
 moved since review, the worker HEAD changed, a check failed, or a conflict
 occurred, publication stops with an exact saved reason instead of asking AI to
 repair it implicitly.
+
+For a small change whose worker output is sufficient for the operator to make
+the decision, skip the separate AI review explicitly:
+
+```powershell
+factory go 1216632072822682 --direct
+```
+
+Inside the orchestrator, run the native form:
+
+```text
+!factory go 1216632072822682 --direct
+```
+
+`--direct` skips only independent AI code judgment. Native validation still
+requires the exact validated worker SHA, an idle clean worktree, at least one
+passed worker check and no failed worker checks, a single task commit based on
+the current configured development tip, and non-empty trusted integration and
+release commands from private config or previously resolved review state. It
+records `operator-direct` in the review and approval audit, hashes the same
+immutable publication plan, and runs the unchanged isolated integration and
+release checks before pushing.
+
+Direct approval cannot override a `changes-required` or `blocked` review for
+the same commit. It also never copies a shell command from task text or a
+worker-reported test merely to make approval succeed. Configure trusted checks
+or use the normal review path instead.
 
 Other decisions:
 

@@ -12,6 +12,7 @@ param(
     [string]$Model = "",
     [string]$File = "",
     [switch]$Auto,
+    [switch]$Direct,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -307,7 +308,21 @@ function Get-CliNextAction {
 
     $alternative = ""
     if ($status -eq "awaiting-input") { $alternative = "/factory answer $id --text `"...`"" }
+    elseif ($status -eq "awaiting-review") {
+        $review = Get-CliProperty -InputObject $Task -Name "review"
+        $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
+        if ($reviewVerdict -notin @("approved", "changes-required", "blocked")) {
+            $alternative = "!factory go $id --direct"
+        }
+    }
     elseif ($status -eq "held" -and -not $commit -and -not $isMachineHeld) { $alternative = "/factory answer $id --text `"Continue`"" }
+    elseif ($status -eq "held" -and $commit -and $resultCommit -eq $commit) {
+        $review = Get-CliProperty -InputObject $Task -Name "review"
+        $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
+        if ($reviewVerdict -notin @("approved", "changes-required", "blocked")) {
+            $alternative = "!factory go $id --direct"
+        }
+    }
     elseif ($status -in @("blocked", "failed") -and $session.Exists) { $alternative = "/factory chat $id" }
     elseif ($status -eq "rejected") { $alternative = "/factory reject $id" }
 
@@ -559,7 +574,12 @@ function Write-CliInspect {
     }
     $review = Get-CliProperty -InputObject $task -Name "review"
     $reviewVerdict = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "verdict")
-    if ($reviewVerdict) { Add-CliInspectLine -Lines $lines -Text "Review: $reviewVerdict" }
+    $reviewMode = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "mode")
+    if ($reviewMode -eq "operator-direct") {
+        Add-CliInspectLine -Lines $lines -Text "Review: skipped by operator (--direct)"
+    } elseif ($reviewVerdict) {
+        Add-CliInspectLine -Lines $lines -Text "Review: $reviewVerdict"
+    }
     $reviewSummary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "summary")
     if ($reviewSummary) { Add-CliInspectLine -Lines $lines -Text "Review summary: $reviewSummary" }
     foreach ($risk in @(Get-CliProperty -InputObject $review -Name "riskNotes" -Default @())) {
@@ -579,6 +599,8 @@ function Write-CliInspect {
     $approval = Get-CliProperty -InputObject $task -Name "approval"
     $approvedCommit = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $approval -Name "commit")
     if ($approvedCommit) { Add-CliInspectLine -Lines $lines -Text "Approved commit: $approvedCommit" }
+    $approvalMode = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $approval -Name "mode")
+    if ($approvalMode) { Add-CliInspectLine -Lines $lines -Text "Approval mode: $approvalMode" }
     foreach ($stageName in @("integration", "production")) {
         $stage = Get-CliProperty -InputObject $task -Name $stageName
         $stageStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $stage -Name "status")
@@ -684,16 +706,24 @@ function Write-CliHold {
 }
 
 function Write-CliGo {
-    param($Context, $State, [string]$TaskId)
+    param($Context, $State, [string]$TaskId, [bool]$DirectApproval)
 
     $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
-    $result = Invoke-CliJsonScript -ScriptName "task-action.ps1" -Arguments @(
-        "-Repository", [string]$Repository,
-        "-Action", "go",
-        "-TaskId", $TaskId,
-        "-ClaudeCommand", $ClaudeCommand
-    )
+    $result = if ($DirectApproval) {
+        Invoke-CliJsonScript -ScriptName "approve-direct.ps1" -Arguments @(
+            "-Repository", [string]$Repository,
+            "-TaskId", $TaskId,
+            "-ClaudeCommand", $ClaudeCommand
+        )
+    } else {
+        Invoke-CliJsonScript -ScriptName "task-action.ps1" -Arguments @(
+            "-Repository", [string]$Repository,
+            "-Action", "go",
+            "-TaskId", $TaskId,
+            "-ClaudeCommand", $ClaudeCommand
+        )
+    }
     $schedulerResult = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
         "-Action", "start",
         "-Repository", [string]$Context.repositoryRoot,
@@ -701,7 +731,11 @@ function Write-CliGo {
         "-RuntimeHome", [string]$Context.runtimeHome
     )
     $scheduler = Get-CliProperty -InputObject $schedulerResult -Name "scheduler"
-    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Approved $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    $heading = if ($DirectApproval) { "Approved directly" } else { "Approved" }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) $heading $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    if ($DirectApproval) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Review: skipped by explicit operator request"
+    }
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Commit: $([string]$result.approvedCommit)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Review plan: $(Get-CliShortId -Value $result.approvedPlanHash)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Native scheduler: $([string]$scheduler.status)"
@@ -1026,7 +1060,7 @@ function Write-CliHelp {
             "  factory chat <task-id>",
             "  factory new [--auto] [text]",
             "  factory add --file <task.json>",
-            "  factory go <task-id>",
+            "  factory go <task-id> [--direct]",
             "  factory hold <task-id>",
             "  factory reject <task-id> [-Yes|-Keep] [reason]",
             "  factory cleanup <task-id>",
@@ -1045,7 +1079,7 @@ function Write-CliHelp {
             "  !factory inspect <task-id>",
             "",
             "PowerShell completes commands, status filters, and saved task IDs with Tab.",
-            "AI is used for planning, implementation, conflict-aware sync, and review; approved publication is native.",
+            "AI is used for planning, implementation, conflict-aware sync, and normal review; direct approval and publication are native.",
             "Run 'factory help <command>' for command-specific details."
         ) | Write-Output
         return
@@ -1082,8 +1116,10 @@ function Write-CliHelp {
         }
         "go" {
             @(
-                "factory go <task-id>",
-                "Approves the exact commit and formal review plan without AI interpretation.",
+                "factory go <task-id> [--direct]",
+                "Approves the exact commit and immutable publication plan without AI interpretation.",
+                "--direct skips independent AI code review but still requires passed worker checks, a clean current-base commit, and trusted integration commands.",
+                "It refuses to override an existing changes-required or blocked review.",
                 "The native scheduler then integrates, tests, pushes, promotes, verifies, and cleans up."
             ) | Write-Output
         }
@@ -1193,15 +1229,20 @@ foreach ($value in @($Remaining)) {
     elseif ($value -eq "--resume") { $ResumeSession = $true }
     elseif ($value -eq "--continue") { $Continue = $true }
     elseif ($value -eq "--auto") { $Auto = $true }
+    elseif ($value -eq "--direct") { $Direct = $true }
     else { $remainingValues.Add([string]$value) }
 }
 $startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model)
 $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 $fileOptionUsed = [bool]$File
 $autoOptionUsed = [bool]$Auto
+$directOptionUsed = [bool]$Direct
 
 if ($autoOptionUsed -and $normalizedCommand -ne "new") {
     throw "--auto is accepted only by: factory new [--auto] [text]"
+}
+if ($directOptionUsed -and $normalizedCommand -ne "go") {
+    throw "--direct is accepted only by: factory go <task-id> [--direct]"
 }
 
 if ($normalizedCommand -eq "help") {
@@ -1302,7 +1343,7 @@ switch ($normalizedCommand) {
     }
     "go" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "go accepts exactly one task ID." }
-        Write-CliGo -Context $context -State $state -TaskId $Target
+        Write-CliGo -Context $context -State $state -TaskId $Target -DirectApproval $directOptionUsed
     }
     "hold" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "hold accepts exactly one task ID." }

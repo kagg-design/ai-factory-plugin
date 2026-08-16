@@ -93,6 +93,7 @@ factory new "Fix the profile export"
 factory new
 factory add --file D:\Tasks\normalized-task.json
 factory go 1216632072822682
+factory go 1216632072822682 --direct
 factory hold 1216632072822682
 factory reject 1216632072822682 -Yes
 factory cleanup 1216632072822682
@@ -113,6 +114,7 @@ using Claude Code's direct shell mode:
 !factory inspect 1216632072822682
 !factory new "Fix the profile export"
 !factory go 1216632072822682
+!factory go 1216632072822682 --direct
 !factory hold 1216632072822682
 ```
 
@@ -329,7 +331,7 @@ in Agent View.
 
 ## Human review gate
 
-A successful worker ends in `awaiting-review`. It is never integrated before a
+A successful worker ends in `awaiting-review`. The normal path requires a
 formal AI review and explicit operator approval.
 
 Review the requirements, transcript, tests, and exact commit:
@@ -352,6 +354,23 @@ turn:
 ```powershell
 factory go <task-id>
 ```
+
+For a small result that the operator has already assessed from the worker
+output, the independent AI review can be skipped explicitly:
+
+```powershell
+factory go <task-id> --direct
+```
+
+From the orchestrator, use `!factory go <task-id> --direct` for the same native
+path. Direct approval does not weaken the publication pipeline: it still
+requires the exact validated worker SHA, a clean idle worktree, at least one
+passed worker check and no failed checks, a single commit on the current
+development base, and trusted integration/release commands from private config
+or previously resolved review state. It records `operator-direct` in both the
+review and approval audit, pins the immutable plan hash, and runs the same
+isolated checks before each push. It refuses to override an existing
+`changes-required` or `blocked` review for that commit.
 
 Other decisions:
 

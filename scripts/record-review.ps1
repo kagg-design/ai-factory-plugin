@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
-    [Parameter(Mandatory = $true)][string]$ReviewPath
+    [Parameter(Mandatory = $true)][string]$ReviewPath,
+    [ValidateSet("ai", "operator-direct")][string]$Mode = "ai"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,11 @@ $verdict = ([string](Get-FactoryNestedValue -Target $reviewInput -Name "verdict"
 $summary = ([string](Get-FactoryNestedValue -Target $reviewInput -Name "summary" -Default "")).Trim()
 $reviewCommit = ([string](Get-FactoryNestedValue -Target $reviewInput -Name "commit" -Default "")).ToLowerInvariant()
 $riskNotes = @((Get-FactoryNestedValue -Target $reviewInput -Name "riskNotes" -Default @()) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+if ($Mode -eq "operator-direct") {
+    $verdict = "approved"
+    $summary = "Independent AI code review was skipped by explicit operator request."
+    $riskNotes = @("The operator approved the validated worker result directly; no independent AI code review was performed.")
+}
 if ($verdict -notin @("approved", "changes-required", "blocked")) {
     throw "Review verdict must be approved, changes-required, or blocked."
 }
@@ -72,6 +78,23 @@ try {
     }
     if ($null -eq $task.workerResult -or [string]$task.workerResult.commit -ne $reviewCommit) {
         throw "Task '$TaskId' has no validated worker result for '$reviewCommit'."
+    }
+    if ($Mode -eq "operator-direct") {
+        $existingReview = Get-FactoryNestedValue -Target $task -Name "review"
+        $existingVerdict = [string](Get-FactoryNestedValue -Target $existingReview -Name "verdict" -Default "")
+        $existingCommit = [string](Get-FactoryNestedValue -Target $existingReview -Name "commit" -Default "")
+        if ($existingCommit -eq $reviewCommit -and $existingVerdict -in @("changes-required", "blocked")) {
+            throw "Direct approval cannot override the existing '$existingVerdict' review for '$reviewCommit'. Resolve it through rework and review."
+        }
+        $workerTests = @(Get-FactoryNestedValue -Target $task.workerResult -Name "tests" -Default @())
+        $failedWorkerTests = @($workerTests | Where-Object { [string]$_.status -eq "failed" })
+        $passedWorkerTests = @($workerTests | Where-Object { [string]$_.status -eq "passed" })
+        if ($failedWorkerTests.Count -gt 0) {
+            throw "Direct approval refuses a worker result with failed tests."
+        }
+        if ($passedWorkerTests.Count -eq 0) {
+            throw "Direct approval requires at least one passed worker check."
+        }
     }
     if ($null -ne $task.backgroundSession -and [string]$task.backgroundSession.state -eq "working") {
         throw "Task '$TaskId' still has a working background session."
@@ -116,7 +139,8 @@ try {
         }
         $parent = [string]$parentParts[1]
         if ($parent -ne $developmentBase) {
-            throw "Task commit is based on '$parent', while '$remote/$developmentBranch' is '$developmentBase'. Run sync and review again."
+            $retry = if ($Mode -eq "operator-direct") { "Run factory sync, then retry go --direct." } else { "Run sync and review again." }
+            throw "Task commit is based on '$parent', while '$remote/$developmentBranch' is '$developmentBase'. $retry"
         }
 
         $savedCommands = Get-FactoryNestedValue -Target $state -Name "resolvedCommands"
@@ -125,6 +149,9 @@ try {
             -ConfigValue (Get-FactoryNestedValue -Target $config -Name "integrationTestCommands" -Default @()) `
             -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()))
         if ($integrationCommands.Count -eq 0) {
+            if ($Mode -eq "operator-direct") {
+                throw "Direct approval requires trusted integration test commands in private config or previously resolved review state."
+            }
             throw "Approved review requires at least one integration test command."
         }
         $releaseCommands = @(Get-ReviewCommands `
@@ -170,6 +197,7 @@ try {
         summary = $summary
         riskNotes = @($riskNotes)
         reviewedAt = $now
+        mode = $Mode
         integrationPlan = $integrationPlan
     })
     Set-FactoryProperty -Target $task -Name "approval" -Value $null
@@ -184,6 +212,7 @@ try {
         taskId = $TaskId
         status = [string]$task.status
         verdict = $verdict
+        mode = $Mode
         commit = $reviewCommit
         summary = $summary
         riskNotes = @($riskNotes)

@@ -64,6 +64,7 @@ try {
                 commit = [string]$task.commit
                 planHash = $planHash
                 approvedAt = $now
+                mode = if ([string](Get-FactoryNestedValue -Target $review -Name "mode" -Default "ai") -eq "operator-direct") { "operator-direct" } else { "reviewed" }
             })
             Set-FactoryProperty -Target $task -Name "status" -Value "approved"
             Set-FactoryProperty -Target $state -Name "active" -Value $true
@@ -135,6 +136,7 @@ try {
         status = [string]$task.status
         approvedCommit = if ($null -ne $task.approval) { [string]$task.approval.commit } else { $null }
         approvedPlanHash = if ($null -ne $task.approval) { [string]$task.approval.planHash } else { $null }
+        approvalMode = if ($null -ne $task.approval) { [string](Get-FactoryNestedValue -Target $task.approval -Name "mode" -Default "reviewed") } else { $null }
         backgroundId = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "") } else { $null }
         attachCommand = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "attachCommand" -Default "") } else { $null }
         instructions = $Instructions

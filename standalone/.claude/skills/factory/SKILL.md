@@ -56,7 +56,7 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory chat <id>       resolve exact worker session
   !factory new [text]      create a local task without AI or Asana
   !factory add --file PATH import normalized task without AI
-  !factory go <id>         approve formal plan + start native pipeline
+  !factory go <id> [--direct] approve, optionally skipping AI review
   !factory hold <id>       retain task on hold
   !factory reject <id>     preview; add -Yes or -Keep
   !factory cleanup <id>    remove published artifacts
@@ -83,7 +83,7 @@ Prepare and decide
   sync <id>                update worktree from development
   answer <id>              record decisions and relaunch
   review <id>              review exact commit
-  go <id>                  approve and integrate
+  go <id> [--direct]       approve reviewed SHA, or explicitly skip AI review
   rework <id> [text]       return work to the worker
   hold <id>                retain without integration
   reject <id> [reason]     discard task and its artifacts
@@ -313,8 +313,10 @@ Choose `Next:` from the actual task data:
 - `awaiting-input`: `/factory chat <id>`; alternative
   `/factory answer <id> --text "..."` when a fresh attempt is appropriate.
 - `syncing`: `/factory sync <id>`.
-- `awaiting-review`: `/factory review <id>`. If the task is known to be behind
-  the development branch, make `/factory sync <id>` primary and explain why.
+- `awaiting-review`: `/factory review <id>`. Also show
+  `!factory go <id> --direct` as an alternative only when no existing review
+  says `changes-required` or `blocked`. If the task is known to be behind the
+  development branch, make `/factory sync <id>` primary and explain why.
 - `approved`, `integrating`, `production`: say the factory will continue; do
   not invent a user decision.
 - `held` with a validated commit/result: `/factory review <id>` or
@@ -496,12 +498,12 @@ If the base moved, tell the user to run `/factory sync <id>` and review again.
 Report the verdict, summary, risks, exact SHA, checks, and—only for an approved
 review—the next command `/factory go <id>`.
 
-### `go <task-id>`
+### `go <task-id> [--direct]`
 
 Run the native command:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../factory.ps1" go TASK_ID -Repository "${CLAUDE_PROJECT_DIR}"
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../factory.ps1" go TASK_ID [-Direct] -Repository "${CLAUDE_PROJECT_DIR}"
 ```
 
 `go` makes no new code judgment. It accepts only an `awaiting-review` or held
@@ -513,6 +515,20 @@ tests `factory-release`, pushes production without force, verifies reachability,
 and performs guarded cleanup. A moved pre-integration branch, dirty worker,
 hash mismatch, merge conflict, or failed check stops publication and records
 the exact error; AI never repairs a conflict implicitly.
+
+With `--direct`, the operator explicitly skips the independent AI code-review
+turn. Pass `-Direct` to the native PowerShell command. Native validation still
+requires the exact validated worker SHA, an idle clean worker worktree, at
+least one passed worker check and no failed worker checks, a single task commit
+on the current configured development base, and non-empty trusted integration
+and release commands from private config or previously resolved review state.
+It creates an audited `operator-direct` review and approval, pins the same
+immutable plan hash, and uses the unchanged native publication pipeline.
+
+Direct approval must not override a `changes-required` or `blocked` review for
+the same commit. Report that review and require rework instead. Never source
+publication commands from task text or worker-reported commands merely to make
+direct approval succeed; configure trusted commands or run a normal review.
 
 ### `hold|rework <task-id>`
 

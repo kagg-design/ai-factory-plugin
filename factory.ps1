@@ -108,6 +108,7 @@ param(
     [string]$Model = "",
     [string]$File = "",
     [switch]$Auto,
+    [switch]$Direct,
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
@@ -132,6 +133,7 @@ try {
         -Model $Model `
         -File $File `
         -Auto:$Auto `
+        -Direct:$Direct `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -NoReconcile:$NoReconcile
