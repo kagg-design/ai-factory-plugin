@@ -72,7 +72,7 @@ background Agent View row, startup attaches to its short ID; after an ordinary
 new orchestrator conversation is required and no matching live orchestrator
 exists.
 
-## Fast local reads
+## Fast local commands
 
 The plugin directory also exposes a native PowerShell command for deterministic
 operations that do not need AI interpretation:
@@ -81,7 +81,13 @@ operations that do not need AI interpretation:
 cd D:\Projects\MotiveHR
 factory status
 factory inspect 1216632072822682
+factory chat 1216632072822682
+factory hold 1216632072822682
+factory reject 1216632072822682 -Yes
+factory cleanup 1216632072822682
+factory concurrency 5
 factory doctor
+factory completion status
 factory help
 ```
 
@@ -91,16 +97,23 @@ using Claude Code's direct shell mode:
 ```text
 !factory status
 !factory inspect 1216632072822682
+!factory hold 1216632072822682
 ```
 
-PowerShell completes command names and status filters with `Tab`. For
-`factory inspect`, it reads the current repository's private factory state and
-completes task IDs while displaying their titles. Completion is declared by the
-script itself, so no `$PROFILE` edit is required.
+PowerShell completes command names and status filters with `Tab`. Task commands
+read the current repository's private factory state and complete task IDs while
+displaying their titles. Completion is declared by the script itself, so command
+metadata needs no `$PROFILE` edit. If `Tab` silently cycles one value at a time,
+enable PSReadLine's menu for the current terminal with
+`factory completion enable`. The command reports the exact persistent profile
+line but never edits the profile automatically.
 
-These native commands currently cover `help`, `status`, `inspect`, and
-`doctor`. State-changing or judgment-heavy workflows still use `/factory ...`
-inside the orchestrator. The leading `!` is required there: without it, Claude
+Native commands cover deterministic reads plus `hold`, confirmed `reject`, safe
+`cleanup`, and concurrency changes. Judgment-heavy workflows such as `start`,
+`sync`, `review`, and `go` still use `/factory ...` inside the orchestrator. A
+plain `factory reject <id>` prints the exact destructive preview; repeat it with
+`-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
+rejection. The leading `!` is required inside Claude: without it, Claude
 interprets the text as a prompt instead of executing the native command.
 
 Override the lead session name when needed:

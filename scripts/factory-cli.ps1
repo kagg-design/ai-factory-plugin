@@ -2,6 +2,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$Command,
     [string]$Target = "",
+    [string[]]$Remaining = @(),
+    [switch]$Yes,
+    [switch]$Keep,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -532,18 +535,228 @@ function Write-CliDoctor {
     if (-not [bool]$doctor.healthy) { $script:CliExitCode = 2 }
 }
 
+function Get-CliTask {
+    param($State, [string]$TaskId, [string]$CommandName)
+
+    if (-not $TaskId) { throw "$CommandName requires a task ID: factory $CommandName <task-id>" }
+    $matches = @($State.tasks | Where-Object { [string]$_.id -eq $TaskId })
+    if ($matches.Count -eq 0) { throw "Task '$TaskId' was not found in this factory." }
+    return $matches[0]
+}
+
+function Invoke-CliJsonScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptName,
+        [string[]]$Arguments = @()
+    )
+
+    $scriptPath = Join-Path $PSScriptRoot $ScriptName
+    $native = Invoke-FactoryNativeProcess -Command "powershell" -Arguments (@(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath
+    ) + @($Arguments))
+    if ([int]$native.exitCode -ne 0) {
+        $detail = ConvertTo-CliLine -Value $native.output -Fallback "no diagnostic output"
+        throw "$ScriptName exited with code $($native.exitCode): $detail"
+    }
+    $output = ([string]$native.stdout).Trim()
+    if (-not $output) { throw "$ScriptName returned no data." }
+    try {
+        return $output | ConvertFrom-Json
+    } catch {
+        throw "$ScriptName returned invalid JSON: $(Get-CliShortSummary -Value $output -MaximumLength 300)"
+    }
+}
+
+function Write-CliChat {
+    param($State, [string]$TaskId, [string]$ReconcileWarning)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "chat"
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $status = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "status") -Fallback "unknown"
+    $session = Get-CliSessionInfo -Task $task
+    $lines = New-Object Collections.Generic.List[string]
+    Add-CliWrappedLine -Lines $lines -FirstPrefix "$($script:Tree.Top)$($script:Tree.Horizontal) " -ContinuationPrefix "$($script:Tree.Vertical)  " -Text "Task $TaskId $($script:Tree.Horizontal) $title"
+    Add-CliInspectLine -Lines $lines -Text "State: $(Get-CliStateText -Status $status) ($status)"
+    if ($session.Exists) {
+        Add-CliInspectLine -Lines $lines -Text "Session: $($session.Id) / $($session.State)"
+        if ($session.Name) { Add-CliInspectLine -Lines $lines -Text "Session name: $($session.Name)" }
+        $attachCommand = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "backgroundSession") -Name "attachCommand")
+        if (-not $attachCommand) { $attachCommand = "claude attach $($session.ShortId)" }
+        Add-CliInspectLine -Lines $lines -Text "PowerShell: $attachCommand"
+        Add-CliInspectLine -Lines $lines -Text "Orchestrator: /factory chat $TaskId"
+    } else {
+        Add-CliInspectLine -Lines $lines -Text "Session: none; there is nothing to attach."
+    }
+    if ($ReconcileWarning) { Add-CliInspectLine -Lines $lines -Text "Warning: $ReconcileWarning" }
+    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) This command resolves the session; it does not start a nested Claude process.")
+    $lines | Write-Output
+}
+
+function Write-CliHold {
+    param($State, [string]$TaskId)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "hold"
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $result = Invoke-CliJsonScript -ScriptName "task-action.ps1" -Arguments @(
+        "-Repository", [string]$Repository,
+        "-Action", "hold",
+        "-TaskId", $TaskId,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Held $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resume later: /factory answer $TaskId --text `"Continue`""
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) No AI call was used."
+}
+
+function Write-CliRejectResult {
+    param($Result)
+
+    $taskId = [string](Get-CliProperty -InputObject $Result -Name "taskId")
+    $action = [string](Get-CliProperty -InputObject $Result -Name "action")
+    if ($action -eq "keep") {
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Rejected and retained $($script:Tree.Horizontal) $taskId"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Artifacts: preserved"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Remove later: factory reject $taskId -Yes"
+        return
+    }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Rejected and forgotten $($script:Tree.Horizontal) $taskId"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Removed from factory state: $([bool](Get-CliProperty -InputObject $Result -Name 'removedFromState' -Default $false))"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Worktree removed: $([bool](Get-CliProperty -InputObject $Result -Name 'removedWorktree' -Default $false))"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Branch deleted: $([bool](Get-CliProperty -InputObject $Result -Name 'deletedBranch' -Default $false))"
+    $warning = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Result -Name "agentSessionWarning")
+    if ($warning) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Warning: $warning" }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) The factory no longer knows this task."
+}
+
+function Write-CliReject {
+    param($State, [string]$TaskId, [string]$Reason, [bool]$Confirm, [bool]$Preserve)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "reject"
+    if ($Confirm -and $Preserve) { throw "Use either -Yes (discard) or -Keep (retain), not both." }
+    $arguments = @(
+        "-Repository", [string]$Repository,
+        "-TaskId", $TaskId,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    if ($Reason) { $arguments += @("-Reason", $Reason) }
+    if ($Confirm) { $arguments += "-Yes" }
+    if ($Preserve) { $arguments += "-Keep" }
+    $result = Invoke-CliJsonScript -ScriptName "reject-task.ps1" -Arguments $arguments
+    if ([bool](Get-CliProperty -InputObject $result -Name "confirmationRequired" -Default $false) -and -not $Confirm) {
+        $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name "title") -Fallback "Untitled task"
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Reject preview $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
+        foreach ($field in @(
+            [pscustomobject]@{ Label = "Session"; Value = Get-CliProperty -InputObject $result -Name "sessionId" },
+            [pscustomobject]@{ Label = "Worktree"; Value = Get-CliProperty -InputObject $result -Name "worktree" },
+            [pscustomobject]@{ Label = "Branch"; Value = Get-CliProperty -InputObject $result -Name "branch" },
+            [pscustomobject]@{ Label = "Commit"; Value = Get-CliProperty -InputObject $result -Name "commit" },
+            [pscustomobject]@{ Label = "Test database"; Value = Get-CliProperty -InputObject $result -Name "testDatabase" }
+        )) {
+            $value = ConvertTo-CliLine -Value $field.Value
+            if ($value) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) $($field.Label): $value" }
+        }
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Confirm discard: factory reject $TaskId -Yes"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Reject but retain: factory reject $TaskId -Keep"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Nothing was removed."
+        return
+    }
+    Write-CliRejectResult -Result $result
+}
+
+function Write-CliCleanup {
+    param($State, [string]$TaskId)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "cleanup"
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $result = Invoke-CliJsonScript -ScriptName "cleanup-task.ps1" -Arguments @(
+        "-Repository", [string]$Repository,
+        "-TaskId", $TaskId,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Cleanup complete $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Commit retained in configured branches: $([string]$result.commit)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Worktree removed: $([bool]$result.removedWorktree)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Branch deleted: $([bool]$result.deletedBranch)"
+    $warning = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name "agentSessionWarning")
+    if ($warning) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Warning: $warning" }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Factory history is retained as done."
+}
+
+function Write-CliConcurrency {
+    param($Config, $State, [string]$Value)
+
+    $current = [int](Get-CliProperty -InputObject $Config -Name "concurrency" -Default 1)
+    $maximum = [int](Get-CliProperty -InputObject $Config -Name "maxConcurrency" -Default 20)
+    if (-not $Value) {
+        Write-Output "Factory concurrency: $current (maximum $maximum)"
+        Write-Output "Set it with: factory concurrency <1-$maximum>"
+        return
+    }
+    $parsed = 0
+    if (-not [int]::TryParse($Value, [ref]$parsed)) {
+        throw "Concurrency must be an integer; received '$Value'."
+    }
+    $result = Invoke-CliJsonScript -ScriptName "set-concurrency.ps1" -Arguments @(
+        "-Repository", [string]$Repository,
+        "-Value", [string]$parsed
+    )
+    Write-Output "Factory concurrency: $([int]$result.previous) $($script:Tree.Arrow) $([int]$result.current) (maximum $([int]$result.maximum))"
+    Write-Output (ConvertTo-CliLine -Value $result.note)
+    $queuedCount = @($State.tasks | Where-Object { [string]$_.status -eq "queued" }).Count
+    $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
+    if ($queuedCount -gt 0 -and -not $cronId) {
+        Write-Output "Queued tasks exist but no scheduler is attached. In the orchestrator run: /factory resume"
+    }
+}
+
+function Write-CliCompletion {
+    param([string]$Action)
+
+    $completionAction = if ($Action) { $Action.ToLowerInvariant() } else { "status" }
+    if ($completionAction -notin @("status", "enable")) {
+        throw "Unknown completion action '$Action'. Use: factory completion [status|enable]"
+    }
+    $psReadLine = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $psReadLine) { throw "PSReadLine is not installed, so interactive Tab completion cannot be configured." }
+    Import-Module PSReadLine -ErrorAction Stop
+    if ($completionAction -eq "enable") {
+        Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete
+    }
+    $handler = Get-PSReadLineKeyHandler -Bound | Where-Object { @($_.Key) -contains "Tab" } | Select-Object -First 1
+    $functionName = if ($handler) { [string]$handler.Function } else { "unbound" }
+    Write-Output "Factory completion: available"
+    Write-Output "PowerShell: $($PSVersionTable.PSVersion); PSReadLine: $($psReadLine.Version)"
+    Write-Output "Tab binding: $functionName"
+    if ($completionAction -eq "enable") {
+        Write-Output "Menu completion is enabled for this terminal session."
+    } elseif ($functionName -ne "MenuComplete") {
+        Write-Output "Enable the completion menu now: factory completion enable"
+    }
+    Write-Output "Persistent opt-in (your profile is not changed automatically):"
+    Write-Output "  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete"
+}
+
 function Write-CliHelp {
     param([string]$Topic)
 
     $topicKey = $Topic.ToLowerInvariant()
     if (-not $topicKey) {
         @(
-            "Factory CLI - deterministic local reads (no AI interpretation)",
+            "Factory CLI - deterministic local commands (no AI interpretation)",
             "",
             "PowerShell:",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
+            "  factory chat <task-id>",
+            "  factory hold <task-id>",
+            "  factory reject <task-id> [-Yes|-Keep] [reason]",
+            "  factory cleanup <task-id>",
+            "  factory concurrency [number]",
             "  factory doctor",
+            "  factory completion [status|enable]",
             "  factory help [command]",
             "",
             "Claude Orchestrator shell mode:",
@@ -551,14 +764,14 @@ function Write-CliHelp {
             "  !factory inspect <task-id>",
             "",
             "PowerShell completes commands, status filters, and saved task IDs with Tab.",
-            "Mutating workflows still use /factory start|sync|review|go|reject|... in the orchestrator.",
-            "Use 'factory help status', 'factory help inspect', or 'factory help doctor' for details."
+            "AI workflows still use /factory start|sync|review|go in the orchestrator.",
+            "Run 'factory help <command>' for command-specific details."
         ) | Write-Output
         return
     }
 
     switch ($topicKey) {
-        { $_ -in @("status", "st") } {
+        "status" {
             @(
                 "factory status [state|all] [-NoReconcile]",
                 "Shows the actionable workflow tree from private factory state.",
@@ -566,41 +779,90 @@ function Write-CliHelp {
                 "Reconciliation updates session-derived state first unless -NoReconcile is supplied."
             ) | Write-Output
         }
-        { $_ -in @("inspect", "i") } {
+        "inspect" {
             @(
                 "factory inspect <task-id> [-NoReconcile]",
                 "Shows identity, requirements, session, artifacts, result, tests, and next action.",
                 "Task IDs have dynamic Tab completion in PowerShell."
             ) | Write-Output
         }
-        { $_ -in @("doctor", "d") } {
+        "chat" {
+            @(
+                "factory chat <task-id>",
+                "Resolves the saved Claude session and prints exact attach commands.",
+                "It deliberately does not start a nested Claude process."
+            ) | Write-Output
+        }
+        "hold" {
+            @(
+                "factory hold <task-id>",
+                "Moves an awaiting-review, approved, or awaiting-input task to held without AI."
+            ) | Write-Output
+        }
+        "reject" {
+            @(
+                "factory reject <task-id> [reason]",
+                "Previews destructive removal when task artifacts exist.",
+                "Confirm with -Yes (or --yes); preserve artifacts with -Keep (or --keep).",
+                "A confirmed reject removes the task from state plus its isolated worktree, branch, sessions, metadata, and test database."
+            ) | Write-Output
+        }
+        "cleanup" {
+            @(
+                "factory cleanup <task-id>",
+                "Safely removes published worker artifacts and retains the task as done history.",
+                "Cleanup refuses unpublished commits, dirty worktrees, active tasks, or commits missing from configured remote branches."
+            ) | Write-Output
+        }
+        "concurrency" {
+            @(
+                "factory concurrency [number]",
+                "Shows or changes the worker concurrency limit without AI.",
+                "Changing the limit does not create a missing scheduler; use /factory resume when prompted."
+            ) | Write-Output
+        }
+        "completion" {
+            @(
+                "factory completion [status|enable]",
+                "Diagnoses the current PowerShell Tab binding.",
+                "'enable' selects PSReadLine MenuComplete for this terminal only; it never edits your profile."
+            ) | Write-Output
+        }
+        "doctor" {
             @(
                 "factory doctor",
                 "Runs deterministic local diagnostics and prints OK/WARN/FAIL checks.",
                 "It inspects Git remote refs, invokes Claude CLI diagnostics, and may connect to the configured test database."
             ) | Write-Output
         }
-        { $_ -in @("help", "h") } { Write-CliHelp -Topic "" }
-        default { throw "Unknown help topic '$Topic'. Use status, inspect, doctor, or help." }
+        "help" { Write-CliHelp -Topic "" }
+        default { throw "Unknown help topic '$Topic'. Run 'factory help' for available commands." }
     }
 }
 
-$normalizedCommand = switch ($Command.ToLowerInvariant()) {
-    "h" { "help" }
-    "st" { "status" }
-    "i" { "inspect" }
-    "d" { "doctor" }
-    default { $Command.ToLowerInvariant() }
+$normalizedCommand = $Command.ToLowerInvariant()
+$remainingValues = New-Object Collections.Generic.List[string]
+foreach ($value in @($Remaining)) {
+    if ($value -eq "--yes") { $Yes = $true }
+    elseif ($value -eq "--keep") { $Keep = $true }
+    else { $remainingValues.Add([string]$value) }
 }
 
 if ($normalizedCommand -eq "help") {
+    if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "help accepts only one command topic." }
     Write-CliHelp -Topic $Target
+    exit 0
+}
+
+if ($normalizedCommand -eq "completion") {
+    if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "completion accepts only status or enable." }
+    Write-CliCompletion -Action $Target
     exit 0
 }
 
 $context = Get-CliContext
 if ($normalizedCommand -eq "doctor") {
-    if ($Target) { throw "doctor does not accept '$Target'. Use: factory doctor" }
+    if ($Target -or $remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "doctor does not accept arguments. Use: factory doctor" }
     Write-CliDoctor -Context $context
     exit $script:CliExitCode
 }
@@ -610,7 +872,33 @@ $state = Read-FactoryJson -Path ([string]$context.statePath)
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 
 switch ($normalizedCommand) {
-    "status" { Write-CliStatus -Context $context -Config $config -State $state -Filter $Target.ToLowerInvariant() -ReconcileWarning $reconcileWarning }
-    "inspect" { Write-CliInspect -Context $context -State $state -TaskId $Target -ReconcileWarning $reconcileWarning }
+    "status" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "status accepts at most one state filter." }
+        Write-CliStatus -Context $context -Config $config -State $state -Filter $Target.ToLowerInvariant() -ReconcileWarning $reconcileWarning
+    }
+    "inspect" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "inspect accepts exactly one task ID." }
+        Write-CliInspect -Context $context -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
+    }
+    "chat" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "chat accepts exactly one task ID." }
+        Write-CliChat -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
+    }
+    "hold" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "hold accepts exactly one task ID." }
+        Write-CliHold -State $state -TaskId $Target
+    }
+    "reject" {
+        $reason = ($remainingValues -join " ").Trim()
+        Write-CliReject -State $state -TaskId $Target -Reason $reason -Confirm ([bool]$Yes) -Preserve ([bool]$Keep)
+    }
+    "cleanup" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "cleanup accepts exactly one task ID." }
+        Write-CliCleanup -State $state -TaskId $Target
+    }
+    "concurrency" {
+        if ($remainingValues.Count -gt 0 -or $Yes -or $Keep) { throw "concurrency accepts at most one number." }
+        Write-CliConcurrency -Config $config -State $state -Value $Target
+    }
     default { throw "Unknown command '$Command'. Run 'factory help'." }
 }

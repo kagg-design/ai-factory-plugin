@@ -55,9 +55,13 @@ to answer it. Without a command name, show this compact grouped summary in the
 configured conversation language:
 
 ```text
-Fast local reads (direct shell, no AI interpretation)
-  !factory status          actionable task list
-  !factory inspect <id>    full saved task details
+Fast local commands (prefix with !; no AI interpretation)
+  !factory status|inspect  read queue or one task
+  !factory chat <id>       resolve exact worker session
+  !factory hold <id>       retain task on hold
+  !factory reject <id>     preview; add -Yes or -Keep
+  !factory cleanup <id>    remove published artifacts
+  !factory concurrency [N] show or change worker limit
   !factory doctor          deterministic diagnostics
 
 Add work

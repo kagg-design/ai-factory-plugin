@@ -107,6 +107,8 @@ try {
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
     Assert-True ($publicSkill.Contains('### `help [command]`')) "The public skill does not expose factory help."
     Assert-True ($publicSkill.Contains('Details: /factory help <command>')) "Factory help does not advertise command-specific help."
+    Assert-True ($publicSkill.Contains('!factory reject <id>')) "Factory help does not advertise the native reject path."
+    Assert-True ($publicSkill.Contains('!factory concurrency [N]')) "Factory help does not advertise native concurrency control."
     Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
     Assert-True ($publicSkill.Contains('one continuous Unicode tree')) "Factory status is not rendered as one tree."
     Assert-True ($publicSkill.Contains('There must be no physically empty line anywhere inside the tree')) "Factory status allows broken connector lines."
@@ -365,7 +367,7 @@ try {
 
     $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
-    Assert-True ($cliSource.Contains('[ValidateSet("help", "status", "inspect", "doctor"')) "Factory CLI does not expose native command completion."
+    Assert-True ($cliSource.Contains('[ValidateSet(') -and $cliSource.Contains('"completion"')) "Factory CLI does not expose native command completion."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -391,7 +393,8 @@ try {
     $reviewCliTask.commit = "1234567890abcdef"
     $reviewCliTask.plan = [pscustomobject]@{ questions = @([Text.Encoding]::GetEncoding(437).GetString([Text.Encoding]::UTF8.GetBytes($staleQuestion))) }
     $reviewCliTask.workerResult = [pscustomobject]@{ commit = "1234567890abcdef"; notes = "Ready."; tests = @(); changedFiles = @() }
-    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $doneCliTask)
+    $rejectCliTask = New-FactoryTestTask -Id "reject-cli-task" -Title "Disposable CLI task without artifacts" -Now $now
+    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $doneCliTask, $rejectCliTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
 
     $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
@@ -423,15 +426,48 @@ try {
     Assert-True ($cliInspect.Contains($unicodeFixture)) "Factory CLI inspect omitted or corrupted the hold reason."
     Assert-True ($cliInspect.Contains("claude attach held1234")) "Factory CLI inspect omitted the attach command."
 
+    $cliChat = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath chat held-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliChat.Contains("claude attach held1234")) "Factory CLI chat did not resolve the exact task session."
+    Assert-True ($cliChat.Contains("does not start a nested Claude process")) "Factory CLI chat did not explain its safe non-nested behavior."
+
+    $cliRejectPreview = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath reject held-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliRejectPreview.Contains("Reject preview")) "Factory CLI reject skipped its destructive preview."
+    Assert-True ($cliRejectPreview.Contains("factory reject held-cli-task -Yes")) "Factory CLI reject preview omitted the confirmation command."
+    Assert-Equal "held" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "held-cli-task").status) "Reject preview mutated task state."
+
+    $cliRejectKeep = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath reject held-cli-task -Keep -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliRejectKeep.Contains("Rejected and retained")) "Factory CLI -Keep did not render state-only rejection."
+    Assert-Equal "rejected" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "held-cli-task").status) "Factory CLI -Keep did not retain the task as rejected."
+
+    $cliRejectDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath reject reject-cli-task --yes "duplicate task" -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliRejectDiscard.Contains("Rejected and forgotten")) "Factory CLI did not accept --yes or render final rejection."
+    Assert-Equal 0 (@((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -eq "reject-cli-task" }).Count) "Factory CLI reject did not remove the artifact-free task."
+
+    $cliHold = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath hold review-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliHold.Contains("Held")) "Factory CLI hold did not render its transition."
+    Assert-Equal "held" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "review-cli-task").status) "Factory CLI hold did not update state."
+
+    $cliConcurrency = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath concurrency 3 -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliConcurrency.Contains("Factory concurrency: 3")) "Factory CLI concurrency did not call the deterministic setter."
+    Assert-Equal 3 ([int](Read-FactoryJson -Path $context.configPath).concurrency) "Factory CLI concurrency wrote an unexpected value."
+
+    $cliCompletion = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath completion status | Out-String)
+    Assert-True ($cliCompletion.Contains("Factory completion: available")) "Factory CLI completion diagnostics are unavailable."
+
     $previousPath = $env:PATH
     try {
         $env:PATH = "$pluginRoot;$previousPath"
         Push-Location $repository
         try {
+            $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
+            Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
+            Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
             $taskCompletion = @((TabExpansion2 "factory inspect held" 20).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($taskCompletion -contains "held-cli-task") "PowerShell did not complete a saved factory task ID. Returned: $($taskCompletion -join ', ')"
+            $holdCompletion = @((TabExpansion2 "factory hold review" 19).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
+            Assert-True ($holdCompletion -contains "review-cli-task") "PowerShell did not complete task IDs for a phase-2 action."
         } finally {
             Pop-Location
         }

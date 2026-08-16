@@ -94,22 +94,45 @@ interactive or background orchestrator is live.
 Run `/factory ...` commands inside the `Claude Factory Orchestrator`
 conversation.
 
-Four read-only operations also have a native fast path:
+Deterministic operations also have a native fast path:
 
 ```text
 !factory help
 !factory status [state|all]
 !factory inspect <task-id>
+!factory chat <task-id>
+!factory hold <task-id>
+!factory reject <task-id> [-Yes|-Keep] [reason]
+!factory cleanup <task-id>
+!factory concurrency [number]
 !factory doctor
+!factory completion [status|enable]
 ```
 
 The `!` is Claude Code shell mode, so those lines execute the PowerShell
 implementation directly. In an ordinary PowerShell terminal, omit it and run
 `factory status`, for example. PowerShell provides `Tab` completion for command
-names, status filters, and saved task IDs. No profile setup is required.
+names, status filters, and saved task IDs. The script supplies completion
+metadata without profile setup.
 
-Commands that change state or require judgment still use `/factory ...` in
-this phase.
+If `Tab` replaces one candidate at a time instead of opening a readable menu,
+the current PSReadLine binding is `TabCompleteNext`. Run:
+
+```powershell
+factory completion status
+factory completion enable
+```
+
+The second command selects `MenuComplete` for the current terminal only. To
+make it persistent, add the line reported by the command to `$PROFILE`
+yourself; Factory never edits a PowerShell profile automatically.
+
+`hold`, confirmed `reject`, safe `cleanup`, and concurrency changes are native
+because their validation is deterministic. Commands that require code judgment
+or orchestration (`start`, `sync`, `review`, and `go`) still use `/factory ...`
+in this phase. A plain native `factory reject <id>` is a preview when artifacts
+exist. Repeat with `-Yes` or `--yes` to remove the task and its artifacts, or
+use `-Keep` or `--keep` to retain artifacts in rejected state.
 
 Pressing `←` opens **Agent View**. Agent View is a background-session
 dispatcher, not the orchestrator prompt.

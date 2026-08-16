@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("help", "status", "inspect", "doctor", "h", "st", "i", "d")]
+    [ValidateSet(
+        "help", "status", "inspect", "doctor", "chat", "hold", "reject",
+        "cleanup", "concurrency", "completion"
+    )]
     [string]$Command = "help",
 
     [Parameter(Position = 1)]
@@ -18,8 +21,13 @@ param(
         $prefix = [string]$WordToComplete
 
         $staticValues = @(switch ($typedCommand) {
-            { $_ -in @("help", "h") } { "status", "inspect", "doctor", "help" }
-            { $_ -in @("status", "st") } {
+            "help" {
+                @(
+                    "status", "inspect", "doctor", "chat", "hold", "reject",
+                    "cleanup", "concurrency", "completion", "help"
+                )
+            }
+            "status" {
                 @(
                     "all", "queued", "starting", "planning", "awaiting-input",
                     "running", "syncing", "awaiting-review", "approved",
@@ -27,6 +35,7 @@ param(
                     "failed", "done"
                 )
             }
+            "completion" { "status", "enable" }
         })
 
         if ($staticValues.Count -gt 0) {
@@ -36,7 +45,7 @@ param(
             return
         }
 
-        if ($typedCommand -notin @("inspect", "i")) { return }
+        if ($typedCommand -notin @("inspect", "chat", "hold", "reject", "cleanup")) { return }
 
         try {
             $commandInfo = Get-Command $CommandName -ErrorAction Stop
@@ -81,6 +90,12 @@ param(
     })]
     [string]$Target = "",
 
+    [Parameter(Position = 2, ValueFromRemainingArguments = $true)]
+    [string[]]$Remaining = @(),
+
+    [switch]$Yes,
+    [switch]$Keep,
+
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -94,6 +109,9 @@ try {
     & $cliScript `
         -Command $Command `
         -Target $Target `
+        -Remaining $Remaining `
+        -Yes:$Yes `
+        -Keep:$Keep `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -NoReconcile:$NoReconcile
