@@ -44,6 +44,8 @@ $configPath = Join-Path $projectData "config.json"
 $statePath = Join-Path $projectData "state.json"
 $sessionsPath = Join-Path $projectData "sessions"
 $eventsPath = Join-Path $projectData "events"
+$previewPath = Join-Path $projectData "preview.json"
+$previewRoot = Join-Path $projectData "preview"
 $worktreeContainer = Join-Path (Split-Path $repoRoot -Parent) ".claude-factory-worktrees"
 $worktreeRoot = Join-Path $worktreeContainer $projectKey
 
@@ -112,6 +114,8 @@ if ($Initialize) {
     statePath = $statePath
     sessionsPath = $sessionsPath
     eventsPath = $eventsPath
+    previewPath = $previewPath
+    previewRoot = $previewRoot
     worktreeContainer = $worktreeContainer
     worktreeRoot = $worktreeRoot
     resultSchemaPath = (Join-Path $pluginRoot "resources\result.schema.json")

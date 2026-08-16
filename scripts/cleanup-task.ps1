@@ -229,6 +229,16 @@ try {
     # A terminal-looking row can still own a live process (and therefore hold
     # the worktree on Windows). Stop and verify every matching session before
     # touching the directory. Agent View rm failures remain best effort.
+    $previewRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-preview.ps1"),
+        "-Action", "stop", "-Repository", $repositoryRoot, "-RuntimeHome", [string]$context.runtimeHome,
+        "-TaskId", $TaskId
+    )
+    if ([int]$previewRun.exitCode -ne 0) {
+        throw "Task cleanup could not stop its browser preview: $($previewRun.output)"
+    }
+    $previewCleanup = [string]$previewRun.stdout | ConvertFrom-Json
+
     $sessionCleanup = Close-FactoryTaskWorkerSessions `
         -Session $task.backgroundSession `
         -ClaudeCommand $ClaudeCommand `
@@ -332,6 +342,7 @@ try {
         agentSessionWarning = $agentSessionWarning
         testDatabase = if ($testDatabaseName) { $testDatabaseName } else { $null }
         removedTestDatabase = [bool]$testDatabaseCleanup.removed
+        stoppedPreview = [bool](Get-FactoryNestedValue -Target $previewCleanup -Name "stopped" -Default $false)
     } | ConvertTo-Json -Depth 10
 } finally {
     Exit-FactoryMutex -Mutex $mutex

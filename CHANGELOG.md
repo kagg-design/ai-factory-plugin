@@ -1,6 +1,16 @@
 # Changelog
 
 ## Unreleased
+- Added an extensionless Bash-compatible `factory` launcher so Claude Code's
+  `!factory ...` direct shell commands reach the native PowerShell CLI instead
+  of failing with `factory: command not found`.
+- Added native single-active browser preview with `factory preview <task-id>`.
+  It runs configurable Laravel and Vite processes from the exact worker
+  worktree on loopback-only dynamic ports, opens or reuses the URL, switches
+  tasks by stopping the previous process trees, records PID/start-time/log
+  identity, safely reuses matching dependencies, and cleans Vite/dependency
+  artifacts on stop. Approval, rejection, task/project cleanup, purge, and
+  factory stop now shut preview down before integration or removal.
 - Added private per-project worker runtime selection with `factory start
   -Agent claude|codex`. Claude remains the orchestrator; Codex workers use the
   supported `codex exec --json` session contract, isolated worktrees and test

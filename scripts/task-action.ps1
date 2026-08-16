@@ -24,6 +24,7 @@ try {
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
     $now = Get-FactoryUtcTimestamp
+    $previewCleanup = $null
 
     switch ($Action) {
         "go" {
@@ -63,6 +64,16 @@ try {
             if ($dirty.Count -gt 0) {
                 throw "Worker worktree has uncommitted changes. Finish the worker session before approval."
             }
+
+            $previewRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-preview.ps1"),
+                "-Action", "stop", "-Repository", [string]$context.repositoryRoot,
+                "-RuntimeHome", [string]$context.runtimeHome, "-TaskId", $TaskId
+            )
+            if ([int]$previewRun.exitCode -ne 0) {
+                throw "Approval could not stop the task browser preview: $($previewRun.output)"
+            }
+            $previewCleanup = [string]$previewRun.stdout | ConvertFrom-Json
 
             Set-FactoryProperty -Target $task -Name "approval" -Value ([pscustomobject]@{
                 commit = [string]$task.commit
@@ -150,6 +161,7 @@ try {
         backgroundId = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "") } else { $null }
         attachCommand = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "attachCommand" -Default "") } else { $null }
         instructions = $Instructions
+        stoppedPreview = if ($null -ne $previewCleanup) { [bool](Get-FactoryNestedValue -Target $previewCleanup -Name "stopped" -Default $false) } else { $false }
     } | ConvertTo-Json -Depth 20
 } finally {
     Exit-FactoryMutex -Mutex $mutex

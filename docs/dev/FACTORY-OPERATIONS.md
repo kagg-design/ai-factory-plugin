@@ -129,11 +129,13 @@ Outside Claude, `factory start`, `factory paths`, `factory config`, and
 `factory scheduler` replace the old root-script commands. The `.ps1` files
 remain internal implementations and compatibility entry points.
 
-The `!` is Claude Code shell mode, so those lines execute the PowerShell
-implementation directly. In an ordinary PowerShell terminal, omit it and run
-`factory status`, for example. PowerShell provides `Tab` completion for command
-names, status filters, and saved task IDs. The script supplies completion
-metadata without profile setup.
+The `!` is Claude Code shell mode. The extensionless `factory` launcher in the
+plugin root translates the Bash/WSL path when necessary and delegates to the
+same `factory.ps1` implementation. The plugin root must be on `PATH`, as in the
+installation instructions. In an ordinary PowerShell terminal, omit `!` and
+run `factory status`, for example. PowerShell provides `Tab` completion for
+command names, status filters, and saved task IDs. The script supplies
+completion metadata without profile setup.
 
 If `Tab` replaces one candidate at a time instead of opening a readable menu,
 the current PSReadLine binding is `TabCompleteNext`. Run:
@@ -327,6 +329,39 @@ exact Codex thread and, after the TUI exits, asks that same thread for its
 current `FACTORY_PLAN` or `FACTORY_RESULT` and reconciles the JSONL output.
 `codex resume --all --include-non-interactive` is useful for browsing, but raw
 resume bypasses this post-chat Factory capture.
+
+### Preview the worker application
+
+For a UI change, launch the application from the saved worker worktree instead
+of opening the normal development checkout:
+
+```powershell
+factory preview 1216632072822682
+```
+
+From the orchestrator, use the deterministic shell form:
+
+```text
+!factory preview 1216632072822682
+```
+
+Factory starts the configured Laravel and Vite commands on free loopback-only
+ports, waits until both accept connections, opens the browser, and prints the
+URL, worktree, PIDs, ports, and private log directory. `factory preview` shows
+the current preview. `factory preview stop` stops both process trees and cleans
+the matching `public/hot` file plus dependency junctions created for preview.
+
+There is one active preview per project. Starting a different task stops the
+previous preview automatically; repeating the current task reuses its live
+processes. Use `factory preview <id> --no-open` to start it without opening a
+browser. Closing the browser tab alone does not stop the servers.
+
+The default preview uses the worktree's copied project environment and shared
+development data. It is not connected to the isolated worker test database.
+Factory stops the applicable preview before approval, confirmed rejection,
+task cleanup, project purge, or `factory stop`. Tasks without an existing
+worktree and tasks already approved, integrating, in production, or done are
+not previewable through this command.
 
 ## 8. Interactive task flow
 
@@ -522,8 +557,9 @@ branch:
 The command fetches `remote/developmentBranch`, rebases the single task commit
 onto it, reruns appropriate focused tests and lint/static-analysis checks, and
 records the new commit SHA before returning the task to `awaiting-review`.
-There is no separate preview worktree: inspect and run the application from the
-existing worker path returned by `/factory inspect <task-id>`.
+There is no separate preview worktree: `factory preview <task-id>` runs the
+application directly from the existing worker path returned by
+`/factory inspect <task-id>`.
 
 Synchronization requires a clean, idle task in `awaiting-review` or `held`.
 The task SHA changes, so prior review and approval are cleared. Rebase conflicts

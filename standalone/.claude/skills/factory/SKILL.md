@@ -54,6 +54,7 @@ configured conversation language:
 ```text
 Fast local commands (prefix with !; no AI interpretation)
   !factory status|inspect  read queue or one task
+  !factory preview <id>    open the worker application in a browser
   !factory chat <id>       resolve exact worker session
   !factory new [text]      create a local task without AI or Asana
   !factory add --file PATH import normalized task without AI
@@ -78,6 +79,7 @@ Open and understand
   status [state|all]       actionable task list
   chat <id>                open worker conversation
   inspect <id>             full task details
+  preview <id>             run Laravel/Vite from that worktree in a browser
   transcript <id>          worker conversation summary
 
 Prepare and decide
@@ -133,8 +135,10 @@ Native code assigns a collision-safe `local:...` ID, writes the complete queue
 entry under the state mutex, and starts or wakes the scheduler. It reserves the
 `local` adapter so normalized file intake cannot impersonate a native task.
 
-Prefer the `!factory new` shell form inside the orchestrator because it does not
-consume an AI interpretation turn. After creation, use the exact
+Prefer the `!factory new` shell form inside an orchestrator launched by
+`factory start`. The plugin ships a Bash-compatible `factory` launcher beside
+`factory.ps1`, so Claude Code's direct shell mode reaches the same native
+implementation without an AI interpretation turn. After creation, use the exact
 `factory chat <id>` command printed by the CLI. Never edit `state.json` or
 construct a local ID manually.
 
@@ -235,6 +239,34 @@ Re-read state after the tick and show, for every launched task:
 - that `←` opens Agent View, where Enter attaches and `Esc`/`Ctrl+C`
   interrupts a running turn.
 
+### `preview [<task-id>|stop]`
+
+Browser preview is a deterministic native command; prefer the shell form so
+starting or stopping it does not consume an AI interpretation turn:
+
+```text
+!factory preview <task-id>
+!factory preview
+!factory preview stop
+```
+
+Starting a preview launches the configured app and asset processes from the
+task's existing worker worktree, binds them only to the configured loopback
+ports, waits for both ports, and opens the app URL. Only one preview is active
+per project. Starting a different task stops the previous process trees,
+cleans its matching Vite `public/hot` file and temporary dependency junctions,
+then starts the requested task. Repeating the same task reuses its live
+processes. `preview` without an argument shows the current URL, worktree, PIDs,
+ports, and logs; `preview stop` stops it. Use `--no-open` when only the URL is
+needed.
+
+The default profile runs Laravel and Vite and uses the copied project
+environment, including its development database. It does not use the worker's
+isolated test database. Preview must be stopped automatically before task
+cleanup, final rejection, project purge, or `factory stop`. A task without an
+existing worktree cannot be previewed, and approved/integrating/production/done
+tasks must be inspected from the shared development application instead.
+
 ### `status [state|all]`
 
 Reconcile first. This is an operator view, not a state dump. The default output
@@ -271,6 +303,8 @@ Default `status` rules:
      a plan question only while the task is actually `awaiting-input`;
    - commit SHA when present;
    - background ID and session state, or explicitly `Session: none`;
+   - `View: !factory preview <id>` when an existing worktree is still eligible
+     for browser preview;
    - one primary exact `→ Next:` factory command;
    - `Open:` with `/factory chat <id>` when a background ID exists;
    - at most one useful alternative command.
@@ -289,6 +323,7 @@ The tree layout is mandatory and must follow this shape:
 │  │  ├─ State: ready for review
 │  │  ├─ Commit: abc12345
 │  │  ├─ Session: bg123456 · done
+│  │  ├─ View: !factory preview TASK_ID
 │  │  ├─ → Next: /factory review TASK_ID
 │  │  └─ Open: /factory chat TASK_ID
 │  └─ HELD · TASK_ID — Full task title

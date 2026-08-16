@@ -18,8 +18,8 @@ JSON file or routing a deterministic queue operation through AI.
   a collision-safe `local:timestamp-random` ID, atomically updates project
   state, and starts or wakes the scheduler.
 - The command prints the exact `factory chat <task-id>` handoff. From the
-  orchestrator, `!factory new ...` reaches the same native implementation
-  without consuming an AI command turn.
+  orchestrator, the shipped Bash-compatible launcher makes `!factory new ...`
+  reach the same native implementation without consuming an AI command turn.
 - Status, done history, and inspect output render `Source: local / <source-id>`
   instead of exposing the internal `factory://local/...` identity URI.
 - The `local` adapter is reserved for this trusted command and cannot be

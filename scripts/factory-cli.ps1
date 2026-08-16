@@ -14,6 +14,7 @@ param(
     [string]$File = "",
     [switch]$Auto,
     [switch]$Direct,
+    [switch]$NoOpen,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [string]$CodexCommand = "",
@@ -380,6 +381,10 @@ function Add-CliTaskTree {
     } else {
         $details.Add("Session: none")
     }
+    $worktree = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "worktree")
+    if ($worktree -and $status -notin @("approved", "integrating", "production", "done")) {
+        $details.Add("View in browser: factory preview $id")
+    }
     $action = Get-CliNextAction -Task $Task -State $State
     $details.Add("$($script:Tree.Arrow) Next in orchestrator: $($action.Primary)")
     if ($session.Exists -and $action.Primary -ne "/factory chat $id") { $details.Add("Open: /factory chat $id") }
@@ -563,6 +568,10 @@ function Write-CliInspect {
     )) {
         $value = ConvertTo-CliLine -Value $field.Value
         if ($value) { Add-CliInspectLine -Lines $lines -Text "$($field.Label): $value" }
+    }
+    $previewWorktree = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "worktree")
+    if ($previewWorktree -and $status -notin @("approved", "integrating", "production", "done")) {
+        Add-CliInspectLine -Lines $lines -Text "Browser preview: factory preview $TaskId"
     }
     $plan = Get-CliProperty -InputObject $task -Name "plan"
     foreach ($name in @("summary", "approach")) {
@@ -952,11 +961,74 @@ function Write-CliPaths {
         [pscustomobject]@{ Label = "State"; Value = $Context.statePath },
         [pscustomobject]@{ Label = "Sessions"; Value = $Context.sessionsPath },
         [pscustomobject]@{ Label = "Events"; Value = $Context.eventsPath },
+        [pscustomobject]@{ Label = "Preview"; Value = $Context.previewPath },
         [pscustomobject]@{ Label = "Worktrees"; Value = $Context.worktreeRoot }
     )) {
         Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) $($item.Label): $([string]$item.Value)"
     }
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Runtime is private and outside the target repository."
+}
+
+function Write-CliPreview {
+    param($Context, [string]$Action, [string]$TaskId = "", [bool]$SuppressBrowser = $false)
+
+    $previewParameters = @{
+        Action = $Action
+        Repository = [string]$Context.repositoryRoot
+        RuntimeHome = [string]$Context.runtimeHome
+    }
+    if ($TaskId) { $previewParameters.TaskId = $TaskId }
+    if ($SuppressBrowser) { $previewParameters.NoOpen = $true }
+    $previewOutput = (& (Join-Path $PSScriptRoot "factory-preview.ps1") @previewParameters | Out-String).Trim()
+    if (-not $previewOutput) { throw "factory-preview.ps1 returned no data." }
+    try {
+        $result = $previewOutput | ConvertFrom-Json
+    } catch {
+        throw "factory-preview.ps1 returned invalid JSON: $(Get-CliShortSummary -Value $previewOutput -MaximumLength 300)"
+    }
+
+    if ($Action -eq "stop") {
+        if ([bool](Get-CliProperty -InputObject $result -Name "taskMismatch" -Default $false)) {
+            Write-Output "Active preview belongs to task $([string]$result.taskId); nothing was stopped."
+        } elseif ([bool](Get-CliProperty -InputObject $result -Name "alreadyStopped" -Default $false)) {
+            Write-Output "Factory preview: stopped"
+        } else {
+            Write-Output "Factory preview stopped: $([string]$result.taskId)"
+        }
+        return
+    }
+
+    if ($Action -eq "status") {
+        if (-not [bool](Get-CliProperty -InputObject $result -Name "exists" -Default $false)) {
+            $staleText = if ([bool](Get-CliProperty -InputObject $result -Name "staleCleaned" -Default $false)) {
+                " (stale runtime cleaned)"
+            } else { "" }
+            Write-Output "Factory preview: stopped$staleText"
+            Write-Output "Start one with: factory preview <task-id>"
+            return
+        }
+    }
+
+    $taskIdValue = [string](Get-CliProperty -InputObject $result -Name "taskId")
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name "title") -Fallback "Untitled task"
+    $running = [bool](Get-CliProperty -InputObject $result -Name "running" -Default $false)
+    $stateText = if ($running) { "running" } elseif ([bool](Get-CliProperty -InputObject $result -Name "degraded" -Default $false)) { "degraded" } else { "starting" }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Preview $($script:Tree.Horizontal) $taskIdValue $($script:Tree.Horizontal) $title"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $stateText"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) App: $([string]$result.url)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Worktree: $([string]$result.worktree)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Processes: Laravel $([int]$result.app.pid) / Vite $([int]$result.assets.pid)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Ports: app $([int]$result.appPort) / assets $([int]$result.assetPort)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Database: project development environment (not the isolated test database)"
+    $switchedFrom = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name "switchedFrom")
+    if ($switchedFrom) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Switched: stopped preview $switchedFrom" }
+    if ([bool](Get-CliProperty -InputObject $result -Name "reused" -Default $false)) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Reused the existing preview processes."
+    }
+    $browserWarning = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name "browserWarning")
+    if ($browserWarning) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Browser warning: $browserWarning" }
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Logs: $([string]$result.artifactRoot)"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Stop: factory preview stop"
 }
 
 function Write-CliConfig {
@@ -1077,6 +1149,7 @@ function Write-CliHelp {
             "  factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
+            "  factory preview [<task-id>|stop] [-NoOpen]",
             "  factory chat <task-id>",
             "  factory new [--auto] [text]",
             "  factory add --file <task.json>",
@@ -1097,6 +1170,7 @@ function Write-CliHelp {
             "Claude Orchestrator shell mode:",
             "  !factory status",
             "  !factory inspect <task-id>",
+            "  !factory preview <task-id>",
             "",
             "PowerShell completes commands, status filters, and saved task IDs with Tab.",
             "AI is used for planning, implementation, conflict-aware sync, and normal review; direct approval and publication are native.",
@@ -1119,6 +1193,15 @@ function Write-CliHelp {
                 "factory inspect <task-id> [-NoReconcile]",
                 "Shows identity, requirements, session, artifacts, result, tests, and next action.",
                 "Task IDs have dynamic Tab completion in PowerShell."
+            ) | Write-Output
+        }
+        "preview" {
+            @(
+                "factory preview [<task-id>|stop] [-NoOpen]",
+                "Starts Laravel and Vite from one worker worktree and opens its private loopback URL.",
+                "Only one preview runs per project: starting another task stops the previous preview first.",
+                "With no argument it shows the active preview; 'factory preview stop' stops it.",
+                "Preview uses the project development environment, not the isolated worker test database."
             ) | Write-Output
         }
         "chat" {
@@ -1251,6 +1334,7 @@ foreach ($value in @($Remaining)) {
     elseif ($value -eq "--continue") { $Continue = $true }
     elseif ($value -eq "--auto") { $Auto = $true }
     elseif ($value -eq "--direct") { $Direct = $true }
+    elseif ($value -eq "--no-open") { $NoOpen = $true }
     else { $remainingValues.Add([string]$value) }
 }
 $startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model -or $Agent)
@@ -1258,12 +1342,16 @@ $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 $fileOptionUsed = [bool]$File
 $autoOptionUsed = [bool]$Auto
 $directOptionUsed = [bool]$Direct
+$noOpenOptionUsed = [bool]$NoOpen
 
 if ($autoOptionUsed -and $normalizedCommand -ne "new") {
     throw "--auto is accepted only by: factory new [--auto] [text]"
 }
 if ($directOptionUsed -and $normalizedCommand -ne "go") {
     throw "--direct is accepted only by: factory go <task-id> [--direct]"
+}
+if ($noOpenOptionUsed -and $normalizedCommand -ne "preview") {
+    throw "--no-open is accepted only by: factory preview <task-id> [--no-open]"
 }
 
 if ($normalizedCommand -eq "help") {
@@ -1327,8 +1415,27 @@ if ($normalizedCommand -eq "scheduler") {
     exit 0
 }
 
+if ($normalizedCommand -eq "preview") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {
+        throw "preview accepts one task ID, 'stop', or no argument; optional -NoOpen only."
+    }
+    $previewAction = if (-not $Target -or $Target.ToLowerInvariant() -eq "status") {
+        "status"
+    } elseif ($Target.ToLowerInvariant() -eq "stop") {
+        "stop"
+    } else {
+        "start"
+    }
+    $previewTaskId = if ($previewAction -eq "start") { $Target } else { "" }
+    Write-CliPreview -Context $context -Action $previewAction -TaskId $previewTaskId -SuppressBrowser $noOpenOptionUsed
+    exit 0
+}
+
 if ($normalizedCommand -in @("tick", "pause", "resume", "stop")) {
     if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "$normalizedCommand does not accept arguments." }
+    if ($normalizedCommand -eq "stop") {
+        Write-CliPreview -Context $context -Action "stop"
+    }
     Invoke-CliSchedulerAction -Context $context -Action $normalizedCommand
     exit 0
 }

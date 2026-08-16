@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -14,6 +14,41 @@
     "startWithOrchestrator": true,
     "intervalSeconds": 15,
     "maximumBackoffSeconds": 300
+  },
+  "preview": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "appPortStart": 18000,
+    "appPortEnd": 18999,
+    "assetPortStart": 19000,
+    "assetPortEnd": 19999,
+    "startupTimeoutSeconds": 30,
+    "openBrowser": true,
+    "urlTemplate": "http://{host}:{appPort}",
+    "dependencyLinks": [
+      "vendor",
+      "node_modules"
+    ],
+    "app": {
+      "command": "php",
+      "arguments": [
+        "artisan",
+        "serve",
+        "--host={host}",
+        "--port={appPort}"
+      ]
+    },
+    "assets": {
+      "command": "npm",
+      "arguments": [
+        "run",
+        "dev",
+        "--",
+        "--host={host}",
+        "--port={assetPort}",
+        "--strictPort"
+      ]
+    }
   },
   "workerPermissionMode": "auto",
   "workerAgent": "claude",

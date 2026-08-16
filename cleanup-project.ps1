@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) { [IO.Path]::GetFullPath($RuntimeHome) } else { Join-Path $pluginRoot "runtime" }
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $Repository) | ConvertFrom-Json
+$null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-preview.ps1") -Action stop -Repository ([string]$context.repositoryRoot) -RuntimeHome ([string]$context.runtimeHome) | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "Failed to stop the browser preview before project cleanup." }
 $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") -Action stop -Repository ([string]$context.repositoryRoot) -RuntimeHome ([string]$context.runtimeHome) | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "Failed to stop the native scheduler before project cleanup." }
 

@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "inspect", "doctor", "chat", "add", "new", "go", "hold", "reject",
+        "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
         "cleanup", "concurrency", "completion", "start", "paths", "config",
         "scheduler", "tick", "pause", "resume", "stop", "purge"
     )]
@@ -24,7 +24,7 @@ param(
         $staticValues = @(switch ($typedCommand) {
             "help" {
                 @(
-                    "status", "inspect", "doctor", "chat", "add", "new", "go", "hold", "reject",
+                    "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
                     "cleanup", "concurrency", "completion", "start", "paths",
                     "config", "scheduler", "tick", "pause", "resume", "stop",
                     "purge", "help"
@@ -41,16 +41,17 @@ param(
             "completion" { "status", "enable" }
             "config" { "path", "edit" }
             "scheduler" { "status", "start", "stop", "tick" }
+            "preview" { "status", "stop" }
         })
 
         if ($staticValues.Count -gt 0) {
             foreach ($value in @($staticValues | Where-Object { $_ -like "$prefix*" })) {
                 [Management.Automation.CompletionResult]::new($value, $value, "ParameterValue", $value)
             }
-            return
+            if ($typedCommand -ne "preview") { return }
         }
 
-        if ($typedCommand -notin @("inspect", "chat", "go", "hold", "reject", "cleanup")) { return }
+        if ($typedCommand -notin @("inspect", "preview", "chat", "go", "hold", "reject", "cleanup")) { return }
 
         try {
             $commandInfo = Get-Command $CommandName -ErrorAction Stop
@@ -85,6 +86,10 @@ param(
             if (-not (Test-Path -LiteralPath $statePath)) { return }
             $state = [IO.File]::ReadAllText($statePath, (New-Object Text.UTF8Encoding($false))) | ConvertFrom-Json
             foreach ($task in @($state.tasks | Where-Object { [string]$_.id -like "$prefix*" })) {
+                if (
+                    $typedCommand -eq "preview" -and
+                    (-not [string]$task.worktree -or [string]$task.status -in @("approved", "integrating", "production", "done"))
+                ) { continue }
                 $id = [string]$task.id
                 $title = if ([string]$task.title) { [string]$task.title } else { "Untitled task" }
                 [Management.Automation.CompletionResult]::new($id, "$id  $title", "ParameterValue", $title)
@@ -110,6 +115,7 @@ param(
     [string]$File = "",
     [switch]$Auto,
     [switch]$Direct,
+    [switch]$NoOpen,
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
@@ -137,6 +143,7 @@ try {
         -File $File `
         -Auto:$Auto `
         -Direct:$Direct `
+        -NoOpen:$NoOpen `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -CodexCommand $CodexCommand `

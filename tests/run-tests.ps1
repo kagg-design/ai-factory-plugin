@@ -101,8 +101,15 @@ try {
     foreach ($relativeFile in @($bundleManifest.files)) {
         Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
     }
+    Assert-True (@($bundleManifest.files) -contains "factory") "The plugin manifest omits the Bash-compatible factory launcher."
+    $bashLauncher = Get-Content -LiteralPath (Join-Path $pluginRoot "factory") -Raw
+    Assert-True ($bashLauncher.StartsWith("#!/usr/bin/env bash")) "The cross-shell factory launcher is not a Bash script."
+    Assert-True ($bashLauncher.Contains('factory.ps1')) "The cross-shell factory launcher does not delegate to the PowerShell entry point."
+    Assert-True ($bashLauncher.Contains('command -v pwsh.exe')) "The cross-shell factory launcher does not prefer PowerShell 7 on Windows."
+    Assert-True ($bashLauncher.Contains('command -v wslpath')) "The cross-shell factory launcher does not translate WSL paths for Windows PowerShell."
     Assert-True (@($bundleManifest.files) -contains "scripts/approve-direct.ps1") "The plugin manifest omits native direct approval."
     Assert-True (@($bundleManifest.files) -contains "scripts/codex-runtime.ps1") "The plugin manifest omits the Codex worker adapter."
+    Assert-True (@($bundleManifest.files) -contains "scripts/factory-preview.ps1") "The plugin manifest omits browser preview lifecycle management."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -115,6 +122,7 @@ try {
     Assert-True ($publicSkill.Contains("!factory add --file")) "The public skill does not advertise source-neutral native intake."
     Assert-True ($publicSkill.Contains("!factory new [text]")) "The public skill does not advertise native local task intake."
     Assert-True ($publicSkill.Contains('### `new [--auto] [text]`')) "The public skill does not document native local task intake."
+    Assert-True ($publicSkill.Contains('Bash-compatible `factory` launcher')) "The public skill advertises direct shell mode without documenting its launcher."
     Assert-True ($publicSkill.Contains('Source: local / SOURCE_ID')) "The public skill does not distinguish local task identity in status output."
     Assert-True (-not $publicSkill.Contains("CronCreate")) "The public skill still provisions an AI cron scheduler."
     Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
@@ -124,6 +132,7 @@ try {
     Assert-True ($publicSkill.Contains('!factory reject <id>')) "Factory help does not advertise the native reject path."
     Assert-True ($publicSkill.Contains('!factory concurrency [N]')) "Factory help does not advertise native concurrency control."
     Assert-True ($publicSkill.Contains('!factory go <id> [--direct]')) "Factory help does not advertise direct approval."
+    Assert-True ($publicSkill.Contains('!factory preview <id>')) "Factory help does not advertise native browser preview."
     Assert-True ($publicSkill.Contains('### `go <task-id> [--direct]`')) "The public skill does not document direct approval safeguards."
     Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
     Assert-True ($publicSkill.Contains('one continuous Unicode tree')) "Factory status is not rendered as one tree."
@@ -249,8 +258,8 @@ try {
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 6 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
-    Assert-Equal 6 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    Assert-Equal 7 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 7 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
@@ -320,7 +329,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 6 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 7 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
@@ -576,7 +585,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal 6 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-Equal 7 ([int]$migratedState.version) "Legacy state version was not migrated."
     Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
@@ -591,6 +600,7 @@ try {
     Assert-True ($cliSource.Contains('"add"') -and $cliSource.Contains('[string]$File')) "Factory CLI does not expose native file intake."
     Assert-True ($cliSource.Contains('"new"') -and $cliSource.Contains('[switch]$Auto')) "Factory CLI does not expose native local task intake."
     Assert-True ($cliSource.Contains('[switch]$Direct')) "Factory CLI does not expose direct approval."
+    Assert-True ($cliSource.Contains('"preview"') -and $cliSource.Contains('[switch]$NoOpen')) "Factory CLI does not expose native browser preview."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -696,7 +706,7 @@ try {
         try {
             $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
-            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge") "PowerShell did not complete the unified phase-3 commands."
+            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview") "PowerShell did not complete the unified native commands."
             Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
@@ -746,6 +756,110 @@ try {
     $nativeLaunchState = Read-FactoryJson -Path $context.statePath
     Assert-Equal "plugin" ([string]$nativeLaunchState.agentResolutionCache.preferredResolution) "Native capability was not cached."
     Assert-True (Test-Path -LiteralPath $launch.worktree) "Worker worktree was not created."
+
+    $previewConfigState = Read-FactoryJson -Path $context.configPath
+    $previewConfigState.preview.openBrowser = $false
+    $previewConfigState.preview.startupTimeoutSeconds = 10
+    $previewConfigState.preview.dependencyLinks = @("shared_dependencies")
+    $fakePreviewArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "tests\FakePreviewServer.ps1"),
+        "-HostName", "{host}", "-Port", "{appPort}"
+    )
+    $previewConfigState.preview.app.command = "powershell"
+    $previewConfigState.preview.app.arguments = $fakePreviewArguments
+    $previewConfigState.preview.assets.command = "powershell"
+    $previewConfigState.preview.assets.arguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "tests\FakePreviewServer.ps1"),
+        "-HostName", "{host}", "-Port", "{assetPort}"
+    )
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $previewConfigState
+
+    $previewCommonGitDir = (& git -C $repository rev-parse --git-common-dir).Trim()
+    if (-not [IO.Path]::IsPathRooted($previewCommonGitDir)) { $previewCommonGitDir = Join-Path $repository $previewCommonGitDir }
+    [IO.File]::AppendAllText(
+        (Join-Path ([IO.Path]::GetFullPath($previewCommonGitDir)) "info\exclude"),
+        "/shared_dependencies/" + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $sharedPreviewDependencies = Join-Path $repository "shared_dependencies"
+    New-Item -ItemType Directory -Path $sharedPreviewDependencies -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $sharedPreviewDependencies "fixture.txt"), "shared", (New-Object Text.UTF8Encoding($false)))
+
+    $previewSwitchWorktree = Join-Path ([string]$context.worktreeRoot) "preview-switch-task"
+    $previewSwitchBranch = "factory-worker/preview-switch-task"
+    & git -C $repository worktree add -b $previewSwitchBranch $previewSwitchWorktree develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create the preview switch worktree fixture." }
+    $previewStateFixture = Read-FactoryJson -Path $context.statePath
+    $previewSwitchTask = New-FactoryTestTask -Id "preview-switch-task" -Title "Preview switch task" -Now $now
+    $previewSwitchTask.status = "held"
+    $previewSwitchTask.worktree = $previewSwitchWorktree
+    $previewSwitchTask.branch = $previewSwitchBranch
+    $previewStateFixture.tasks = @($previewStateFixture.tasks) + @($previewSwitchTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $previewStateFixture
+
+    $previewEligibleStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -NoReconcile -Repository $repository | Out-String)
+    Assert-True ($previewEligibleStatus.Contains("View in browser: factory preview test-task")) "Factory status omitted the worktree browser-preview action."
+    $previewEligibleInspect = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath inspect preview-switch-task -NoReconcile -Repository $repository | Out-String)
+    Assert-True ($previewEligibleInspect.Contains("Browser preview: factory preview preview-switch-task")) "Factory inspect omitted the worktree browser-preview action."
+
+    $firstPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
+    Assert-True ($firstPreviewOutput.Contains("Preview") -and $firstPreviewOutput.Contains("factory preview stop")) "Factory CLI did not render a started browser preview."
+    $firstPreview = Read-FactoryJson -Path ([string]$context.previewPath)
+    Assert-Equal "test-task" ([string]$firstPreview.taskId) "Preview started for the wrong task."
+    Assert-True ([int]$firstPreview.app.pid -gt 0 -and [int]$firstPreview.assets.pid -gt 0) "Preview did not record both process identities."
+    $firstPreviewDependency = Join-Path ([string]$launch.worktree) "shared_dependencies"
+    Assert-True ((Get-Item -LiteralPath $firstPreviewDependency).Attributes -band [IO.FileAttributes]::ReparsePoint) "Preview did not create its temporary dependency junction."
+
+    $previousPreviewErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview missing-preview-task -NoOpen -Repository $repository 2>&1)
+        $missingPreviewExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreviewErrorAction
+    }
+    Assert-True ($missingPreviewExit -ne 0) "Preview accepted an unknown task ID."
+    $previewAfterInvalidSwitch = Read-FactoryJson -Path ([string]$context.previewPath)
+    Assert-Equal "test-task" ([string]$previewAfterInvalidSwitch.taskId) "An invalid preview switch stopped the current task."
+    Assert-Equal ([int]$firstPreview.app.pid) ([int]$previewAfterInvalidSwitch.app.pid) "An invalid preview switch replaced the current Laravel process."
+    Assert-Equal ([int]$firstPreview.assets.pid) ([int]$previewAfterInvalidSwitch.assets.pid) "An invalid preview switch replaced the current Vite process."
+
+    $secondPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview preview-switch-task --no-open -Repository $repository | Out-String)
+    Assert-True ($secondPreviewOutput.Contains("Switched: stopped preview test-task")) "Starting another preview did not report automatic switching."
+    $secondPreview = Read-FactoryJson -Path ([string]$context.previewPath)
+    Assert-Equal "preview-switch-task" ([string]$secondPreview.taskId) "Preview switch retained the old task."
+    Assert-True (-not (Test-Path -LiteralPath $firstPreviewDependency)) "Preview switch retained the previous task's dependency junction."
+    $secondPreviewDependency = Join-Path $previewSwitchWorktree "shared_dependencies"
+    Assert-True ((Get-Item -LiteralPath $secondPreviewDependency).Attributes -band [IO.FileAttributes]::ReparsePoint) "Preview switch did not create the new task's dependency junction."
+    foreach ($oldPid in @([int]$firstPreview.app.pid, [int]$firstPreview.assets.pid)) {
+        $oldAlive = $true
+        try { $null = Get-Process -Id $oldPid -ErrorAction Stop } catch { $oldAlive = $false }
+        Assert-Equal $false $oldAlive "Automatic preview switching left PID $oldPid running."
+    }
+
+    $reusedPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview preview-switch-task -NoOpen -Repository $repository | Out-String)
+    Assert-True ($reusedPreviewOutput.Contains("Reused the existing preview processes")) "Repeated preview start did not reuse the active task."
+    $reusedPreview = Read-FactoryJson -Path ([string]$context.previewPath)
+    Assert-Equal ([int]$secondPreview.app.pid) ([int]$reusedPreview.app.pid) "Repeated preview start replaced the Laravel process."
+    Assert-Equal ([int]$secondPreview.assets.pid) ([int]$reusedPreview.assets.pid) "Repeated preview start replaced the Vite process."
+    $previewStatusOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview -Repository $repository | Out-String)
+    Assert-True ($previewStatusOutput.Contains("preview-switch-task") -and $previewStatusOutput.Contains([string]$secondPreview.url)) "Preview status omitted active task identity or URL."
+    $previewStopOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview stop -Repository $repository | Out-String)
+    Assert-True ($previewStopOutput.Contains("Factory preview stopped: preview-switch-task")) "Factory preview stop did not report the stopped task."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$context.previewPath))) "Factory preview stop retained active metadata."
+    Assert-True (-not (Test-Path -LiteralPath $secondPreviewDependency)) "Factory preview stop retained its dependency junction."
+    foreach ($stoppedPid in @([int]$secondPreview.app.pid, [int]$secondPreview.assets.pid)) {
+        $stoppedAlive = $true
+        try { $null = Get-Process -Id $stoppedPid -ErrorAction Stop } catch { $stoppedAlive = $false }
+        Assert-Equal $false $stoppedAlive "Factory preview stop left PID $stoppedPid running."
+    }
+    & git -C $repository worktree remove --force $previewSwitchWorktree 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove the preview switch worktree fixture." }
+    & git -C $repository branch -D $previewSwitchBranch 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove the preview switch branch fixture." }
+    $previewStateFixture = Read-FactoryJson -Path $context.statePath
+    $previewStateFixture.tasks = @($previewStateFixture.tasks | Where-Object { [string]$_.id -ne "preview-switch-task" })
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $previewStateFixture
 
     $guardScript = Join-Path $pluginRoot "scripts\worker-git-guard.ps1"
     $previousGuardErrorAction = $ErrorActionPreference
@@ -1000,11 +1114,21 @@ try {
     $restoredReviewState.tasks[0].review = $savedReview
     Write-FactoryJsonAtomic -Path $context.statePath -Value $restoredReviewState
 
+    $approvalPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
+    Assert-True ($approvalPreviewOutput.Contains([string]$launch.worktree)) "Approval preview fixture did not start from the task worktree."
+    $approvalPreview = Read-FactoryJson -Path ([string]$context.previewPath)
     $decision = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "test-task") |
         ConvertFrom-Json
     Assert-Equal "approved" ([string]$decision.status) "Explicit go did not approve the task."
     Assert-Equal $commit ([string]$decision.approvedCommit) "Approval did not pin the exact commit."
     Assert-Equal ([string]$recordedReview.planHash) ([string]$decision.approvedPlanHash) "Approval did not pin the formal plan hash."
+    Assert-True ([bool]$decision.stoppedPreview) "Approval did not stop the task's active browser preview."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$context.previewPath))) "Approval retained active preview metadata."
+    foreach ($approvalPreviewPid in @([int]$approvalPreview.app.pid, [int]$approvalPreview.assets.pid)) {
+        $approvalPreviewAlive = $true
+        try { $null = Get-Process -Id $approvalPreviewPid -ErrorAction Stop } catch { $approvalPreviewAlive = $false }
+        Assert-Equal $false $approvalPreviewAlive "Approval left preview PID $approvalPreviewPid running."
+    }
 
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     $stateAfterSecondReconcile = Read-FactoryJson -Path $context.statePath
@@ -1060,6 +1184,9 @@ try {
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $cleanupStopCapture
     $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = "test1234"
     $env:CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM = [string]$launch.worktree
+    $cleanupPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
+    Assert-True ($cleanupPreviewOutput.Contains([string]$launch.worktree)) "Cleanup preview fixture did not start from the task worktree."
+    $cleanupPreview = Read-FactoryJson -Path ([string]$context.previewPath)
     $cleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task" -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
@@ -1077,6 +1204,13 @@ try {
     Assert-Equal "test1234" ((Get-Content -LiteralPath $cleanupStopCapture -Raw).Trim()) "Cleanup did not stop a terminal-looking live process before removal."
     Assert-True (Test-Path -LiteralPath $answerTranscript) "Cleanup deleted the transcript retained by answer."
     Assert-True ([bool]$cleanup.removedTestDatabase) "Cleanup did not remove the worker test database."
+    Assert-True ([bool]$cleanup.stoppedPreview) "Task cleanup did not stop its active browser preview."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$context.previewPath))) "Task cleanup retained active preview metadata."
+    foreach ($cleanupPreviewPid in @([int]$cleanupPreview.app.pid, [int]$cleanupPreview.assets.pid)) {
+        $cleanupPreviewAlive = $true
+        try { $null = Get-Process -Id $cleanupPreviewPid -ErrorAction Stop } catch { $cleanupPreviewAlive = $false }
+        Assert-Equal $false $cleanupPreviewAlive "Task cleanup left preview PID $cleanupPreviewPid running."
+    }
     Assert-Equal "factory_test_worker_test_task" ([string]$cleanup.testDatabase) "Cleanup reported the wrong test database."
     $cleanedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal "done" ([string]$cleanedState.tasks[0].status) "Task cleanup state was not persisted."
@@ -1590,6 +1724,7 @@ try {
 } finally {
     try {
         if (Test-Path -LiteralPath $repository) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-preview.ps1") -Action stop -Repository $repository -RuntimeHome $runtime 1> $null 2> $null
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null 2> $null
         }
     } catch {}

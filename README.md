@@ -88,6 +88,8 @@ cd D:\Projects\MotiveHR
 factory start
 factory status
 factory inspect 1216632072822682
+factory preview 1216632072822682
+factory preview stop
 factory chat 1216632072822682
 factory new "Fix the profile export"
 factory new
@@ -106,12 +108,15 @@ factory scheduler status
 factory help
 ```
 
-The same code can run from the main Claude Factory Orchestrator conversation by
-using Claude Code's direct shell mode:
+The plugin root contains both `factory.ps1` for PowerShell command discovery and
+an extensionless Bash-compatible `factory` launcher. Consequently, the same
+code can run from the main Claude Factory Orchestrator conversation by using
+Claude Code's direct shell mode:
 
 ```text
 !factory status
 !factory inspect 1216632072822682
+!factory preview 1216632072822682
 !factory new "Fix the profile export"
 !factory go 1216632072822682
 !factory go 1216632072822682 --direct
@@ -127,7 +132,7 @@ enable PSReadLine's menu for the current terminal with
 line but never edits the profile automatically.
 
 Native commands cover launcher/runtime/scheduler control, deterministic reads,
-local task creation, validated normalized intake, formally reviewed `go`, `hold`, confirmed
+worktree browser preview, local task creation, validated normalized intake, formally reviewed `go`, `hold`, confirmed
 `reject`, safe `cleanup`, and concurrency changes.
 `factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
 inside that orchestrator asks AI to read and normalize Asana content. Native
@@ -137,7 +142,9 @@ normalization, `sync`, and `review` still use `/factory ...`. A
 plain `factory reject <id>` prints the exact destructive preview; repeat it with
 `-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
 rejection. The leading `!` is required inside Claude: without it, Claude
-interprets the text as a prompt instead of executing the native command.
+interprets the text as a prompt instead of executing the native command. Both
+launchers are available when the plugin root is on `PATH`, as required by the
+installation steps above.
 
 Override the lead session name when needed:
 
@@ -573,6 +580,42 @@ worktree deletion from worker branches.
 
 Workers may edit, test, and create one final task commit. Only the serialized
 factory integrator may merge or push.
+
+### Browser preview
+
+Open the application exactly from a worker worktree before approving it:
+
+```powershell
+factory preview 1216632072822682
+```
+
+The default profile starts Laravel and Vite on separate free IPv4-loopback
+ports, waits for both, opens the app URL, and records the exact PIDs, process
+start times, ports, worktree, and logs in private runtime data. It temporarily
+links `vendor` and `node_modules` from the main repository only when the worker
+does not have its own directories and the relevant lock file still matches.
+Those junctions are removed when preview stops. The app uses the copied project
+environment and development database, not the isolated worker test database.
+
+Only one preview is active per repository. Starting another task performs an
+automatic switch:
+
+```powershell
+factory preview 1216643944203164
+```
+
+Repeating the active task reopens its URL without replacing its processes.
+Inspect or stop the current preview with:
+
+```powershell
+factory preview
+factory preview stop
+```
+
+Use `--no-open` when a caller needs only the URL. Approval, confirmed rejection,
+task cleanup, project purge, and `factory stop` stop the applicable preview
+before integration or worktree removal. Closing a browser tab cannot reliably
+signal process ownership and therefore does not stop it.
 
 ## Integration
 

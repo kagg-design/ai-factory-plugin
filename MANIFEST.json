@@ -13,6 +13,7 @@
     "config.default.json",
     "edit-project-config.ps1",
     "factory.ps1",
+    "factory",
     "hooks/hooks.json",
     "LICENSE",
     "MANIFEST.json",
@@ -35,6 +36,8 @@
     "scripts/factory-cli.ps1",
     "scripts/factory-scheduler.ps1",
     "scripts/factory-doctor.ps1",
+    "scripts/factory-preview.ps1",
+    "scripts/factory-preview-service.ps1",
     "scripts/enqueue-task.ps1",
     "scripts/integrate-task.ps1",
     "scripts/orchestrator-session.ps1",
@@ -59,6 +62,7 @@
     "tests/FakeCodex.cs",
     "tests/FakeClaude.cs",
     "tests/FakePsql.cs",
+    "tests/FakePreviewServer.ps1",
     "tests/run-tests.ps1"
   ]
 }

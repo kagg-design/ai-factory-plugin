@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+factory_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+factory_entrypoint="$factory_script_dir/factory.ps1"
+
+if command -v cygpath >/dev/null 2>&1; then
+    factory_entrypoint="$(cygpath -w "$factory_entrypoint")"
+elif command -v wslpath >/dev/null 2>&1; then
+    factory_entrypoint="$(wslpath -w "$factory_entrypoint")"
+fi
+
+if command -v pwsh.exe >/dev/null 2>&1; then
+    factory_powershell="pwsh.exe"
+elif command -v pwsh >/dev/null 2>&1; then
+    factory_powershell="pwsh"
+elif command -v powershell.exe >/dev/null 2>&1; then
+    factory_powershell="powershell.exe"
+else
+    printf '%s\n' "factory: PowerShell 7 (pwsh) or Windows PowerShell is required." >&2
+    exit 1
+fi
+
+exec "$factory_powershell" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$factory_entrypoint" "$@"
