@@ -55,6 +55,11 @@ to answer it. Without a command name, show this compact grouped summary in the
 configured conversation language:
 
 ```text
+Fast local reads (direct shell, no AI interpretation)
+  !factory status          actionable task list
+  !factory inspect <id>    full saved task details
+  !factory doctor          deterministic diagnostics
+
 Add work
   start|add <URL>          plan first, then wait
   start|add --auto <URL>   implement immediately
@@ -208,8 +213,8 @@ Default `status` rules:
      `URL: unavailable` explicitly;
    - one short `What:` summary from `brief` when the title is insufficient;
    - factory status in plain language;
-   - `Reason:` from `holdReason`, `error`, blocking reason, or pending
-     question when present;
+   - `Reason:` from `holdReason`, `error`, or blocking reason when present; use
+     a plan question only while the task is actually `awaiting-input`;
    - commit SHA when present;
    - background ID and session state, or explicitly `Session: none`;
    - one primary exact `→ Next:` factory command;

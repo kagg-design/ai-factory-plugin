@@ -19,11 +19,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
 
 $agentRows = @()
 try {
-    $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $agentsText) {
-        $parsedAgentRows = $agentsText | ConvertFrom-Json
-        $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
-    }
+    $agentRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
 } catch {
     $agentRows = @()
 }

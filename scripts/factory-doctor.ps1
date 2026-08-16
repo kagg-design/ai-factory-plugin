@@ -27,9 +27,10 @@ function Add-DoctorCheck {
     })
 }
 
-$versionText = (& $ClaudeCommand --version 2>&1 | Out-String).Trim()
+$versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
+$versionText = ([string]$versionResult.output).Trim()
 $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
-$versionOk = $versionMatch.Success -and [version]$versionMatch.Groups[1].Value -ge [version]"2.1.139"
+$versionOk = [int]$versionResult.exitCode -eq 0 -and $versionMatch.Success -and [version]$versionMatch.Groups[1].Value -ge [version]"2.1.139"
 Add-DoctorCheck -Name "claudeVersion" -Passed $versionOk -Detail $versionText
 $requiredCmdlets = @("ConvertFrom-Json", "ConvertTo-Json")
 $missingCmdlets = @(
@@ -179,8 +180,9 @@ Add-DoctorCheck -Name "factorySessionLock" -Passed $true -Severity "info" -Detai
 $agentViewOk = $false
 $agentViewDetail = "unavailable"
 try {
-    $agentRowsText = (& $ClaudeCommand agents --json --all 2>&1 | Out-String).Trim()
-    $agentViewOk = $LASTEXITCODE -eq 0
+    $agentRowsResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("agents", "--json", "--all")
+    $agentRowsText = ([string]$agentRowsResult.output).Trim()
+    $agentViewOk = [int]$agentRowsResult.exitCode -eq 0
     if ($agentViewOk) {
         $parsedAgentRows = if ($agentRowsText) { $agentRowsText | ConvertFrom-Json } else { @() }
         $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
@@ -193,7 +195,8 @@ try {
 }
 Add-DoctorCheck -Name "agentView" -Passed $agentViewOk -Detail $agentViewDetail
 
-$mcpText = (& $ClaudeCommand mcp list 2>&1 | Out-String).Trim()
+$mcpResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("mcp", "list")
+$mcpText = ([string]$mcpResult.output).Trim()
 $asanaMentioned = $mcpText -match '(?i)\basana\b'
 Add-DoctorCheck -Name "asanaConnector" -Passed $asanaMentioned -Severity "warning" -Detail $(if ($asanaMentioned) { "Asana appears in Claude MCP configuration." } else { "Asana was not found in 'claude mcp list'; confirm it inside the factory session with /mcp." })
 

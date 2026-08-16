@@ -108,7 +108,11 @@ try {
 }
 
 try {
-    $versionText = (& $ClaudeCommand --version 2>&1 | Out-String).Trim()
+    $versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
+    $versionText = ([string]$versionResult.output).Trim()
+    if ([int]$versionResult.exitCode -ne 0) {
+        throw "Could not run Claude Code: $versionText"
+    }
     $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
     if (-not $versionMatch.Success) {
         throw "Could not parse the Claude Code version from: $versionText"
@@ -322,14 +326,10 @@ $payloadJson
     $authoritativeRow = $launch.authoritativeRow
     if ($null -eq $authoritativeRow) {
         try {
-            $agentsText = (& $ClaudeCommand agents --json --all 2>$null | Out-String).Trim()
-            if ($LASTEXITCODE -eq 0 -and $agentsText) {
-                $parsedAgentRows = $agentsText | ConvertFrom-Json
-                foreach ($candidate in @($parsedAgentRows | ForEach-Object { $_ })) {
-                    if ($null -ne $candidate.PSObject.Properties["id"] -and [string]$candidate.id -eq $backgroundId) {
-                        $authoritativeRow = $candidate
-                        break
-                    }
+            foreach ($candidate in @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)) {
+                if ($null -ne $candidate.PSObject.Properties["id"] -and [string]$candidate.id -eq $backgroundId) {
+                    $authoritativeRow = $candidate
+                    break
                 }
             }
         } catch {

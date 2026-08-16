@@ -1,5 +1,10 @@
 $ErrorActionPreference = "Stop"
 
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 function Stop-FactoryGuardClosed {
     param([string]$Reason)
     [Console]::Error.WriteLine("Factory Git guard blocked the tool because its safety check failed: $Reason")

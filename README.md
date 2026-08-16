@@ -72,6 +72,37 @@ background Agent View row, startup attaches to its short ID; after an ordinary
 new orchestrator conversation is required and no matching live orchestrator
 exists.
 
+## Fast local reads
+
+The plugin directory also exposes a native PowerShell command for deterministic
+operations that do not need AI interpretation:
+
+```powershell
+cd D:\Projects\MotiveHR
+factory status
+factory inspect 1216632072822682
+factory doctor
+factory help
+```
+
+The same code can run from the main Claude Factory Orchestrator conversation by
+using Claude Code's direct shell mode:
+
+```text
+!factory status
+!factory inspect 1216632072822682
+```
+
+PowerShell completes command names and status filters with `Tab`. For
+`factory inspect`, it reads the current repository's private factory state and
+completes task IDs while displaying their titles. Completion is declared by the
+script itself, so no `$PROFILE` edit is required.
+
+These native commands currently cover `help`, `status`, `inspect`, and
+`doctor`. State-changing or judgment-heavy workflows still use `/factory ...`
+inside the orchestrator. The leading `!` is required there: without it, Claude
+interprets the text as a prompt instead of executing the native command.
+
 Override the lead session name when needed:
 
 ```powershell

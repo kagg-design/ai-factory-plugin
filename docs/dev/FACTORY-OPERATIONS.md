@@ -42,7 +42,20 @@ cd C:\laragon\www\motivehr
 C:\laragon\www\Projects\claude-factory-plugin\start-factory.ps1
 ```
 
-Then check its state:
+Then check its state without waiting for AI interpretation:
+
+```powershell
+factory status
+```
+
+From inside the orchestrator conversation, direct shell mode runs the same
+code:
+
+```text
+!factory status
+```
+
+The AI-backed compatibility form remains available:
 
 ```text
 /factory status
@@ -80,6 +93,23 @@ interactive or background orchestrator is live.
 
 Run `/factory ...` commands inside the `Claude Factory Orchestrator`
 conversation.
+
+Four read-only operations also have a native fast path:
+
+```text
+!factory help
+!factory status [state|all]
+!factory inspect <task-id>
+!factory doctor
+```
+
+The `!` is Claude Code shell mode, so those lines execute the PowerShell
+implementation directly. In an ordinary PowerShell terminal, omit it and run
+`factory status`, for example. PowerShell provides `Tab` completion for command
+names, status filters, and saved task IDs. No profile setup is required.
+
+Commands that change state or require judgment still use `/factory ...` in
+this phase.
 
 Pressing `←` opens **Agent View**. Agent View is a background-session
 dispatcher, not the orchestrator prompt.

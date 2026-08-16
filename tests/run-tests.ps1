@@ -27,6 +27,41 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Invoke-FactoryHookWithUtf8Input {
+    param(
+        [Parameter(Mandatory = $true)][string]$HookPath,
+        [Parameter(Mandatory = $true)][string]$InputText
+    )
+
+    $powerShellPath = [string](Get-Command powershell -ErrorAction Stop).Source
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $powerShellPath
+    $startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File " + (ConvertTo-FactoryWindowsArgument -Value $HookPath)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $startInfo.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw "Failed to start UTF-8 hook fixture." }
+        $process.StandardInput.Write($InputText)
+        $process.StandardInput.Close()
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "UTF-8 hook fixture failed with exit $($process.ExitCode): $stderr $stdout"
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function New-FactoryTestTask {
     param([string]$Id, [string]$Title, [string]$Now)
     return [pscustomobject]@{
@@ -160,6 +195,11 @@ try {
     $fakeSessionId = "11111111-2222-4333-8444-555555555555"
     Add-Type -Path (Join-Path $PSScriptRoot "FakeClaude.cs") -OutputAssembly $fakeClaude -OutputType ConsoleApplication
     Add-Type -Path (Join-Path $PSScriptRoot "FakePsql.cs") -OutputAssembly $fakePsql -OutputType ConsoleApplication
+
+    $unicodeFixture = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0KLQtdGB0YIg0LrQuNGA0LjQu9C70LjRhtGLIOKAlCDQs9C+0YLQvtCy0L4="))
+    $utf8Probe = Invoke-FactoryNativeProcess -Command $fakeClaude -Arguments @("utf8-probe")
+    Assert-Equal 0 ([int]$utf8Probe.exitCode) "UTF-8 native-process probe failed."
+    Assert-Equal $unicodeFixture ([string]$utf8Probe.stdout) "Native process output was decoded through an OEM code page."
 
     $env:CLAUDE_FACTORY_HOME = $runtime
     $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE = Join-Path $testRoot "agent-session-events.tsv"
@@ -323,6 +363,83 @@ try {
     Assert-True ($null -ne $migratedState.PSObject.Properties["agentResolutionCache"]) "Legacy state agent resolution cache field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["planRecordedAt"]) "Legacy task plan timestamp field was not added."
 
+    $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
+    $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
+    Assert-True ($cliSource.Contains('[ValidateSet("help", "status", "inspect", "doctor"')) "Factory CLI does not expose native command completion."
+    Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
+
+    $cliState = Read-FactoryJson -Path $context.statePath
+    $heldCliTask = New-FactoryTestTask -Id "held-cli-task" -Title "Held CLI task with a complete readable title" -Now $now
+    $heldCliTask.url = "https://app.asana.com/0/0/held-cli-task"
+    $heldCliTask.status = "held"
+    $mojibakeFixture = [Text.Encoding]::GetEncoding(437).GetString([Text.Encoding]::UTF8.GetBytes($unicodeFixture))
+    Set-FactoryProperty -Target $heldCliTask -Name "holdReason" -Value $mojibakeFixture
+    Set-FactoryProperty -Target $heldCliTask -Name "backgroundSession" -Value ([pscustomobject]@{
+        id = "held1234"
+        sessionId = "held1234-1111-4222-8333-444444444444"
+        name = "factory-held-cli-task-readable"
+        state = "blocked"
+    })
+    $doneCliTask = New-FactoryTestTask -Id "done-cli-task" -Title "Completed CLI history task" -Now $now
+    $doneCliTask.url = "https://app.asana.com/0/0/done-cli-task"
+    $doneCliTask.status = "done"
+    $doneCliTask.workerResult = [pscustomobject]@{ notes = "Published and cleaned."; tests = @(); changedFiles = @() }
+    $staleQuestion = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0KHRgtCw0YDRi9C5INCy0L7Qv9GA0L7RgSDQtNC70Y8g0L/Qu9Cw0L3QsA=="))
+    $reviewCliTask = New-FactoryTestTask -Id "review-cli-task" -Title "Review CLI task without a stale reason" -Now $now
+    $reviewCliTask.url = "https://app.asana.com/0/0/review-cli-task"
+    $reviewCliTask.status = "awaiting-review"
+    $reviewCliTask.commit = "1234567890abcdef"
+    $reviewCliTask.plan = [pscustomobject]@{ questions = @([Text.Encoding]::GetEncoding(437).GetString([Text.Encoding]::UTF8.GetBytes($staleQuestion))) }
+    $reviewCliTask.workerResult = [pscustomobject]@{ commit = "1234567890abcdef"; notes = "Ready."; tests = @(); changedFiles = @() }
+    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $doneCliTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
+
+    $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
+    Assert-True ($cliHelp.Contains("!factory status")) "Factory CLI help does not explain direct orchestrator shell mode."
+    Assert-True ($cliHelp.Contains("no AI interpretation")) "Factory CLI help hides its deterministic execution model."
+
+    $cliStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliStatus.Contains(([char]0x256D).ToString() + ([char]0x2500).ToString() + " Factory")) "Factory CLI status does not use the continuous Unicode tree."
+    Assert-True ($cliStatus.Contains("held-cli-task")) "Factory CLI status omitted an unfinished task."
+    Assert-True ($cliStatus.Contains("Held CLI task with a complete readable title")) "Factory CLI status omitted the full title."
+    Assert-True ($cliStatus.Contains("https://app.asana.com/0/0/held-cli-task")) "Factory CLI status omitted the canonical URL."
+    Assert-True ($cliStatus.Contains($unicodeFixture)) "Factory CLI status did not repair legacy OEM-decoded UTF-8 for display."
+    Assert-True (-not $cliStatus.Contains($mojibakeFixture)) "Factory CLI status printed raw mojibake."
+    Assert-True (-not $cliStatus.Contains($staleQuestion)) "Factory CLI status presented a stale plan question as the review reason."
+    Assert-True ($cliStatus.Contains("/factory inspect held-cli-task")) "Factory CLI status omitted the exact next orchestrator command."
+    Assert-True ($cliStatus.Contains("History: factory status done")) "Factory CLI status does not collapse completed history."
+    Assert-True (-not $cliStatus.Contains("Completed CLI history task")) "Factory CLI default status expanded completed history."
+
+    $cliHeld = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status held -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliHeld.Contains("held-cli-task")) "Factory CLI held filter omitted the held task."
+    Assert-True (-not $cliHeld.Contains("test-task")) "Factory CLI held filter leaked a queued task."
+    $cliDone = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status done -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliDone.Contains("done-cli-task")) "Factory CLI done history omitted the completed task."
+    Assert-True ($cliDone.Contains("https://app.asana.com/0/0/done-cli-task")) "Factory CLI done history omitted the canonical URL."
+    Assert-True (-not $cliDone.Contains("held-cli-task")) "Factory CLI done history leaked an unfinished task."
+
+    $cliInspect = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath inspect held-cli-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cliInspect.Contains("Task held-cli-task")) "Factory CLI inspect omitted task identity."
+    Assert-True ($cliInspect.Contains($unicodeFixture)) "Factory CLI inspect omitted or corrupted the hold reason."
+    Assert-True ($cliInspect.Contains("claude attach held1234")) "Factory CLI inspect omitted the attach command."
+
+    $previousPath = $env:PATH
+    try {
+        $env:PATH = "$pluginRoot;$previousPath"
+        Push-Location $repository
+        try {
+            $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
+            Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
+            $taskCompletion = @((TabExpansion2 "factory inspect held" 20).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
+            Assert-True ($taskCompletion -contains "held-cli-task") "PowerShell did not complete a saved factory task ID. Returned: $($taskCompletion -join ', ')"
+        } finally {
+            Pop-Location
+        }
+    } finally {
+        $env:PATH = $previousPath
+    }
+
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $migratedState
 
     $argvCapture = Join-Path $testRoot "launch-argv.txt"
     $promptCopy = Join-Path $testRoot "prompt-copy.txt"
@@ -515,7 +632,7 @@ try {
                 summary = "fixture updated"
             }
         )
-        notes = "test"
+        notes = $unicodeFixture
         blockingReason = ""
     }
     $message = "FACTORY_RESULT`n" + ($result | ConvertTo-Json -Depth 20)
@@ -526,8 +643,9 @@ try {
         hook_event_name = "Stop"
         last_assistant_message = $message
     } | ConvertTo-Json -Depth 20
-    $hookInput |
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\capture-worker-stop.ps1")
+    Invoke-FactoryHookWithUtf8Input `
+        -HookPath (Join-Path $pluginRoot "scripts\capture-worker-stop.ps1") `
+        -InputText $hookInput
 
     $reconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
@@ -537,6 +655,7 @@ try {
     $task = $state.tasks[0]
     Assert-Equal "awaiting-review" ([string]$task.status) "Completed worker bypassed or missed the review gate."
     Assert-Equal $commit ([string]$task.commit) "Validated commit was not recorded."
+    Assert-Equal $unicodeFixture ([string]$task.workerResult.notes) "Stop-hook input corrupted UTF-8 worker output."
     Assert-True (-not [string]$task.approval) "Task was approved automatically."
 
     $syncState = Read-FactoryJson -Path $context.statePath
@@ -900,6 +1019,9 @@ try {
     Assert-Equal "required" ([string]$resolutionCheck.severity) "Worker resolution is not a required doctor check."
     Assert-True ([string]$resolutionCheck.detail -match 'system-prompt') "Factory doctor hid the active system fallback."
     Assert-True ([bool]$databaseIsolationCheck.passed) "Factory doctor did not validate isolated database prerequisites."
+    $cliDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") doctor -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($cliDoctor.Contains("[OK] powershellRuntime")) "Factory CLI doctor did not render successful checks."
+    Assert-True ($cliDoctor.Contains("Healthy")) "Factory CLI doctor did not render its final verdict."
 
     $failureState = Read-FactoryJson -Path $context.statePath
     $failureState.agentResolutionCache = $null
@@ -938,6 +1060,10 @@ try {
     $failedResolutionCheck = @($failedDoctor.checks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
     Assert-True (-not [bool]$failedDoctor.healthy) "Doctor accepted a version with no working resolution."
     Assert-True (-not [bool]$failedResolutionCheck.passed) "Doctor did not fail the required resolution check."
+    $failedCliDoctorOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") doctor -Repository $repository -ClaudeCommand $fakeClaude 2>&1 | ForEach-Object { [string]$_ })
+    $failedCliDoctorExit = $LASTEXITCODE
+    Assert-Equal 2 $failedCliDoctorExit "Factory CLI doctor did not return the unhealthy exit code."
+    Assert-True (($failedCliDoctorOutput -join "`n").Contains("Unhealthy")) "Factory CLI doctor hid its unhealthy verdict."
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "all-fallbacks-fail" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
 
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR -ErrorAction SilentlyContinue

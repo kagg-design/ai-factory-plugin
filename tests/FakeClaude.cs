@@ -129,6 +129,15 @@ public static class FakeClaude
 
     public static int Main(string[] args)
     {
+        Console.OutputEncoding = new UTF8Encoding(false);
+        if (args.Length > 0 && args[0] == "utf8-probe")
+        {
+            Console.WriteLine(Encoding.UTF8.GetString(Convert.FromBase64String(
+                "0KLQtdGB0YIg0LrQuNGA0LjQu9C70LjRhtGLIOKAlCDQs9C+0YLQvtCy0L4="
+            )));
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "--version")
         {
             string version = Env("CLAUDE_FACTORY_TEST_VERSION");

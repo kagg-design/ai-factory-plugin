@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Preserved UTF-8 across Windows PowerShell 5.1 hook stdin and redirected
+  Claude CLI output, added safe display-only repair for legacy CP437 mojibake,
+  and stopped review cards from presenting stale plan questions as reasons.
+- Added a native `factory` PowerShell CLI for deterministic `help`, `status`,
+  `inspect`, and `doctor` operations, including direct `!factory ...` use from
+  the orchestrator, continuous-tree output, and profile-free contextual Tab
+  completion for commands, filters, and saved task IDs.
 - Added opt-in PostgreSQL test-database isolation: every worker task receives a
   deterministic private database through its process environment, integration
   and release commands have separate databases, and final cleanup/rejection

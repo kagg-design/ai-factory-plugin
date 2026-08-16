@@ -1,5 +1,16 @@
 Set-StrictMode -Version 2.0
 
+$script:FactoryUtf8NoBom = New-Object Text.UTF8Encoding($false)
+try {
+    # Claude Code and Git emit UTF-8. Windows PowerShell 5.1 otherwise decodes
+    # redirected native output through the active OEM code page.
+    [Console]::InputEncoding = $script:FactoryUtf8NoBom
+    [Console]::OutputEncoding = $script:FactoryUtf8NoBom
+    $OutputEncoding = $script:FactoryUtf8NoBom
+} catch {
+    # Explicit ProcessStartInfo encodings below still protect captured output.
+}
+
 function ConvertTo-FactoryWindowsArgument {
     param([AllowEmptyString()][string]$Value)
 
@@ -57,6 +68,12 @@ function Invoke-FactoryNativeProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    if ($null -ne $startInfo.PSObject.Properties["StandardOutputEncoding"]) {
+        $startInfo.StandardOutputEncoding = $script:FactoryUtf8NoBom
+    }
+    if ($null -ne $startInfo.PSObject.Properties["StandardErrorEncoding"]) {
+        $startInfo.StandardErrorEncoding = $script:FactoryUtf8NoBom
+    }
     if ($WorkingDirectory) {
         $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
     }
