@@ -10,6 +10,7 @@ param(
     [switch]$ResumeSession,
     [switch]$Continue,
     [string]$Model = "",
+    [string]$File = "",
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -681,6 +682,26 @@ function Write-CliGo {
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Integration, checks, promotion, and cleanup will continue without an AI turn."
 }
 
+function Write-CliAdd {
+    param($Context, [string]$Path)
+
+    if (-not $Path) { throw "add requires a normalized intake file: factory add --file <task.json>" }
+    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments @(
+        "-Repository", [string]$Context.repositoryRoot,
+        "-IntakePath", $Path,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    $heading = if ([bool]$result.duplicate) { "Already saved" } elseif ([string]$result.status -eq "blocked") { "Saved as blocked" } else { "Added" }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) $heading $($script:Tree.Horizontal) $([string]$result.taskId) $($script:Tree.Horizontal) $([string]$result.title)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Source: $([string]$result.sourceAdapter) / $([string]$result.sourceId)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) URL: $([string]$result.url)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status); mode: $([string]$result.mode)"
+    if ([string]$result.sourceError) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Source error: $(ConvertTo-CliLine -Value $result.sourceError)" }
+    if ([string]$result.schedulerError) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Scheduler warning: $(ConvertTo-CliLine -Value $result.schedulerError)" }
+    $footer = if ([bool]$result.duplicate) { "No queue entry was added." } elseif ([string]$result.status -eq "queued") { "Native scheduler was notified; use factory status to follow the task." } else { "Inspect the saved blocker with factory inspect $([string]$result.taskId)." }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) $footer"
+}
+
 function Write-CliRejectResult {
     param($Result)
 
@@ -947,6 +968,7 @@ function Write-CliHelp {
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory chat <task-id>",
+            "  factory add --file <task.json>",
             "  factory go <task-id>",
             "  factory hold <task-id>",
             "  factory reject <task-id> [-Yes|-Keep] [reason]",
@@ -1006,6 +1028,13 @@ function Write-CliHelp {
                 "factory go <task-id>",
                 "Approves the exact commit and formal review plan without AI interpretation.",
                 "The native scheduler then integrates, tests, pushes, promotes, verifies, and cleans up."
+            ) | Write-Output
+        }
+        "add" {
+            @(
+                "factory add --file <task.json>",
+                "Validates and imports a normalized task envelope without AI or a source connector.",
+                "The file follows resources/intake.schema.json; successful queued work wakes the native scheduler."
             ) | Write-Output
         }
         "reject" {
@@ -1102,6 +1131,7 @@ foreach ($value in @($Remaining)) {
 }
 $startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model)
 $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
+$fileOptionUsed = [bool]$File
 
 if ($normalizedCommand -eq "help") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "help accepts only one command topic." }
@@ -1110,39 +1140,46 @@ if ($normalizedCommand -eq "help") {
 }
 
 if ($normalizedCommand -eq "completion") {
-    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "completion accepts only status or enable." }
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "completion accepts only status or enable." }
     Write-CliCompletion -Action $Target
     exit 0
 }
 
 $context = Get-CliContext
 if ($normalizedCommand -eq "doctor") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "doctor does not accept arguments. Use: factory doctor" }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "doctor does not accept arguments. Use: factory doctor" }
     Write-CliDoctor -Context $context
     exit $script:CliExitCode
 }
 
 if ($normalizedCommand -eq "start") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed) { throw "start accepts only -New, -Resume, -Continue, and -Model." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, and -Model." }
     if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
     Start-CliFactory -Context $context
     exit $script:CliExitCode
 }
 
 if ($normalizedCommand -eq "paths") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "paths does not accept arguments." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "paths does not accept arguments." }
     Write-CliPaths -Context $context
     exit 0
 }
 
 if ($normalizedCommand -eq "config") {
-    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "config accepts only path or edit." }
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "config accepts only path or edit." }
     Write-CliConfig -Context $context -Action $Target
     exit 0
 }
 
+if ($normalizedCommand -eq "add") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "add accepts only --file <task.json>." }
+    Write-CliAdd -Context $context -Path $File
+    exit 0
+}
+if ($fileOptionUsed) { throw "--file is accepted only by: factory add --file <task.json>" }
+
 if ($normalizedCommand -eq "scheduler") {
-    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "scheduler accepts only status, start, stop, or tick." }
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "scheduler accepts only status, start, stop, or tick." }
     $schedulerAction = if ($Target) { $Target.ToLowerInvariant() } else { "status" }
     if ($schedulerAction -notin @("status", "start", "stop", "tick")) { throw "Unknown scheduler action '$Target'." }
     Invoke-CliSchedulerAction -Context $context -Action $schedulerAction
@@ -1150,13 +1187,13 @@ if ($normalizedCommand -eq "scheduler") {
 }
 
 if ($normalizedCommand -in @("tick", "pause", "resume", "stop")) {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "$normalizedCommand does not accept arguments." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "$normalizedCommand does not accept arguments." }
     Invoke-CliSchedulerAction -Context $context -Action $normalizedCommand
     exit 0
 }
 
 if ($normalizedCommand -eq "purge") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $Keep -or $startOptionsUsed) { throw "purge accepts only -Yes and optional -Force." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $Keep -or $startOptionsUsed -or $fileOptionUsed) { throw "purge accepts only -Yes and optional -Force." }
     Write-CliPurge -Context $context -Confirm ([bool]$Yes) -ForceRemoval ([bool]$Force)
     exit 0
 }

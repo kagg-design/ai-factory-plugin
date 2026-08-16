@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-factory.local/schemas/intake.schema.json",
+  "title": "Claude Factory normalized task intake",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "source",
+    "startMode",
+    "title",
+    "brief",
+    "acceptanceCriteria",
+    "sourceNotes",
+    "sourceError"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "id", "url"],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,49}$"
+        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "url": { "type": "string", "format": "uri", "maxLength": 2000 },
+        "suppliedUrl": { "type": ["string", "null"], "maxLength": 2000 }
+      }
+    },
+    "startMode": { "enum": ["interactive", "auto"] },
+    "title": { "type": "string", "maxLength": 500 },
+    "brief": { "type": "string", "maxLength": 20000 },
+    "acceptanceCriteria": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4000 }
+    },
+    "sourceNotes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4000 }
+    },
+    "sourceError": {
+      "type": ["string", "null"],
+      "maxLength": 4000
+    }
+  }
+}

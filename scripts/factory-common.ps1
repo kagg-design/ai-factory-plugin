@@ -238,6 +238,38 @@ function Get-FactoryFileSha256 {
     }
 }
 
+function Resolve-FactoryAsanaTaskUrl {
+    param([Parameter(Mandatory = $true)][string]$Url)
+
+    $trimmed = $Url.Trim()
+    $uri = $null
+    if (-not [Uri]::TryCreate($trimmed, [UriKind]::Absolute, [ref]$uri)) {
+        throw "Invalid Asana task URL: $Url"
+    }
+    if ($uri.Scheme -notin @("http", "https") -or $uri.Host -ne "app.asana.com") {
+        throw "Asana task URL must use app.asana.com."
+    }
+    if ($uri.UserInfo) { throw "Asana task URL must not contain credentials." }
+
+    $path = $uri.AbsolutePath.TrimEnd('/')
+    $taskId = ""
+    if ($path -match '(?i)/task/(\d+)(?:/|$)') {
+        $taskId = [string]$matches[1]
+    } elseif ($path -match '^/0/\d+/(\d+)(?:/|$)') {
+        $taskId = [string]$matches[1]
+    }
+    if (-not $taskId) {
+        throw "Could not extract a numeric Asana task ID from '$Url'."
+    }
+
+    return [pscustomobject]@{
+        source = "asana"
+        taskId = $taskId
+        canonicalUrl = "https://app.asana.com/0/0/$taskId"
+        suppliedUrl = $trimmed
+    }
+}
+
 function Get-FactoryIntegrationPlanCanonicalValue {
     param([Parameter(Mandatory = $true)]$Plan)
 
@@ -314,6 +346,25 @@ function ConvertTo-FactorySafeName {
     $safe = ($safe -replace '-+', '-').Trim('-', '.')
     if (-not $safe) { return $Fallback }
     return $safe
+}
+
+function ConvertTo-FactoryTaskArtifactName {
+    param([Parameter(Mandatory = $true)][string]$TaskId)
+
+    $safe = ConvertTo-FactorySafeName -Value $TaskId
+    if ($safe -ceq $TaskId.ToLowerInvariant() -and $safe.Length -le 80) { return $safe }
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($TaskId)
+        $suffix = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant().Substring(0, 12)
+    } finally {
+        $algorithm.Dispose()
+    }
+    $maximumPrefixLength = 67
+    $prefix = if ($safe.Length -gt $maximumPrefixLength) { $safe.Substring(0, $maximumPrefixLength).TrimEnd("-", ".") } else { $safe }
+    if (-not $prefix) { $prefix = "task" }
+    return "$prefix-$suffix"
 }
 
 function Get-FactoryNestedValue {
@@ -684,7 +735,7 @@ function Remove-FactoryTaskAgentSessions {
         [string]$KeepId = ""
     )
 
-    $safeTaskId = ConvertTo-FactorySafeName -Value $TaskId
+    $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
     $sessionNamePrefix = "factory-$safeTaskId-"
     $candidates = @()
     foreach ($row in @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)) {

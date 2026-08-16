@@ -38,7 +38,7 @@ try {
 
         $before = [string]$task.status
         $taskId = [string]$task.id
-        $safeTaskId = ConvertTo-FactorySafeName -Value $taskId
+        $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
         # Identity match wins over the name+cwd fallback, in two passes. A relaunched task
         # leaves the previous session listed under the SAME name and worktree, so a single
         # first-match loop can bind a live worker's task to the dead attempt's row and then

@@ -33,7 +33,7 @@ try {
 
     $task = $taskMatches[0]
     $taskId = [string]$task.id
-    $safeTaskId = ConvertTo-FactorySafeName -Value $taskId
+    $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
     $eventDirectory = Join-Path $context.eventsPath $safeTaskId
     $historyDirectory = Join-Path $eventDirectory "history"
     New-Item -ItemType Directory -Path $historyDirectory -Force | Out-Null

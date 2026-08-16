@@ -132,10 +132,7 @@ try {
         exit 0
     }
 
-    $safeTaskId = ConvertTo-FactorySafeName -Value $TaskId
-    if ($safeTaskId -ne $TaskId) {
-        throw "Task ID '$TaskId' is not safe for artifact removal."
-    }
+    $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
 
     $repositoryRoot = [IO.Path]::GetFullPath([string]$context.repositoryRoot)
     $worktreeRoot = [IO.Path]::GetFullPath([string]$context.worktreeRoot)

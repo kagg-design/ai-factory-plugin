@@ -73,6 +73,7 @@ if ($Initialize) {
 
         foreach ($task in @($state.tasks)) {
             foreach ($property in @{
+                source = $null
                 startMode = "auto"
                 backgroundSession = $null
                 rejectionReason = $null
@@ -116,4 +117,5 @@ if ($Initialize) {
     resultSchemaPath = (Join-Path $pluginRoot "resources\result.schema.json")
     planSchemaPath = (Join-Path $pluginRoot "resources\plan.schema.json")
     reviewSchemaPath = (Join-Path $pluginRoot "resources\review.schema.json")
+    intakeSchemaPath = (Join-Path $pluginRoot "resources\intake.schema.json")
 } | ConvertTo-Json -Depth 5

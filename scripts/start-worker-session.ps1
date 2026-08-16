@@ -21,7 +21,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
 $now = Get-FactoryUtcTimestamp
-$safeTaskId = ConvertTo-FactorySafeName -Value $TaskId
+$safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
 $mutex = $null
 $task = $null
 $attempt = 1

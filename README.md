@@ -1,16 +1,18 @@
 # Claude Factory
 
-Claude Factory is a removable Claude Code orchestration package that currently
-turns Asana tasks into a persistent development queue:
+Claude Factory is a removable Claude Code orchestration package that turns
+normalized source tasks into a persistent development queue:
 
 ```text
-Asana → queue → background worker sessions → external Git worktrees
-      → tests → one task commit → human review
-      → serialized integration → push → cleanup
+Asana (read-only) → AI normalization → native intake boundary → queue
+                   → background worker sessions → external Git worktrees
+                   → tests → one task commit → human review
+                   → serialized integration → push → cleanup
 ```
 
-Asana remains the only intake adapter in this revision. The public command and
-runtime identities are now source-neutral so more adapters can be added next.
+Asana is the built-in connector-backed adapter. Native intake is source-neutral,
+so a normalized envelope from a manual or future adapter can enter through
+`factory add --file <task.json>` without giving AI permission to edit the queue.
 
 The plugin is loaded only for a dedicated factory session. It is never copied
 into the target repository and does not change the repository's `.claude`
@@ -21,7 +23,8 @@ directory, `CLAUDE.md`, or `.gitignore`.
 - Windows PowerShell 5.1 or PowerShell 7
 - Git
 - Claude Code 2.1.139 or newer; the current Agent View release is recommended
-- an authenticated Asana connector available to Claude Code
+- an authenticated Asana connector available to Claude Code for Asana-backed
+  intake (`factory add --file` does not require it)
 - remote development and production branches (`develop` and `master` by
   default)
 
@@ -84,6 +87,7 @@ factory start
 factory status
 factory inspect 1216632072822682
 factory chat 1216632072822682
+factory add --file D:\Tasks\normalized-task.json
 factory go 1216632072822682
 factory hold 1216632072822682
 factory reject 1216632072822682 -Yes
@@ -116,11 +120,13 @@ enable PSReadLine's menu for the current terminal with
 line but never edits the profile automatically.
 
 Native commands cover launcher/runtime/scheduler control, deterministic reads,
-formally reviewed `go`, `hold`, confirmed `reject`, safe `cleanup`, and
-concurrency changes.
+validated normalized intake, formally reviewed `go`, `hold`, confirmed
+`reject`, safe `cleanup`, and concurrency changes.
 `factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
-inside that orchestrator adds work. Judgment-heavy workflows such as task
-intake, `sync`, and `review` still use `/factory ...`. A
+inside that orchestrator asks AI to read and normalize Asana content. Native
+code owns URL validation, deduplication, state insertion, and scheduler wakeup;
+AI never edits the queue directly. Judgment-heavy workflows such as Asana
+normalization, `sync`, and `review` still use `/factory ...`. A
 plain `factory reject <id>` prints the exact destructive preview; repeat it with
 `-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
 rejection. The leading `!` is required inside Claude: without it, Claude
@@ -250,6 +256,24 @@ Bare URLs remain a compatibility alias for automatic mode:
 ```
 
 Both modes remain interruptible.
+
+For each Asana URL, native code first validates and canonicalizes the URL,
+extracts its task ID, and checks private state for a duplicate. Only a new task
+is read through the Asana connector. AI then writes semantic content into the
+private `resources/intake.schema.json` envelope; it cannot choose the source
+identity or start mode. A second native boundary validates the envelope,
+repeats deduplication under the state lock, atomically adds the complete task,
+and starts or wakes the scheduler.
+
+Manual and future adapters can bypass AI and Asana with an already normalized
+envelope:
+
+```powershell
+factory add --file D:\Tasks\normalized-task.json
+```
+
+Non-Asana state IDs use `adapter:id`; Asana keeps its numeric ID for backward
+compatibility. The input file is validated but not modified or deleted.
 
 ## Enter and steer a worker conversation
 

@@ -67,6 +67,7 @@ function New-FactoryTestTask {
     return [pscustomobject]@{
         id = $Id
         url = $null
+        source = $null
         title = $Title
         brief = "Test worker launch behavior."
         acceptanceCriteria = @("launch behavior is verified")
@@ -105,6 +106,10 @@ try {
     Assert-True (-not $publicSkill.Contains("Skill(factory:tick)")) "The public skill still delegates approved publication to an AI tick."
     Assert-True ($publicSkill.Contains("factory-scheduler.ps1")) "The public skill does not use the native scheduler."
     Assert-True ($publicSkill.Contains("record-review.ps1")) "The public skill does not persist a formal review plan."
+    Assert-True ($publicSkill.Contains("prepare-intake.ps1")) "The public skill does not use native URL preparation."
+    Assert-True ($publicSkill.Contains("enqueue-task.ps1")) "The public skill still owns queue mutation."
+    Assert-True (-not $publicSkill.Contains('Write state atomically beside `statePath`')) "The public skill still tells AI to edit queue state directly."
+    Assert-True ($publicSkill.Contains("!factory add --file")) "The public skill does not advertise source-neutral native intake."
     Assert-True (-not $publicSkill.Contains("CronCreate")) "The public skill still provisions an AI cron scheduler."
     Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
@@ -215,6 +220,16 @@ try {
     $utf8Probe = Invoke-FactoryNativeProcess -Command $fakeClaude -Arguments @("utf8-probe")
     Assert-Equal 0 ([int]$utf8Probe.exitCode) "UTF-8 native-process probe failed."
     Assert-Equal $unicodeFixture ([string]$utf8Probe.stdout) "Native process output was decoded through an OEM code page."
+    $asanaUrl = Resolve-FactoryAsanaTaskUrl -Url "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1217516118946154?focus=true"
+    Assert-Equal "1217516118946154" ([string]$asanaUrl.taskId) "Asana URL parser extracted the wrong task ID."
+    Assert-Equal "https://app.asana.com/0/0/1217516118946154" ([string]$asanaUrl.canonicalUrl) "Asana URL parser did not canonicalize the URL."
+    $invalidAsanaHostRejected = $false
+    try { $null = Resolve-FactoryAsanaTaskUrl -Url "https://example.com/task/1217516118946154" } catch { $invalidAsanaHostRejected = $true }
+    Assert-True $invalidAsanaHostRejected "Asana URL parser accepted an unrelated host."
+    Assert-Equal "1217516118946154" (ConvertTo-FactoryTaskArtifactName -TaskId "1217516118946154") "Numeric Asana artifact names changed."
+    $adapterArtifactName = ConvertTo-FactoryTaskArtifactName -TaskId "linear:ENG-123"
+    Assert-True ($adapterArtifactName -match '^linear-eng-123-[0-9a-f]{12}$') "Source-qualified task ID did not receive a safe hashed artifact name."
+    Assert-True ($adapterArtifactName -ne (ConvertTo-FactoryTaskArtifactName -TaskId "linear/ENG-123")) "Distinct source task IDs collided after artifact-name normalization."
 
     $env:CLAUDE_FACTORY_HOME = $runtime
     $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE = Join-Path $testRoot "agent-session-events.tsv"
@@ -223,7 +238,7 @@ try {
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
     Assert-Equal 5 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
-    Assert-Equal 5 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    Assert-Equal 6 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
@@ -345,6 +360,86 @@ try {
         -TaskId $dropFailureTask `
         -DatabaseName ([string]$dropFailureDatabase.name)
 
+    $intakeTaskId = "1217000000000001"
+    $intakeUrl = "https://app.asana.com/1/14748072439266/project/1215506997644941/task/$($intakeTaskId)?focus=true"
+    $preparedIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\prepare-intake.ps1") -Repository $repository -Url $intakeUrl -Mode interactive) | ConvertFrom-Json
+    Assert-True ([bool]$preparedIntake.prepared) "Native intake did not prepare a new Asana task."
+    Assert-Equal $intakeTaskId ([string]$preparedIntake.taskId) "Native intake prepared the wrong Asana task."
+    Assert-True (Test-Path -LiteralPath ([string]$preparedIntake.requestPath)) "Native intake did not persist its request."
+    Assert-True (Test-Path -LiteralPath ([string]$preparedIntake.normalizationPath)) "Native intake did not create its normalized draft."
+    $intakeDraft = Read-FactoryJson -Path ([string]$preparedIntake.normalizationPath)
+    Assert-Equal "asana" ([string]$intakeDraft.source.adapter) "Native intake draft lost its source adapter."
+    Assert-Equal $intakeTaskId ([string]$intakeDraft.source.id) "Native intake draft lost its immutable source ID."
+    $intakeDraft.title = "Native intake task"
+    $intakeDraft.brief = "Verify native URL handling, deduplication, queue mutation, and scheduler wakeup."
+    $intakeDraft.acceptanceCriteria = @("The task is launched once.")
+    $intakeDraft.sourceNotes = @("Normalized by the synthetic test.")
+    Write-FactoryJsonAtomic -Path ([string]$preparedIntake.normalizationPath) -Value $intakeDraft
+    $enqueuedIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\enqueue-task.ps1") -Repository $repository -RequestPath ([string]$preparedIntake.requestPath) -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal $intakeTaskId ([string]$enqueuedIntake.taskId) "Native enqueue returned the wrong task."
+    Assert-True (-not [bool]$enqueuedIntake.duplicate) "Native enqueue treated a fresh task as a duplicate."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.requestPath))) "Native enqueue retained the consumed request."
+    Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.normalizationPath))) "Native enqueue retained the consumed draft."
+    Assert-True (-not [string]$enqueuedIntake.schedulerError) "Native enqueue could not wake the scheduler: $($enqueuedIntake.schedulerError)"
+    $intakeLaunchDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $intakeState = Read-FactoryJson -Path $context.statePath
+        $intakeTask = @($intakeState.tasks | Where-Object { [string]$_.id -eq $intakeTaskId })[0]
+        if ([string]$intakeTask.status -in @("starting", "planning", "running", "awaiting-input")) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $intakeLaunchDeadline)
+    Assert-True ([string]$intakeTask.status -in @("starting", "planning", "running", "awaiting-input")) "Native enqueue did not wake the scheduler and launch the task."
+    Assert-Equal "asana" ([string]$intakeTask.source.adapter) "Native enqueue did not persist source identity."
+    $duplicateIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\prepare-intake.ps1") -Repository $repository -Url "https://app.asana.com/0/0/$intakeTaskId" -Mode auto) | ConvertFrom-Json
+    Assert-True ([bool]$duplicateIntake.duplicate) "Native intake did not deduplicate the same Asana task ID."
+
+    $tamperedIntakeTaskId = "1217000000000002"
+    $tamperedIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\prepare-intake.ps1") -Repository $repository -Url "https://app.asana.com/0/0/$tamperedIntakeTaskId" -Mode auto) | ConvertFrom-Json
+    $tamperedDraft = Read-FactoryJson -Path ([string]$tamperedIntake.normalizationPath)
+    $tamperedDraft.source.id = "1217000000000099"
+    $tamperedDraft.title = "Tampered identity"
+    $tamperedDraft.brief = "This envelope must not enter state."
+    Write-FactoryJsonAtomic -Path ([string]$tamperedIntake.normalizationPath) -Value $tamperedDraft
+    $previousIntakeErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\enqueue-task.ps1") -Repository $repository -RequestPath ([string]$tamperedIntake.requestPath) -ClaudeCommand $fakeClaude 2>&1)
+        $tamperedIntakeExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousIntakeErrorAction
+    }
+    Assert-True ($tamperedIntakeExit -ne 0) "Native enqueue accepted an AI-modified source identity."
+    Assert-Equal 0 (@((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -in @($tamperedIntakeTaskId, "1217000000000099") }).Count) "Rejected intake identity entered state."
+    Remove-Item -LiteralPath ([string]$tamperedIntake.requestPath), ([string]$tamperedIntake.normalizationPath) -Force
+
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    $discardedIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $intakeTaskId -ClaudeCommand $fakeClaude -Yes) | ConvertFrom-Json
+    Assert-True ([bool]$discardedIntake.removedFromState) "Native intake fixture was not discarded after verification."
+
+    $manualIntakePath = Join-Path $testRoot "manual-intake.json"
+    Write-FactoryJsonAtomic -Path $manualIntakePath -Value ([pscustomobject][ordered]@{
+        version = 1
+        source = [pscustomobject][ordered]@{ adapter = "linear"; id = "ENG-123"; url = "https://linear.app/acme/issue/ENG-123/native-intake"; suppliedUrl = $null }
+        startMode = "auto"
+        title = "Future adapter task"
+        brief = "Connector data is unavailable in this synthetic import."
+        acceptanceCriteria = @()
+        sourceNotes = @()
+        sourceError = "Synthetic source is intentionally unavailable."
+    })
+    $nativeAddOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") add --file $manualIntakePath -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($nativeAddOutput.Contains("linear:ENG-123")) "factory add --file did not import a source-neutral task ID."
+    Assert-True ($nativeAddOutput.Contains("Saved as blocked")) "factory add --file did not report source failure state."
+    Assert-True (Test-Path -LiteralPath $manualIntakePath) "factory add --file consumed the operator's source file."
+    $manualState = Read-FactoryJson -Path $context.statePath
+    $manualTask = @($manualState.tasks | Where-Object { [string]$_.id -eq "linear:ENG-123" })[0]
+    Assert-Equal "blocked" ([string]$manualTask.status) "Source-neutral native intake did not persist the blocked task."
+    Assert-Equal "linear" ([string]$manualTask.source.adapter) "Source-neutral native intake lost the adapter identity."
+    $manualDuplicateOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") add --file $manualIntakePath -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($manualDuplicateOutput.Contains("Already saved")) "factory add --file did not deduplicate a repeated import."
+    $discardedManual = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "linear:ENG-123" -ClaudeCommand $fakeClaude -Yes) | ConvertFrom-Json
+    Assert-True ([bool]$discardedManual.removedFromState) "Manual intake fixture was not removed after verification."
+
     $now = [DateTime]::UtcNow.ToString("o")
     $state = [pscustomobject]@{
         version = 3
@@ -387,23 +482,25 @@ try {
         )
     }
     $state.version = 2
-    foreach ($propertyName in @("startMode", "backgroundSession", "plan", "review", "approval", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
+    foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
         $state.tasks[0].PSObject.Properties.Remove($propertyName)
     }
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal 5 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-Equal 6 ([int]$migratedState.version) "Legacy state version was not migrated."
     Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
     Assert-True ($null -ne $migratedState.PSObject.Properties["agentResolutionCache"]) "Legacy state agent resolution cache field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["planRecordedAt"]) "Legacy task plan timestamp field was not added."
+    Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["source"]) "Legacy task source field was not added."
 
     $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
     Assert-True ($cliSource.Contains('[ValidateSet(') -and $cliSource.Contains('"completion"')) "Factory CLI does not expose native command completion."
     Assert-True ($cliSource.Contains('"go"')) "Factory CLI does not expose native go."
+    Assert-True ($cliSource.Contains('"add"') -and $cliSource.Contains('[string]$File')) "Factory CLI does not expose native file intake."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath

@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Added a source-neutral native intake boundary. Asana is now read-only from
+  the orchestrator: AI fills a versioned normalized envelope, while native code
+  validates identity and content, deduplicates under the state lock, atomically
+  inserts tasks, and wakes the scheduler. Added `factory add --file
+  <task.json>`, state v6 source migration, synthetic intake coverage, and
+  operator documentation for future adapters.
 - Added a formal exact-SHA review contract and native `factory go` publication
   pipeline. Reviews now pin both remote bases, trusted integration/release
   commands, and a plan hash; the native scheduler serially merges, tests,

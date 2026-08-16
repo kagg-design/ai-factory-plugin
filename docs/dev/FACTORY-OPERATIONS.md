@@ -10,8 +10,9 @@ The factory has four distinct layers:
 
 1. **Orchestrator** — the main `Claude Factory Orchestrator` conversation.
    Run all `/factory ...` commands there.
-2. **Factory task** — a persistent queue entry imported from Asana. Its primary
-   ID looks like `1216632072822682`.
+2. **Factory task** — a persistent queue entry created from a validated,
+   normalized source envelope. An Asana ID looks like `1216632072822682`; a
+   future adapter ID looks like `linear:ENG-123`.
 3. **Worker** — a separate Claude Code background session for one task. It has
    a short session ID such as `1a20569f` and a name such as
    `factory-1216632072822682-surface-pending-pto-requests`.
@@ -102,6 +103,7 @@ Deterministic operations also have a native fast path:
 !factory status [state|all]
 !factory inspect <task-id>
 !factory chat <task-id>
+!factory add --file <task.json>
 !factory go <task-id>
 !factory hold <task-id>
 !factory reject <task-id> [-Yes|-Keep] [reason]
@@ -133,9 +135,12 @@ The second command selects `MenuComplete` for the current terminal only. To
 make it persistent, add the line reported by the command to `$PROFILE`
 yourself; Factory never edits a PowerShell profile automatically.
 
-`go`, `hold`, confirmed `reject`, safe `cleanup`, and concurrency changes are
-native because their execution is deterministic. Commands that require code
-judgment (`start`, `sync`, and `review`) still use `/factory ...`. A plain native
+Normalized file intake, `go`, `hold`, confirmed `reject`, safe `cleanup`, and
+concurrency changes are native because their execution is deterministic.
+Asana-backed `start` still uses `/factory ...`, but AI only reads and normalizes
+the source task; native code validates its identity, deduplicates, adds it to
+state, and wakes the scheduler. Commands that require code judgment (`sync` and
+`review`) also use `/factory ...`. A plain native
 `factory reject <id>` is a preview when artifacts
 exist. Repeat with `-Yes` or `--yes` to remove the task and its artifacts, or
 use `-Keep` or `--keep` to retain artifacts in rejected state.
@@ -232,6 +237,10 @@ claude attach 1a20569f
 | `57bf282`          | abbreviated Git commit SHA produced by the worker |
 | `1a20569f`         | short Claude background-session ID                |
 
+A non-Asana normalized envelope uses a source-qualified factory ID such as
+`linear:ENG-123`. The original adapter and source ID remain separately stored
+on the task.
+
 In Agent View, find the session name containing the full task ID:
 
 ```text
@@ -310,6 +319,21 @@ Add a task that requires plan review:
 /factory add <Asana URL>
 /factory add --auto <Asana URL>
 ```
+
+The orchestrator does not write queue state. Native preparation validates the
+Asana URL and checks duplicates before the connector is called. AI reads Asana
+and fills only semantic fields in a private versioned envelope. Native enqueue
+then validates `resources/intake.schema.json`, repeats deduplication while
+holding the state lock, atomically creates the task, and wakes the scheduler.
+
+To import a normalized envelope without AI or Asana:
+
+```powershell
+factory add --file C:\path\task.json
+```
+
+The source file is retained. A connector failure can be represented by
+`sourceError`; that task is saved as `blocked` and is not launched.
 
 The worker reads the task and relevant code without editing, emits a
 `FACTORY_PLAN`, moves to `awaiting-input`, and waits in its own conversation.
