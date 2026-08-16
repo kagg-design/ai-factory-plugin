@@ -11,6 +11,7 @@ param(
     [switch]$Continue,
     [string]$Model = "",
     [string]$File = "",
+    [switch]$Auto,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [switch]$NoReconcile
@@ -195,6 +196,21 @@ function Get-CliSessionInfo {
     }
 }
 
+function Get-CliTaskSourceInfo {
+    param($Task)
+
+    $source = Get-CliProperty -InputObject $Task -Name "source"
+    $adapter = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $source -Name "adapter")
+    $sourceId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $source -Name "id")
+    $url = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "url")
+    return [pscustomobject]@{
+        Adapter = $adapter
+        Id = $sourceId
+        Url = $url
+        IsLocal = $adapter -eq "local"
+    }
+}
+
 function Get-CliStateText {
     param([string]$Status)
 
@@ -318,8 +334,12 @@ function Add-CliTaskTree {
         -Text "$(Get-CliStateLabel -Status $status) $($script:Tree.Horizontal) $id $($script:Tree.Horizontal) $title"
 
     $details = New-Object Collections.Generic.List[string]
-    $url = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "url") -Fallback "unavailable"
-    $details.Add("URL: $url")
+    $source = Get-CliTaskSourceInfo -Task $Task
+    if ($source.IsLocal) {
+        $details.Add("Source: local / $($source.Id)")
+    } else {
+        $details.Add("URL: $(if ($source.Url) { $source.Url } else { 'unavailable' })")
+    }
     $brief = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "brief")
     if ($brief -and $brief -ne $title -and $title.Length -lt 80) {
         $details.Add("What: $(Get-CliShortSummary -Value $brief)")
@@ -363,13 +383,14 @@ function Add-CliDoneTree {
         $task = $Tasks[$index]
         $id = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "id") -Fallback "unknown-id"
         $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
-        $url = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "url") -Fallback "unavailable"
+        $source = Get-CliTaskSourceInfo -Task $task
         $summary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "production") -Name "summary")
         if (-not $summary) { $summary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "workerResult") -Name "notes") -Fallback "completed" }
         $taskConnector = if ($index -eq $Tasks.Count - 1) { "$($script:Tree.Last)$($script:Tree.Horizontal)" } else { "$($script:Tree.Branch)$($script:Tree.Horizontal)" }
         $detailPrefix = if ($index -eq $Tasks.Count - 1) { "$($script:Tree.Vertical)     " } else { "$($script:Tree.Vertical)  $($script:Tree.Vertical)  " }
         Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)  $taskConnector " -ContinuationPrefix $detailPrefix -Text "DONE $($script:Tree.Horizontal) $id $($script:Tree.Horizontal) $title"
-        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text "URL: $url"
+        $sourceText = if ($source.IsLocal) { "Source: local / $($source.Id)" } else { "URL: $(if ($source.Url) { $source.Url } else { 'unavailable' })" }
+        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text $sourceText
         Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text "Summary: $summary"
         Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "Inspect: factory inspect $id"
     }
@@ -487,7 +508,12 @@ function Write-CliInspect {
         -FirstPrefix "$($script:Tree.Top)$($script:Tree.Horizontal) " `
         -ContinuationPrefix "$($script:Tree.Vertical)  " `
         -Text "Task $id $($script:Tree.Horizontal) $title"
-    Add-CliInspectLine -Lines $lines -Text "URL: $(ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name 'url') -Fallback 'unavailable')"
+    $source = Get-CliTaskSourceInfo -Task $task
+    if ($source.IsLocal) {
+        Add-CliInspectLine -Lines $lines -Text "Source: local / $($source.Id)"
+    } else {
+        Add-CliInspectLine -Lines $lines -Text "URL: $(if ($source.Url) { $source.Url } else { 'unavailable' })"
+    }
     Add-CliInspectLine -Lines $lines -Text "State: $(Get-CliStateText -Status $status) ($status)"
     Add-CliInspectLine -Lines $lines -Text "Mode: $(ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name 'startMode') -Fallback 'unknown')"
     Add-CliInspectLine -Lines $lines -Text "Brief: $(ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name 'brief') -Fallback 'unavailable')"
@@ -700,6 +726,36 @@ function Write-CliAdd {
     if ([string]$result.schedulerError) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Scheduler warning: $(ConvertTo-CliLine -Value $result.schedulerError)" }
     $footer = if ([bool]$result.duplicate) { "No queue entry was added." } elseif ([string]$result.status -eq "queued") { "Native scheduler was notified; use factory status to follow the task." } else { "Inspect the saved blocker with factory inspect $([string]$result.taskId)." }
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) $footer"
+}
+
+function Write-CliNew {
+    param($Context, [string]$Text, [bool]$Automatic)
+
+    if ($Automatic -and -not $Text.Trim()) {
+        throw "An automatic local task requires text: factory new --auto <text>"
+    }
+    $mode = if ($Automatic) { "auto" } else { "interactive" }
+    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments @(
+        "-Repository", [string]$Context.repositoryRoot,
+        "-LocalText", $Text,
+        "-StartMode", $mode,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    $taskId = [string]$result.taskId
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Local task added $($script:Tree.Horizontal) $taskId $($script:Tree.Horizontal) $([string]$result.title)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status); mode: $([string]$result.mode)"
+    if ([string]$result.schedulerError) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Scheduler warning: $(ConvertTo-CliLine -Value $result.schedulerError)"
+    }
+    if (-not $Text.Trim()) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) The worker will ask what you want implemented."
+    } elseif ($Automatic) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) The worker was told to begin implementation immediately."
+    } else {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) The worker will propose a plan and wait for your approval."
+    }
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Open: factory chat $taskId"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) No JSON file or AI intake was used."
 }
 
 function Write-CliRejectResult {
@@ -968,6 +1024,7 @@ function Write-CliHelp {
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory chat <task-id>",
+            "  factory new [--auto] [text]",
             "  factory add --file <task.json>",
             "  factory go <task-id>",
             "  factory hold <task-id>",
@@ -1035,6 +1092,14 @@ function Write-CliHelp {
                 "factory add --file <task.json>",
                 "Validates and imports a normalized task envelope without AI or a source connector.",
                 "The file follows resources/intake.schema.json; successful queued work wakes the native scheduler."
+            ) | Write-Output
+        }
+        "new" {
+            @(
+                "factory new [--auto] [text]",
+                "Creates a native local task without AI, Asana, or an intermediate JSON file.",
+                "The default is interactive planning. With no text, the worker asks what to implement; --auto requires non-empty text.",
+                "The native scheduler starts or wakes automatically. Open the worker with 'factory chat <task-id>'."
             ) | Write-Output
         }
         "reject" {
@@ -1127,11 +1192,17 @@ foreach ($value in @($Remaining)) {
     elseif ($value -eq "--new") { $New = $true }
     elseif ($value -eq "--resume") { $ResumeSession = $true }
     elseif ($value -eq "--continue") { $Continue = $true }
+    elseif ($value -eq "--auto") { $Auto = $true }
     else { $remainingValues.Add([string]$value) }
 }
 $startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model)
 $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 $fileOptionUsed = [bool]$File
+$autoOptionUsed = [bool]$Auto
+
+if ($autoOptionUsed -and $normalizedCommand -ne "new") {
+    throw "--auto is accepted only by: factory new [--auto] [text]"
+}
 
 if ($normalizedCommand -eq "help") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "help accepts only one command topic." }
@@ -1174,6 +1245,14 @@ if ($normalizedCommand -eq "config") {
 if ($normalizedCommand -eq "add") {
     if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "add accepts only --file <task.json>." }
     Write-CliAdd -Context $context -Path $File
+    exit 0
+}
+if ($normalizedCommand -eq "new") {
+    if ($anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "new accepts only optional --auto and task text." }
+    $textParts = New-Object Collections.Generic.List[string]
+    if ($Target) { $textParts.Add($Target) }
+    foreach ($value in $remainingValues) { $textParts.Add([string]$value) }
+    Write-CliNew -Context $context -Text (($textParts.ToArray() -join " ").Trim()) -Automatic $autoOptionUsed
     exit 0
 }
 if ($fileOptionUsed) { throw "--file is accepted only by: factory add --file <task.json>" }

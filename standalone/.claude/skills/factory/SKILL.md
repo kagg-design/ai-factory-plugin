@@ -54,6 +54,7 @@ configured conversation language:
 Fast local commands (prefix with !; no AI interpretation)
   !factory status|inspect  read queue or one task
   !factory chat <id>       resolve exact worker session
+  !factory new [text]      create a local task without AI or Asana
   !factory add --file PATH import normalized task without AI
   !factory go <id>         approve formal plan + start native pipeline
   !factory hold <id>       retain task on hold
@@ -68,6 +69,7 @@ PowerShell entry point (outside Claude)
   factory scheduler        native process status/control
 
 Add work
+  new [--auto] [text]      create a local task; empty opens a requirements chat
   start|add <URL>          plan first, then wait
   start|add --auto <URL>   implement immediately
 
@@ -111,6 +113,29 @@ this skill. Include:
 Accept aliases such as `add` for `start` and explain the canonical form. If the
 name is unknown, say so and show the compact grouped summary. Never execute the
 command while explaining it.
+
+### `new [--auto] [text]`
+
+Local tasks do not require Asana, another connector, AI normalization, or a JSON
+file. The direct native forms are:
+
+```text
+!factory new "Describe the task"
+!factory new --auto "Implement this clear task immediately"
+!factory new
+```
+
+The default is interactive: the worker proposes a plan and waits. With no
+text, Factory creates an intentionally empty interactive task whose worker asks
+the user what to implement before editing. `--auto` requires non-empty text.
+Native code assigns a collision-safe `local:...` ID, writes the complete queue
+entry under the state mutex, and starts or wakes the scheduler. It reserves the
+`local` adapter so normalized file intake cannot impersonate a native task.
+
+Prefer the `!factory new` shell form inside the orchestrator because it does not
+consume an AI interpretation turn. After creation, use the exact
+`factory chat <id>` command printed by the CLI. Never edit `state.json` or
+construct a local ID manually.
 
 ### `start|add [--auto] <Asana URLs...>`
 
@@ -234,9 +259,11 @@ Default `status` rules:
 5. Include for each task:
    - full task ID and untruncated title on the task node; never replace either
      with a session name, slug, status label, or summary;
-   - `URL:` with the full canonical task URL as the first nested detail. Do not
-     shorten or hide it behind link text. If legacy state has no URL, print
-     `URL: unavailable` explicitly;
+   - for a connector-backed task, `URL:` with the full canonical task URL as the first nested detail.
+     Do not shorten or hide it behind link text. If
+     legacy state has no URL, print `URL: unavailable` explicitly. For a native
+     local task, print `Source: local / SOURCE_ID` instead and never expose its
+     internal `factory://` identity URI as a user URL;
    - one short `What:` summary from `brief` when the title is insufficient;
    - factory status in plain language;
    - `Reason:` from `holdReason`, `error`, or blocking reason when present; use
@@ -306,8 +333,9 @@ Choose `Next:` from the actual task data:
 `/factory status <state>` shows only that state. In particular, `status held`
 must print the same actionable cards, while `status done` prints compact rows
 with task ID, full title, full canonical task URL, completion summary, and
-`/factory inspect <id>`; session attach commands are not useful as the primary
-action for completed tasks.
+`/factory inspect <id>` for connector-backed tasks. Native local history uses
+`Source: local / SOURCE_ID` in place of the URL; session attach commands are not
+useful as the primary action for completed tasks.
 `/factory status all` includes the default actionable view plus compact done
 history.
 

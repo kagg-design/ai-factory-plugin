@@ -10,9 +10,9 @@ The factory has four distinct layers:
 
 1. **Orchestrator** — the main `Claude Factory Orchestrator` conversation.
    Run all `/factory ...` commands there.
-2. **Factory task** — a persistent queue entry created from a validated,
-   normalized source envelope. An Asana ID looks like `1216632072822682`; a
-   future adapter ID looks like `linear:ENG-123`.
+2. **Factory task** — a persistent queue entry created by native code. An
+   Asana ID looks like `1216632072822682`, another adapter ID looks like
+   `linear:ENG-123`, and an operator-created task uses `local:...`.
 3. **Worker** — a separate Claude Code background session for one task. It has
    a short session ID such as `1a20569f` and a name such as
    `factory-1216632072822682-surface-pending-pto-requests`.
@@ -103,6 +103,7 @@ Deterministic operations also have a native fast path:
 !factory status [state|all]
 !factory inspect <task-id>
 !factory chat <task-id>
+!factory new [--auto] [text]
 !factory add --file <task.json>
 !factory go <task-id>
 !factory hold <task-id>
@@ -135,12 +136,12 @@ The second command selects `MenuComplete` for the current terminal only. To
 make it persistent, add the line reported by the command to `$PROFILE`
 yourself; Factory never edits a PowerShell profile automatically.
 
-Normalized file intake, `go`, `hold`, confirmed `reject`, safe `cleanup`, and
-concurrency changes are native because their execution is deterministic.
-Asana-backed `start` still uses `/factory ...`, but AI only reads and normalizes
-the source task; native code validates its identity, deduplicates, adds it to
-state, and wakes the scheduler. Commands that require code judgment (`sync` and
-`review`) also use `/factory ...`. A plain native
+Local task creation, normalized file intake, `go`, `hold`, confirmed `reject`,
+safe `cleanup`, and concurrency changes are native because their execution is
+deterministic. Asana-backed `start` still uses `/factory ...`, but AI only reads
+and normalizes the source task; native code validates its identity,
+deduplicates, adds it to state, and wakes the scheduler. Commands that require
+code judgment (`sync` and `review`) also use `/factory ...`. A plain native
 `factory reject <id>` is a preview when artifacts
 exist. Repeat with `-Yes` or `--yes` to remove the task and its artifacts, or
 use `-Keep` or `--keep` to retain artifacts in rejected state.
@@ -211,10 +212,10 @@ Use filters when the default view is too broad:
 /factory status all
 ```
 
-`status done` is history: it shows task ID, full title, canonical task URL,
-completion summary, and the corresponding `inspect` command. It does not
-present an old attach command as the main action. The default view omits
-completed task rows.
+`status done` is history: it shows task ID, full title, completion summary, the
+corresponding `inspect` command, and either the canonical connector URL or the
+local source identity. It does not present an old attach command as the main
+action. The default view omits completed task rows.
 
 The native scheduler normally remains alive and sleeps cheaply when every task
 requires an operator decision. `factory scheduler status` shows its exact PID,
@@ -240,6 +241,10 @@ claude attach 1a20569f
 A non-Asana normalized envelope uses a source-qualified factory ID such as
 `linear:ENG-123`. The original adapter and source ID remain separately stored
 on the task.
+
+A task created with `factory new` uses a collision-safe ID such as
+`local:20260816-142530-a1b2c3d4`. Status and inspect output identify it as a
+local source without exposing the internal identity URI.
 
 In Agent View, find the session name containing the full task ID:
 
@@ -306,6 +311,51 @@ Do not start a nested interactive `claude attach` TUI from inside the
 orchestrator. Use Agent View or a second terminal.
 
 ## 8. Interactive task flow
+
+### Create a task from your own text
+
+For work that does not come from Asana or another connector, create the task
+directly:
+
+```powershell
+factory new "Fix the profile export"
+```
+
+This path is entirely native: it does not call AI for intake, require a JSON
+file, or ask Asana for anything. Native code assigns a `local:...` ID, writes
+the complete queue entry, and wakes the scheduler. The default mode is
+interactive, so the worker first proposes a plan and waits for approval.
+
+To open a blank worker and explain the task in its conversation, run:
+
+```powershell
+factory new
+```
+
+Factory prints the exact `factory chat <local-task-id>` command. The worker is
+explicitly instructed to ask what should be implemented and to wait before
+editing files.
+
+For a clear task that should begin immediately:
+
+```powershell
+factory new --auto "Remove the obsolete navigation item"
+```
+
+`--auto` requires non-empty text. It skips plan approval for implementation,
+but it does not bypass the normal review and integration controls. The `local`
+source adapter is reserved for this command and cannot be impersonated through
+`factory add --file`.
+
+From the orchestrator, prepend `!` to use the same native paths without an AI
+command turn:
+
+```text
+!factory new "Fix the profile export"
+!factory new
+```
+
+### Create a task from Asana
 
 Add a task that requires plan review:
 

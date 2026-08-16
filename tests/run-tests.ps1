@@ -110,6 +110,9 @@ try {
     Assert-True ($publicSkill.Contains("enqueue-task.ps1")) "The public skill still owns queue mutation."
     Assert-True (-not $publicSkill.Contains('Write state atomically beside `statePath`')) "The public skill still tells AI to edit queue state directly."
     Assert-True ($publicSkill.Contains("!factory add --file")) "The public skill does not advertise source-neutral native intake."
+    Assert-True ($publicSkill.Contains("!factory new [text]")) "The public skill does not advertise native local task intake."
+    Assert-True ($publicSkill.Contains('### `new [--auto] [text]`')) "The public skill does not document native local task intake."
+    Assert-True ($publicSkill.Contains('Source: local / SOURCE_ID')) "The public skill does not distinguish local task identity in status output."
     Assert-True (-not $publicSkill.Contains("CronCreate")) "The public skill still provisions an AI cron scheduler."
     Assert-True ($publicSkill.Contains("conversationLanguage")) "The public skill does not honor the configured conversation language."
     Assert-True ($publicSkill.Contains('argument-hint: "help | <command>"')) "The public skill still has an overflowing argument hint."
@@ -440,6 +443,82 @@ try {
     $discardedManual = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "linear:ENG-123" -ClaudeCommand $fakeClaude -Yes) | ConvertFrom-Json
     Assert-True ([bool]$discardedManual.removedFromState) "Manual intake fixture was not removed after verification."
 
+    $emptyLocalOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") new -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    $emptyLocalId = [regex]::Match($emptyLocalOutput, 'local:[0-9]{8}-[0-9]{6}-[0-9a-f]{8}').Value
+    Assert-True ([bool]$emptyLocalId) "factory new did not return a native local task ID."
+    Assert-True ($emptyLocalOutput.Contains("The worker will ask what you want implemented.")) "Empty factory new did not explain its worker handoff."
+    Assert-True ($emptyLocalOutput.Contains("factory chat $emptyLocalId")) "factory new did not print the exact chat command."
+    Assert-True ($emptyLocalOutput.Contains("No JSON file or AI intake was used.")) "factory new obscured its native intake boundary."
+    $emptyLocalDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $emptyLocalTask = @((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -eq $emptyLocalId })[0]
+        if ($null -ne $emptyLocalTask.backgroundSession -or [string]$emptyLocalTask.status -in @("awaiting-input", "held", "failed")) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $emptyLocalDeadline)
+    Assert-Equal "local" ([string]$emptyLocalTask.source.adapter) "Empty local task lost its native source adapter."
+    Assert-Equal "interactive" ([string]$emptyLocalTask.startMode) "Empty local task was not interactive."
+    Assert-Equal "Untitled local task" ([string]$emptyLocalTask.title) "Empty local task received the wrong title."
+    Assert-True ([string]$emptyLocalTask.brief -match 'Ask the user what they want implemented') "Empty local task did not require a user handoff."
+    Assert-True ([string]$emptyLocalTask.status -in @("starting", "planning", "awaiting-input", "held")) "Empty local task did not leave the native scheduler queue."
+    Assert-True ($null -ne $emptyLocalTask.backgroundSession) "Empty local task did not record a worker session."
+    $emptyLocalSourceId = [string]$emptyLocalTask.source.id
+    $emptyLocalStatusOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") status -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($emptyLocalStatusOutput.Contains("Source: local / $emptyLocalSourceId")) "Factory status did not identify a local task source."
+    Assert-True (-not $emptyLocalStatusOutput.Contains("factory://local/")) "Factory status exposed an internal local identity URI as an operator URL."
+    $discardedEmptyLocal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $emptyLocalId -ClaudeCommand $fakeClaude -Yes) | ConvertFrom-Json
+    Assert-True ([bool]$discardedEmptyLocal.removedFromState) "Empty local task fixture was not removed."
+
+    $localText = "Update the personal dashboard navigation"
+    $automaticLocalOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") new Update the personal dashboard navigation --auto -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    $automaticLocalId = [regex]::Match($automaticLocalOutput, 'local:[0-9]{8}-[0-9]{6}-[0-9a-f]{8}').Value
+    Assert-True ([bool]$automaticLocalId) "factory new --auto did not return a native local task ID."
+    $automaticLocalDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $automaticLocalTask = @((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -eq $automaticLocalId })[0]
+        if ([string]$automaticLocalTask.status -ne "queued") { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $automaticLocalDeadline)
+    Assert-Equal "auto" ([string]$automaticLocalTask.startMode) "Automatic local task lost its launch mode."
+    Assert-Equal $localText ([string]$automaticLocalTask.title) "Local task title was not derived from operator text."
+    Assert-Equal $localText ([string]$automaticLocalTask.brief) "Local task brief did not preserve operator text."
+    Assert-True ([string]$automaticLocalTask.status -in @("starting", "running", "awaiting-review", "held")) "Automatic local task was not launched."
+    $discardedAutomaticLocal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $automaticLocalId -ClaudeCommand $fakeClaude -Yes) | ConvertFrom-Json
+    Assert-True ([bool]$discardedAutomaticLocal.removedFromState) "Automatic local task fixture was not removed."
+
+    $taskCountBeforeInvalidLocal = @((Read-FactoryJson -Path $context.statePath).tasks).Count
+    $previousLocalErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") new --auto -Repository $repository -ClaudeCommand $fakeClaude 2>&1)
+        $invalidEmptyAutoExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousLocalErrorAction
+    }
+    Assert-True ($invalidEmptyAutoExit -ne 0) "factory new --auto accepted an empty task."
+    Assert-Equal $taskCountBeforeInvalidLocal (@((Read-FactoryJson -Path $context.statePath).tasks).Count) "Rejected empty automatic intake mutated state."
+
+    $reservedLocalPath = Join-Path $testRoot "reserved-local-intake.json"
+    Write-FactoryJsonAtomic -Path $reservedLocalPath -Value ([pscustomobject][ordered]@{
+        version = 1
+        source = [pscustomobject][ordered]@{ adapter = "local"; id = "20260816-120000-deadbeef"; url = "factory://local/20260816-120000-deadbeef"; suppliedUrl = $null }
+        startMode = "interactive"
+        title = "Spoofed local task"
+        brief = "This file must not impersonate native local intake."
+        acceptanceCriteria = @()
+        sourceNotes = @()
+        sourceError = $null
+    })
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\enqueue-task.ps1") -Repository $repository -IntakePath $reservedLocalPath -ClaudeCommand $fakeClaude 2>&1)
+        $reservedLocalExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousLocalErrorAction
+    }
+    Assert-True ($reservedLocalExit -ne 0) "File intake impersonated the reserved local adapter."
+    Assert-Equal 0 (@((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -eq "local:20260816-120000-deadbeef" }).Count) "Reserved local file intake entered state."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+
     $now = [DateTime]::UtcNow.ToString("o")
     $state = [pscustomobject]@{
         version = 3
@@ -501,6 +580,7 @@ try {
     Assert-True ($cliSource.Contains('[ValidateSet(') -and $cliSource.Contains('"completion"')) "Factory CLI does not expose native command completion."
     Assert-True ($cliSource.Contains('"go"')) "Factory CLI does not expose native go."
     Assert-True ($cliSource.Contains('"add"') -and $cliSource.Contains('[string]$File')) "Factory CLI does not expose native file intake."
+    Assert-True ($cliSource.Contains('"new"') -and $cliSource.Contains('[switch]$Auto')) "Factory CLI does not expose native local task intake."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath

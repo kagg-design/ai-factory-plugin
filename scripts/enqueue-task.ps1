@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true, ParameterSetName = "Request")][string]$RequestPath,
     [Parameter(Mandatory = $true, ParameterSetName = "File")][string]$IntakePath,
+    [Parameter(Mandatory = $true, ParameterSetName = "Local")][AllowEmptyString()][string]$LocalText,
+    [Parameter(ParameterSetName = "Local")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
     [string]$ClaudeCommand = ""
 )
 
@@ -76,6 +78,16 @@ function Resolve-NormalizedSource {
         }
         $stateId = $sourceId
         $canonicalUrl = [string]$resolved.canonicalUrl
+    } elseif ($adapter -eq "local") {
+        if ($sourceId -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$') {
+            throw "Invalid native local task ID '$sourceId'."
+        }
+        $expectedUrl = "factory://local/$sourceId"
+        if ($sourceUrl -ne $expectedUrl) {
+            throw "Local intake URL does not match its native task ID."
+        }
+        $stateId = "local`:$sourceId"
+        $canonicalUrl = $expectedUrl
     } else {
         $uri = $null
         if (-not [Uri]::TryCreate($sourceUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @("http", "https") -or $uri.UserInfo) {
@@ -117,7 +129,40 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $request = $null
 $consumePaths = @()
-if ($PSCmdlet.ParameterSetName -eq "Request") {
+if ($PSCmdlet.ParameterSetName -eq "Local") {
+    $localTextValue = $LocalText.Trim()
+    if ($StartMode -eq "auto" -and -not $localTextValue) {
+        throw "An automatic local task requires non-empty text."
+    }
+    $localId = "{0}-{1}" -f [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss"), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $localTitle = "Untitled local task"
+    $localBrief = "No requirements were supplied. Ask the user what they want implemented and wait for their answer before editing files."
+    $localNotes = @("Created as an intentionally empty interactive worker.")
+    if ($localTextValue) {
+        $firstLine = @($localTextValue -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })[0]
+        $localTitle = ($firstLine -replace '\s+', ' ').Trim()
+        if ($localTitle.Length -gt 120) { $localTitle = $localTitle.Substring(0, 117).TrimEnd() + "..." }
+        $localBrief = $localTextValue
+        $localNotes = @("Created from operator-provided local text.")
+    }
+    $localUrl = "factory://local/$localId"
+    $normalized = [pscustomobject][ordered]@{
+        version = 1
+        source = [pscustomobject][ordered]@{
+            adapter = "local"
+            id = $localId
+            url = $localUrl
+            suppliedUrl = $null
+        }
+        startMode = $StartMode
+        title = $localTitle
+        brief = $localBrief
+        acceptanceCriteria = @()
+        sourceNotes = @($localNotes)
+        sourceError = $null
+    }
+    $resolvedIntakePath = $null
+} elseif ($PSCmdlet.ParameterSetName -eq "Request") {
     $resolvedRequestPath = [IO.Path]::GetFullPath($RequestPath)
     if (-not (Test-IntakePathInsideRoot -Path $resolvedRequestPath -Root ([string]$context.sessionsPath))) {
         throw "Intake request must be inside '$($context.sessionsPath)'."
@@ -145,11 +190,12 @@ if ($PSCmdlet.ParameterSetName -eq "Request") {
 } else {
     $resolvedIntakePath = [IO.Path]::GetFullPath($IntakePath)
 }
-if (-not (Test-Path -LiteralPath $resolvedIntakePath -PathType Leaf)) {
-    throw "Normalized intake does not exist: $resolvedIntakePath"
+if ($PSCmdlet.ParameterSetName -ne "Local") {
+    if (-not (Test-Path -LiteralPath $resolvedIntakePath -PathType Leaf)) {
+        throw "Normalized intake does not exist: $resolvedIntakePath"
+    }
+    $normalized = Read-FactoryJson -Path $resolvedIntakePath
 }
-
-$normalized = Read-FactoryJson -Path $resolvedIntakePath
 $allowedProperties = @("version", "source", "startMode", "title", "brief", "acceptanceCriteria", "sourceNotes", "sourceError")
 foreach ($property in $normalized.PSObject.Properties) {
     if ($property.Name -notin $allowedProperties) {
@@ -164,6 +210,9 @@ foreach ($requiredProperty in $allowedProperties) {
 if ([int]$normalized.version -ne 1) { throw "Unsupported normalized intake version '$($normalized.version)'." }
 if ([string]$normalized.startMode -notin @("interactive", "auto")) { throw "Invalid intake start mode." }
 $identity = Resolve-NormalizedSource -Source $normalized.source
+if ([string]$identity.adapter -eq "local" -and $PSCmdlet.ParameterSetName -ne "Local") {
+    throw "The local source adapter is reserved for native 'factory new' tasks."
+}
 if ($null -ne $request) {
     if (
         [string]$identity.adapter -ne "asana" -or

@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Added native `factory new [--auto] [text]` intake for operator-authored work.
+  It creates collision-safe `local:...` tasks without Asana, AI normalization,
+  or an intermediate JSON file; empty interactive tasks wait for instructions
+  in their worker conversation, while `--auto` requires a concrete brief.
+  Status output identifies the local source without exposing its internal URI.
 - Added a source-neutral native intake boundary. Asana is now read-only from
   the orchestrator: AI fills a versioned normalized envelope, while native code
   validates identity and content, deduplicates under the state lock, atomically

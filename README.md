@@ -13,6 +13,8 @@ Asana (read-only) → AI normalization → native intake boundary → queue
 Asana is the built-in connector-backed adapter. Native intake is source-neutral,
 so a normalized envelope from a manual or future adapter can enter through
 `factory add --file <task.json>` without giving AI permission to edit the queue.
+An operator can also create a native local task directly with `factory new`,
+without Asana, AI normalization, or an intermediate JSON file.
 
 The plugin is loaded only for a dedicated factory session. It is never copied
 into the target repository and does not change the repository's `.claude`
@@ -87,6 +89,8 @@ factory start
 factory status
 factory inspect 1216632072822682
 factory chat 1216632072822682
+factory new "Fix the profile export"
+factory new
 factory add --file D:\Tasks\normalized-task.json
 factory go 1216632072822682
 factory hold 1216632072822682
@@ -107,6 +111,7 @@ using Claude Code's direct shell mode:
 ```text
 !factory status
 !factory inspect 1216632072822682
+!factory new "Fix the profile export"
 !factory go 1216632072822682
 !factory hold 1216632072822682
 ```
@@ -120,7 +125,7 @@ enable PSReadLine's menu for the current terminal with
 line but never edits the profile automatically.
 
 Native commands cover launcher/runtime/scheduler control, deterministic reads,
-validated normalized intake, formally reviewed `go`, `hold`, confirmed
+local task creation, validated normalized intake, formally reviewed `go`, `hold`, confirmed
 `reject`, safe `cleanup`, and concurrency changes.
 `factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
 inside that orchestrator asks AI to read and normalize Asana content. Native
@@ -274,6 +279,20 @@ factory add --file D:\Tasks\normalized-task.json
 
 Non-Asana state IDs use `adapter:id`; Asana keeps its numeric ID for backward
 compatibility. The input file is validated but not modified or deleted.
+
+Create a task directly from operator text without a connector or JSON envelope:
+
+```powershell
+factory new "Fix the profile export"
+factory new --auto "Remove the obsolete navigation item"
+```
+
+The default is interactive and waits for plan approval. `--auto` requires
+non-empty text and begins implementation immediately. Running `factory new`
+without text creates an intentionally empty interactive worker; open it with
+the printed `factory chat <local-task-id>` command and tell it what to do. Local
+tasks receive collision-safe `local:...` IDs. The `local` adapter is reserved
+for this native command and cannot be imported through `factory add --file`.
 
 ## Enter and steer a worker conversation
 

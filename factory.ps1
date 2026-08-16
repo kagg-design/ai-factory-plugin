@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "inspect", "doctor", "chat", "add", "go", "hold", "reject",
+        "help", "status", "inspect", "doctor", "chat", "add", "new", "go", "hold", "reject",
         "cleanup", "concurrency", "completion", "start", "paths", "config",
         "scheduler", "tick", "pause", "resume", "stop", "purge"
     )]
@@ -24,7 +24,7 @@ param(
         $staticValues = @(switch ($typedCommand) {
             "help" {
                 @(
-                    "status", "inspect", "doctor", "chat", "add", "go", "hold", "reject",
+                    "status", "inspect", "doctor", "chat", "add", "new", "go", "hold", "reject",
                     "cleanup", "concurrency", "completion", "start", "paths",
                     "config", "scheduler", "tick", "pause", "resume", "stop",
                     "purge", "help"
@@ -107,6 +107,7 @@ param(
     [switch]$Continue,
     [string]$Model = "",
     [string]$File = "",
+    [switch]$Auto,
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
@@ -130,6 +131,7 @@ try {
         -Continue:$Continue `
         -Model $Model `
         -File $File `
+        -Auto:$Auto `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -NoReconcile:$NoReconcile
