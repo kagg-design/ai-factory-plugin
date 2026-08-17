@@ -550,6 +550,14 @@ writes review state and reports concise blockers plus `factory config edit`.
 The deeper review and integration checks still run afterward; the preflight
 does not replace or weaken them.
 
+Publication is asynchronous. Native `go` prints `factory inspect <task-id>` so
+the operator has an explicit monitoring command. If a publication stage fails,
+the task retains the failed stage, checks, and error for diagnosis, but the
+associated immutable plan is stale. Status requires a fresh review, and
+ordinary `go`, `go --direct`, and the integrator all refuse to reuse that plan.
+A successfully recorded replacement review clears the active stage markers and
+permits a new approval.
+
 Other decisions:
 
 ```text

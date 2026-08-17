@@ -343,6 +343,18 @@ function Get-FactoryPublicationReadiness {
     }
 }
 
+function Test-FactoryTaskRequiresFreshReview {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    foreach ($stageName in @("integration", "production")) {
+        $stage = Get-FactoryNestedValue -Target $Task -Name $stageName
+        if ([string](Get-FactoryNestedValue -Target $stage -Name "status" -Default "") -eq "failed") {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-FactoryDirectApprovalReadiness {
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -358,6 +370,9 @@ function Get-FactoryDirectApprovalReadiness {
     $status = [string](Get-FactoryNestedValue -Target $Task -Name "status" -Default "")
     if ($status -notin @("awaiting-review", "held")) {
         $blockers.Add("task '$taskId' is '$status', not awaiting review")
+    }
+    if (Test-FactoryTaskRequiresFreshReview -Task $Task) {
+        $blockers.Add("the previous publication attempt failed; run a fresh review first")
     }
 
     $commit = ([string](Get-FactoryNestedValue -Target $Task -Name "commit" -Default "")).ToLowerInvariant()

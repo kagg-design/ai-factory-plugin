@@ -191,6 +191,9 @@ try {
     $review = Get-FactoryNestedValue -Target $task -Name "review"
     $approval = Get-FactoryNestedValue -Target $task -Name "approval"
     $plan = Get-FactoryNestedValue -Target $review -Name "integrationPlan"
+    if (Test-FactoryTaskRequiresFreshReview -Task $task) {
+        throw "Task '$TaskId' has a failed publication attempt. Run review again before go."
+    }
     if ($null -eq $review -or [string]$review.verdict -ne "approved" -or [string]$review.commit -ne $taskCommit) {
         throw "Task '$TaskId' has no approved review for '$taskCommit'."
     }

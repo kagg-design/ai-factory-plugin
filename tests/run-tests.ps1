@@ -213,6 +213,8 @@ try {
     Assert-True ($taskActionSource.Contains('"operator-direct"')) "Native go does not audit direct approval mode."
     $directApprovalSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Raw
     Assert-True ($directApprovalSource.Contains('"-Mode", "operator-direct"')) "Direct approval does not use the trusted native review mode."
+    $nativeCliSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\factory-cli.ps1") -Raw
+    Assert-True ($nativeCliSource.Contains("Publication runs asynchronously; monitor: factory inspect")) "Native go does not explain how to monitor asynchronous publication."
     $integrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Raw
     Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", $Commit')) "Native integration does not merge the immutable approved SHA."
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
@@ -1362,6 +1364,55 @@ try {
     $directApprovedState = Read-FactoryJson -Path $context.statePath
     $directApprovedTask = @($directApprovedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-True ([string]$directApprovedTask.review.summary -match "skipped") "Direct approval did not preserve its review warning."
+
+    $directApprovedTask.status = "awaiting-review"
+    $directApprovedTask.approval = $null
+    $directApprovedTask.error = "integrator check failed: invalid command fixture"
+    $directApprovedTask.integration = [pscustomobject]@{
+        status = "failed"
+        taskCommit = $pipelineCommit
+        stage = "integration"
+        tests = @([pscustomobject]@{ command = "invalid command fixture"; status = "failed"; summary = "Synthetic failure." })
+        error = $directApprovedTask.error
+        failedAt = Get-FactoryUtcTimestamp
+    }
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $directApprovedState
+
+    $failedPipelineStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status awaiting-review -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($failedPipelineStatus.Contains("Next in orchestrator: /factory review pipeline-task")) "Status offered stale go after a failed publication attempt."
+    Assert-True (-not $failedPipelineStatus.Contains("go pipeline-task --direct")) "Status offered direct approval over a failed publication attempt."
+
+    $previousFailedPlanErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $failedPlanGoOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task" 2>&1 | ForEach-Object { [string]$_ })
+        $failedPlanGoExit = $LASTEXITCODE
+        $failedPlanDirectOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId "pipeline-task" 2>&1 | ForEach-Object { [string]$_ })
+        $failedPlanDirectExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousFailedPlanErrorAction
+    }
+    Assert-True ($failedPlanGoExit -ne 0 -and ($failedPlanGoOutput -join "`n") -match "Run review again") "Native go reused a failed publication plan."
+    Assert-True ($failedPlanDirectExit -ne 0 -and ($failedPlanDirectOutput -join "`n") -match "fresh review") "Direct approval reused a failed publication plan."
+
+    $retryReviewPath = Join-Path $context.sessionsPath "pipeline-task.retry-review.json"
+    Write-FactoryJsonAtomic -Path $retryReviewPath -Value ([pscustomobject]@{
+        commit = $pipelineCommit
+        verdict = "approved"
+        summary = "Fresh review replaced the failed publication plan."
+        riskNotes = @("Synthetic retry after a failed plan.")
+        integrationTestCommands = @("git diff --check")
+        releaseTestCommands = @("git diff --check")
+    })
+    $retryReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "pipeline-task" -ReviewPath $retryReviewPath) | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$retryReview.verdict) "Fresh review was not recorded after publication failure."
+    $reviewedRetryState = Read-FactoryJson -Path $context.statePath
+    $reviewedRetryTask = @($reviewedRetryState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    Assert-True ($null -eq $reviewedRetryTask.integration -and $null -eq $reviewedRetryTask.production) "Fresh review retained failed publication audit as an active blocker."
+    Assert-True (-not [string]$reviewedRetryTask.error) "Fresh review retained the previous publication error."
+    $pipelineRetryGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task") | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$pipelineRetryGo.status) "Freshly reviewed publication plan could not be approved."
+
     $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-Equal 1 ([int]$pipelineTick.integratedCount) "Native scheduler did not integrate exactly one approved task."
     Assert-Equal 0 @($pipelineTick.errors).Count "Native pipeline reported an error."

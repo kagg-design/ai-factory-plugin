@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Invalidated immutable publication plans after an integration or production
+  failure. Status now directs the operator to a fresh review, while ordinary
+  `go`, `go --direct`, and the integrator reject stale failed plans. Recording
+  the replacement review clears the active failure marker; the diagnosis stays
+  visible until that explicit replacement. Native `go` output now states that
+  publication is asynchronous and prints the exact `factory inspect`
+  monitoring command.
 - Added side-effect-free publication readiness checks for direct approval.
   Status now advertises `go --direct` only when the task and private
   publication settings are ready, the command fails early with concise

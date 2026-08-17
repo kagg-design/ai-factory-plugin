@@ -31,6 +31,9 @@ try {
             if ([string]$task.status -notin @("awaiting-review", "held")) {
                 throw "Task '$TaskId' is '$($task.status)', not awaiting review."
             }
+            if (Test-FactoryTaskRequiresFreshReview -Task $task) {
+                throw "Task '$TaskId' has a failed publication attempt. Run review again before go."
+            }
             if (-not [string]$task.commit -or $null -eq $task.workerResult) {
                 throw "Task '$TaskId' has no validated worker commit."
             }

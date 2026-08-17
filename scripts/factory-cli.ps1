@@ -283,6 +283,7 @@ function Get-CliNextAction {
     $isMachineHeld = $status -eq "held" -and $reason -match '(?i)background session stopped|without a FACTORY_RESULT|recoverable|launch failed'
     $runtime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
     $prompt = if ($runtime -eq "codex") { "factory" } else { "/factory" }
+    $requiresFreshReview = Test-FactoryTaskRequiresFreshReview -Task $Task
 
     $primary = switch ($status) {
         "queued" {
@@ -296,7 +297,8 @@ function Get-CliNextAction {
         "syncing" { "$prompt sync $id" }
         "awaiting-review" {
             $review = Get-CliProperty -InputObject $Task -Name "review"
-            if ([string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
+            if (-not $requiresFreshReview -and
+                [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
                 [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
                 $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")) {
                 "$prompt go $id"
@@ -305,7 +307,8 @@ function Get-CliNextAction {
         { $_ -in @("approved", "integrating", "production") } { "automatic; the factory will continue" }
         "held" {
             $review = Get-CliProperty -InputObject $Task -Name "review"
-            $hasApprovedPlan = [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
+            $hasApprovedPlan = -not $requiresFreshReview -and
+                [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
                 [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
                 $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")
             if ($commit -and $resultCommit -eq $commit -and $hasApprovedPlan) { "$prompt go $id" }
@@ -775,6 +778,7 @@ function Write-CliGo {
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Commit: $([string]$result.approvedCommit)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Review plan: $(Get-CliShortId -Value $result.approvedPlanHash)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Native scheduler: $([string]$scheduler.status)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Publication runs asynchronously; monitor: factory inspect $TaskId"
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Integration, checks, promotion, and cleanup will continue without an AI turn."
 }
 
@@ -1234,7 +1238,8 @@ function Write-CliHelp {
                 "Approves the exact commit and immutable publication plan without AI interpretation.",
                 "--direct skips independent AI code review but still requires passed worker checks, a clean current-base commit, and trusted integration commands.",
                 "It refuses to override an existing changes-required or blocked review.",
-                "The native scheduler then integrates, tests, pushes, promotes, verifies, and cleans up."
+                "A failed publication attempt requires a fresh review; the previous immutable plan cannot be retried.",
+                "The native scheduler then runs asynchronously; monitor it with 'factory inspect <task-id>'."
             ) | Write-Output
         }
         "add" {

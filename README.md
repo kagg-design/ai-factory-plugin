@@ -444,6 +444,12 @@ written and names each blocking private setting with `factory config edit` as
 the corrective command. `factory doctor` reports this publication readiness as
 a warning rather than declaring an otherwise usable factory unhealthy.
 
+Publication runs asynchronously after `go`; the command prints `factory
+inspect <task-id>` as the monitoring command. If integration or promotion
+fails, the failed audit remains visible but its immutable plan cannot be
+approved again. Status points back to `review`, and only a freshly recorded
+formal review clears the active failure marker and enables another `go`.
+
 Other decisions:
 
 ```text
