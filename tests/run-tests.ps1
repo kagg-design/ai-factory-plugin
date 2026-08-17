@@ -170,7 +170,7 @@ try {
     Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
 
     $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export"
-    Assert-Equal "factory-local-20260816-210251-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
+    Assert-Equal "factory-local-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
     Assert-True ($readableLocalSession.Length -le 64) "Readable local session name exceeds the CLI limit."
     $unicodeLocalTitle = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JjRgdC/0YDQsNCy0LjRgtGMINGN0LrRgdC/0L7RgNGCINC/0YDQvtGE0LjQu9GP"))
     $unicodeLocalSlug = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0LjRgdC/0YDQsNCy0LjRgtGMLdGN0LrRgdC/0L7RgNGCLdC/0YDQvtGE0LjQu9GP"))
@@ -539,7 +539,8 @@ try {
     Assert-Equal "auto" ([string]$automaticLocalTask.startMode) "Automatic local task lost its launch mode."
     Assert-Equal $localText ([string]$automaticLocalTask.title) "Local task title was not derived from operator text."
     Assert-Equal $localText ([string]$automaticLocalTask.brief) "Local task brief did not preserve operator text."
-    $expectedLocalSessionPrefix = "factory-$($automaticLocalId.Replace(':', '-'))-update-the-personal-"
+    $localTaskNonce = [regex]::Match($automaticLocalId, '([0-9a-f]{8})$').Groups[1].Value
+    $expectedLocalSessionPrefix = "factory-local-$localTaskNonce-update-the-personal-"
     Assert-True ([string]$automaticLocalTask.backgroundSession.name -like "$expectedLocalSessionPrefix*") "Quoted local task text was not retained in the worker session name."
     Assert-True ([string]$automaticLocalTask.backgroundSession.name -notmatch '-[0-9a-f]{12}-update-') "Local worker session still contains an unreadable artifact hash."
     Assert-True ([string]$automaticLocalTask.status -in @("starting", "running", "awaiting-review", "held")) "Automatic local task was not launched."

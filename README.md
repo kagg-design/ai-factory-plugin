@@ -108,9 +108,10 @@ factory help
 ```
 
 Named local workers use compact readable session names such as
-`factory-local-20260816-210251-fe35a8dc-fix-the-profile-export`. The full local
-task ID remains in state and status, while the filesystem-only artifact hash is
-omitted from the display name so the supplied title stays visible.
+`factory-local-fe35a8dc-fix-the-profile-export`. `fe35a8dc` is the task's
+stable random nonce, not a Claude/Codex session ID. The full local task ID
+remains in state and status; its timestamp and filesystem-only artifact hash
+are omitted from the display name so the supplied title stays visible.
 
 The plugin root contains both `factory.ps1` for PowerShell command discovery and
 an extensionless Bash-compatible `factory` launcher. Consequently, the same

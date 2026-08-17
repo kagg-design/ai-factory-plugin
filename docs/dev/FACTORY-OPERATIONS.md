@@ -275,11 +275,12 @@ A task created with `factory new` uses a collision-safe ID such as
 `local:20260816-142530-a1b2c3d4`. Status and inspect output identify it as a
 local source without exposing the internal identity URI.
 
-Its worker session keeps that collision-safe identity but omits the separate
-filesystem artifact hash, leaving room for the operator title:
+Its worker session uses the local task's random nonce as a stable short code.
+It omits the timestamp and separate filesystem artifact hash, leaving more room
+for the operator title. The nonce is not the Claude/Codex session ID:
 
 ```text
-factory-local-20260816-142530-a1b2c3d4-fix-profile-export
+factory-local-a1b2c3d4-fix-profile-export
 ```
 
 In Agent View, find the session name containing the full task ID:

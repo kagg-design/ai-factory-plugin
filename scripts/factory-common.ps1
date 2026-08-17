@@ -383,10 +383,10 @@ function Get-FactoryWorkerSessionName {
         return $legacyName
     }
 
-    # A local ID already contains a timestamp and random nonce. Do not append the
-    # artifact hash used for filesystem paths: it consumes the Agent View name
-    # without adding useful operator identity.
-    $sessionIdentity = "local-$($localMatch.Groups[1].Value)-$($localMatch.Groups[2].Value)-$($localMatch.Groups[3].Value.ToLowerInvariant())"
+    # The random nonce is the task's stable short code. The timestamp and the
+    # separate filesystem artifact hash add no useful Agent View identity and
+    # leave less room for the operator-supplied title.
+    $sessionIdentity = "local-$($localMatch.Groups[3].Value.ToLowerInvariant())"
     $titleSlug = ($Title.ToLowerInvariant() -replace '[^\p{L}\p{Nd}._-]', '-')
     $titleSlug = ($titleSlug -replace '-+', '-').Trim('-', '.')
     if (-not $titleSlug) { $titleSlug = "task" }

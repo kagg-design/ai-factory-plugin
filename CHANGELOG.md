@@ -2,10 +2,11 @@
 
 ## Unreleased
 - Made local worker sessions recognizable in Agent View. Their display names
-  now use the task's timestamp/nonce plus the operator-supplied title, omit the
-  redundant filesystem artifact hash, preserve Unicode letters, and keep the
-  64-character limit. Orchestrator skills must pass `factory new` text verbatim
-  and reject an unexpected `Untitled local task` handoff.
+  now use the task's stable eight-character nonce plus the operator-supplied
+  title, omit the timestamp and redundant filesystem artifact hash, preserve
+  Unicode letters, and keep the 64-character limit. Orchestrator skills must
+  pass `factory new` text verbatim and reject an unexpected `Untitled local
+  task` handoff.
 - Made `-Agent` select the complete Factory runtime: `factory start` defaults
   to Claude for both orchestrator and new workers, while `factory start -Agent
   codex` bootstraps or resumes a dedicated Codex orchestrator and uses Codex for
