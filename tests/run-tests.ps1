@@ -109,6 +109,9 @@ try {
     Assert-True ($bashLauncher.Contains('command -v wslpath')) "The cross-shell factory launcher does not translate WSL paths for Windows PowerShell."
     Assert-True (@($bundleManifest.files) -contains "scripts/approve-direct.ps1") "The plugin manifest omits native direct approval."
     Assert-True (@($bundleManifest.files) -contains "scripts/codex-runtime.ps1") "The plugin manifest omits the Codex worker adapter."
+    Assert-True (@($bundleManifest.files) -contains "scripts/codex-orchestrator.ps1") "The plugin manifest omits the Codex orchestrator adapter."
+    Assert-True (@($bundleManifest.files) -contains ".codex-plugin/plugin.json") "The bundle manifest omits the Codex plugin manifest."
+    Assert-True (@($bundleManifest.files) -contains "skills/factory/SKILL.md") "The bundle manifest omits the Codex factory skill."
     Assert-True (@($bundleManifest.files) -contains "scripts/factory-preview.ps1") "The plugin manifest omits browser preview lifecycle management."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
@@ -162,6 +165,8 @@ try {
     Assert-True ($tickSkillSource.Contains("factory-scheduler.ps1")) "The integration tick does not return capacity to the native scheduler."
     Assert-True (-not $tickSkillSource.Contains("Resolve only obvious mechanical conflicts")) "The legacy tick still asks AI to resolve integration conflicts."
     Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
+    Assert-True ($launcherSource.Contains('Start-FactoryCodexOrchestrator')) "Launcher cannot start a Codex orchestrator."
+    Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
 
     $orchestratorRows = @(
         [pscustomobject]@{ id = "oldbg"; sessionId = "11111111-1111-4111-8111-111111111111"; kind = "background"; name = "Claude Factory Orchestrator"; cwd = "C:\repo"; state = "blocked"; startedAt = 1 },
@@ -253,6 +258,7 @@ try {
     Assert-True ($adapterArtifactName -ne (ConvertTo-FactoryTaskArtifactName -TaskId "linear/ENG-123")) "Distinct source task IDs collided after artifact-name normalization."
 
     $env:CLAUDE_FACTORY_HOME = $runtime
+    $env:CLAUDE_FACTORY_CODEX_SKILL_HOME = Join-Path $testRoot "codex-skills"
     $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE = Join-Path $testRoot "agent-session-events.tsv"
     $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE = Join-Path $testRoot "test-database-events.tsv"
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
@@ -302,6 +308,31 @@ try {
     Assert-True ($replacementSessionIndex -ge 0 -and $replacementSessionIndex + 1 -lt $newOrchestratorArgs.Count) "-New did not create a replacement orchestrator identity."
     Assert-True ($newOrchestratorArgs[$replacementSessionIndex + 1] -ne $orchestratorSessionId) "-New reused the previous orchestrator UUID."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
+
+    $safeLauncherProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
+    $liveLauncherMutex = New-Object Threading.Mutex($false, "Local\ClaudeFactorySession-$safeLauncherProjectKey")
+    $ownsLiveLauncherMutex = $false
+    try {
+        $ownsLiveLauncherMutex = $liveLauncherMutex.WaitOne(0)
+        Assert-True $ownsLiveLauncherMutex "Could not establish the live-orchestrator mutation guard fixture."
+        $guardedConfig = Read-FactoryJson -Path $context.configPath
+        $guardedConfig.workerAgent = "claude"
+        Write-FactoryJsonAtomic -Path $context.configPath -Value $guardedConfig
+        $previousGuardErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -Agent codex -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex -RuntimeHome $runtime 2>&1)
+            $guardedStartExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousGuardErrorAction
+        }
+        Assert-True ($guardedStartExitCode -ne 0) "Launcher ignored an already-live orchestrator lock."
+        $guardedConfigAfter = Read-FactoryJson -Path $context.configPath
+        Assert-Equal "claude" ([string]$guardedConfigAfter.workerAgent) "A rejected runtime switch retargeted the live factory's workers."
+    } finally {
+        if ($ownsLiveLauncherMutex) { try { $liveLauncherMutex.ReleaseMutex() } catch {} }
+        $liveLauncherMutex.Dispose()
+    }
 
     $schedulerScript = Join-Path $pluginRoot "scripts\factory-scheduler.ps1"
     $schedulerStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
@@ -1612,17 +1643,32 @@ try {
     $codexConfig.codexModel = "inherit"
     $codexConfig.codexReasoningEffort = "inherit"
     Write-FactoryJsonAtomic -Path $context.configPath -Value $codexConfig
+    $codexLog = Join-Path $testRoot "codex-events.tsv"
+    $env:CLAUDE_FACTORY_TEST_CODEX_LOG = $codexLog
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Public factory start could not select the Codex worker runtime."
     $codexConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal "codex" ([string]$codexConfig.workerAgent) "Public factory start did not persist the private Codex selection."
+    $codexOrchestratorIdentity = Read-FactoryJson -Path (Join-Path ([string]$context.projectData) "codex-orchestrator-session.json")
+    Assert-Equal "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" ([string]$codexOrchestratorIdentity.sessionId) "Codex orchestrator thread UUID was not persisted."
+    Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDE_FACTORY_CODEX_SKILL_HOME "factory")) "Codex factory skill was not linked into the private test skill home."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 1) "First Codex startup did not bootstrap exactly one orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 1) "First Codex startup did not resume the bootstrapped orchestrator."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Stored Codex orchestrator resume failed."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 1) "Repeated Codex startup created a duplicate orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 2) "Repeated Codex startup did not resume the stored thread."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Default Claude orchestrator startup failed after Codex selection."
+    $defaultRuntimeConfig = Read-FactoryJson -Path $context.configPath
+    Assert-Equal "claude" ([string]$defaultRuntimeConfig.workerAgent) "Agent omission did not restore the default full Claude runtime."
+    $defaultRuntimeConfig.workerAgent = "codex"
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $defaultRuntimeConfig
     $codexState = Read-FactoryJson -Path $context.statePath
     $codexTask = New-FactoryTestTask -Id "codex-task" -Title "Codex interactive worker" -Now $now
     $codexTask.startMode = "interactive"
     $codexState.tasks = @($codexState.tasks) + @($codexTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $codexState
-    $codexLog = Join-Path $testRoot "codex-events.tsv"
-    $env:CLAUDE_FACTORY_TEST_CODEX_LOG = $codexLog
     $codexLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "codex-task" -Mode interactive -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-Equal "codex" ([string]$codexLaunch.runtime) "Codex worker launch did not report its runtime."
     Assert-Equal "codex" ([string]$codexLaunch.backgroundSession.runtime) "Codex worker session lost its runtime identity."
@@ -1643,7 +1689,7 @@ try {
     Assert-True ([string]$codexRecordedTask.backgroundSession.nativeResumeCommand -match '^codex resume -C .*aaaaaaaa-') "Codex native resume command did not target the exact thread."
     Assert-Equal "Inspect the requested change" ([string]$codexRecordedTask.plan.understanding) "Codex plan payload was not recorded."
     $codexStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") status -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex | Out-String)
-    Assert-True ($codexStatus.Contains("workers") -and $codexStatus.Contains("(codex)")) "Factory status hid the selected Codex worker runtime."
+    Assert-True ($codexStatus.Contains("runtime codex") -and $codexStatus.Contains("factory chat codex-task")) "Factory status hid the selected Codex runtime or printed Claude prompt syntax."
     $codexChat = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") chat codex-task -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex | Out-String)
     Assert-True ($codexChat.Contains("resume-codex-worker.ps1")) "Factory chat did not resolve the capture-aware Codex session command."
     $codexResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\resume-codex-worker.ps1") -Repository $repository -TaskId "codex-task" -CodexCommand $fakeCodex) | ConvertFrom-Json
@@ -1752,6 +1798,7 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_VERSION -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_PROMPT_PATH -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_CODEX_SKILL_HOME -ErrorAction SilentlyContinue
     if ($KeepTemp) {
         Write-Host "Kept test directory: $testRoot" -ForegroundColor Yellow
     } elseif (

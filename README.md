@@ -62,21 +62,20 @@ The launcher:
 4. starts or reuses one hidden native scheduler process;
 5. acquires a per-repository orchestrator lock;
 6. changes to the target repository;
-7. starts Claude Code with hooks and workers loaded through `--plugin-dir`;
-8. names the lead session `Claude Factory Orchestrator`;
-9. exposes the unnamespaced `/factory` skill through a bundled `--add-dir`.
+7. starts the selected orchestrator and uses the same runtime for new workers;
+8. loads the factory protocol without adding files to the target repository;
+9. stores a separate exact conversation UUID for Claude and Codex.
 
 It does not add a task, create a task commit, merge, or push by itself.
 
 Only one factory lead session can run for a repository. Different repositories
 can run separate factory sessions at the same time.
 
-Normal startup reuses the same orchestrator conversation. The launcher stores
-its exact UUID in the private project runtime. If that conversation is still a
-background Agent View row, startup attaches to its short ID; after an ordinary
-`Ctrl+C` exit, startup resumes the stored UUID. Use `-New` only when a genuinely
-new orchestrator conversation is required and no matching live orchestrator
-exists.
+`factory start` always selects the full Claude runtime. Use `factory start
+-Agent codex` to select Codex for both the orchestrator and new workers. Normal
+startup reuses the selected runtime's exact stored conversation. Claude may
+attach an existing background Agent View row; Codex resumes its stored thread
+UUID directly. Use `-New` only when a genuinely new conversation is required.
 
 ## Fast local commands
 
@@ -110,8 +109,7 @@ factory help
 
 The plugin root contains both `factory.ps1` for PowerShell command discovery and
 an extensionless Bash-compatible `factory` launcher. Consequently, the same
-code can run from the main Claude Factory Orchestrator conversation by using
-Claude Code's direct shell mode:
+code can run from either orchestrator through its direct shell mode:
 
 ```text
 !factory status
@@ -134,15 +132,17 @@ line but never edits the profile automatically.
 Native commands cover launcher/runtime/scheduler control, deterministic reads,
 worktree browser preview, local task creation, validated normalized intake, formally reviewed `go`, `hold`, confirmed
 `reject`, safe `cleanup`, and concurrency changes.
-`factory start` in PowerShell opens the orchestrator; `/factory start <URL>`
-inside that orchestrator asks AI to read and normalize Asana content. Native
+`factory start` in PowerShell opens the orchestrator; `start <URL>` inside an
+orchestrator asks AI to read and normalize Asana content. Native
 code owns URL validation, deduplication, state insertion, and scheduler wakeup;
 AI never edits the queue directly. Judgment-heavy workflows such as Asana
-normalization, `sync`, and `review` still use `/factory ...`. A
+normalization, `sync`, and `review` still use the active orchestrator. In Claude
+they may be written as `/factory review <id>`; in Codex use the natural
+`factory review <id>` or `review <id>` form. A
 plain `factory reject <id>` prints the exact destructive preview; repeat it with
 `-Yes` (or `--yes`) to discard, or use `-Keep` (or `--keep`) for state-only
-rejection. The leading `!` is required inside Claude: without it, Claude
-interprets the text as a prompt instead of executing the native command. Both
+rejection. The leading `!` explicitly selects native shell execution inside
+either TUI. Without it, the text is handled by the orchestrator. Both
 launchers are available when the plugin root is on `PATH`, as required by the
 installation steps above.
 
@@ -185,10 +185,9 @@ factory start -Model sonnet
 
 `-Resume` and `-Continue` are mutually exclusive.
 
-### Worker runtime selection
+### Full runtime selection
 
-Claude remains the Factory Orchestrator, but newly launched task workers can
-use either Claude Code or Codex:
+Select one runtime for the orchestrator and all newly launched workers:
 
 ```powershell
 factory start -Agent claude
@@ -196,12 +195,25 @@ factory start -Agent codex
 ```
 
 The selection is written only to the private per-project runtime config; it is
-not added to the target repository. Omitting `-Agent` preserves the stored
-selection. Changing it affects new worker attempts only and never converts a
-session that is already running. `factory status` shows the selected runtime
-beside worker capacity, and `factory doctor` verifies the selected CLI.
+not added to the target repository. Omitting `-Agent` selects Claude, even if
+the previous run used Codex. Changing it affects new worker attempts only and
+never converts a session that is already running. `factory status` shows the
+selected runtime beside worker capacity, and `factory doctor` verifies the
+selected CLI.
 
-Codex workers use the supported non-interactive JSONL session interface. Their
+The launcher keeps `orchestrator-session.json` for Claude and
+`codex-orchestrator-session.json` for Codex. Switching runtimes therefore does
+not merge or lose either conversation. The per-repository launcher mutex still
+allows only one live orchestrator at a time.
+
+On first Codex startup, Factory links its bundled `factory` skill into the
+user-level Codex skill directory. The link points back to this plugin; no
+`.codex`, skill, or factory file is written to the target repository. Prompt
+commands use `factory status`, `factory new`, `factory review <id>`, and so on;
+`$factory` is an internal explicit skill name, not the operator interface.
+
+Codex orchestrator bootstrap and workers use the supported resumable session
+interfaces. Worker
 thread UUID, PID, transcript, and exact resume command are stored in private
 runtime state. They do not appear in Claude Agent View. Use `factory chat
 <task-id>` to obtain the capture-aware PowerShell command; it opens `codex
@@ -210,6 +222,16 @@ the resulting `FACTORY_PLAN` or `FACTORY_RESULT` is reconciled into Factory.
 The ordinary Codex picker can also show these sessions with `codex resume --all
 --include-non-interactive`, but a raw picker/resume does not run Factory's
 post-chat capture step.
+
+Local tasks do not require Asana or any connector:
+
+```text
+factory new
+factory new "Describe the change"
+```
+
+An Asana connector is needed only when the Codex orchestrator must read an
+Asana URL. It can be connected later without changing local task operation.
 
 ### Conversation language
 

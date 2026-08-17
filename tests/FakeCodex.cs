@@ -41,10 +41,16 @@ public static class FakeCodex
             return 0;
 
         var prompt = Console.In.ReadToEnd();
+        if (String.IsNullOrWhiteSpace(prompt) && args.Length > 1 && args[args.Length - 1] != "-")
+            prompt = args[args.Length - 1];
         var taskMatches = Regex.Matches(prompt, "\\\"taskId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
         var taskId = taskMatches.Count > 0 ? taskMatches[taskMatches.Count - 1].Groups[1].Value : "unknown-task";
-        var threadId = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_THREAD_ID") ?? "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-        var message = "FACTORY_PLAN\n{\"taskId\":\"" + Escape(taskId) + "\",\"understanding\":\"Inspect the requested change\",\"plan\":[\"Inspect code\",\"Implement after approval\"],\"questions\":[\"Proceed?\"],\"readyToImplement\":true}";
+        var orchestrator = prompt.IndexOf("Factory Orchestrator", StringComparison.OrdinalIgnoreCase) >= 0;
+        var threadId = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_THREAD_ID") ??
+            (orchestrator ? "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" : "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        var message = orchestrator
+            ? "Factory Orchestrator is ready."
+            : "FACTORY_PLAN\n{\"taskId\":\"" + Escape(taskId) + "\",\"understanding\":\"Inspect the requested change\",\"plan\":[\"Inspect code\",\"Implement after approval\"],\"questions\":[\"Proceed?\"],\"readyToImplement\":true}";
         var outputIndex = Array.IndexOf(args, "--output-last-message");
         if (outputIndex >= 0 && outputIndex + 1 < args.Length)
             File.WriteAllText(args[outputIndex + 1], message, new UTF8Encoding(false));

@@ -31,11 +31,21 @@ function Add-DoctorCheck {
     })
 }
 
-$versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
-$versionText = ([string]$versionResult.output).Trim()
-$versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
-$versionOk = [int]$versionResult.exitCode -eq 0 -and $versionMatch.Success -and [version]$versionMatch.Groups[1].Value -ge [version]"2.1.139"
-Add-DoctorCheck -Name "claudeVersion" -Passed $versionOk -Detail $versionText
+$versionText = "not selected"
+$versionMatch = [regex]::Match("", '(\d+\.\d+\.\d+)')
+$versionOk = $workerRuntime -eq "codex"
+if ($workerRuntime -eq "claude") {
+    try {
+        $versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
+        $versionText = ([string]$versionResult.output).Trim()
+        $versionMatch = [regex]::Match($versionText, '(\d+\.\d+\.\d+)')
+        $versionOk = [int]$versionResult.exitCode -eq 0 -and $versionMatch.Success -and [version]$versionMatch.Groups[1].Value -ge [version]"2.1.139"
+    } catch {
+        $versionText = $_.Exception.Message
+        $versionOk = $false
+    }
+}
+Add-DoctorCheck -Name "claudeVersion" -Passed $versionOk -Severity $(if ($workerRuntime -eq "codex") { "info" } else { "required" }) -Detail $versionText
 $requiredCmdlets = @("ConvertFrom-Json", "ConvertTo-Json")
 $missingCmdlets = @(
     $requiredCmdlets | Where-Object {
@@ -63,7 +73,11 @@ try {
 } catch {
     $workerAgentDetail = $_.Exception.Message
 }
-Add-DoctorCheck -Name "workerAgentDefinition" -Passed $workerAgentOk -Detail $workerAgentDetail
+Add-DoctorCheck `
+    -Name "workerAgentDefinition" `
+    -Passed $(if ($workerRuntime -eq "codex") { $true } else { $workerAgentOk }) `
+    -Severity $(if ($workerRuntime -eq "codex") { "info" } else { "required" }) `
+    -Detail $(if ($workerRuntime -eq "codex") { "Claude worker definition is not selected." } else { $workerAgentDetail })
 
 $resolutionCache = if ($null -ne $state.PSObject.Properties["agentResolutionCache"]) { $state.agentResolutionCache } else { $null }
 $currentClaudeVersion = if ($versionMatch.Success) { $versionMatch.Groups[1].Value } else { "" }
@@ -117,12 +131,17 @@ Add-DoctorCheck `
     -Severity $(if ($workerRuntime -eq "codex") { "required" } else { "info" }) `
     -Detail $(if ($workerRuntime -eq "codex") { "$([string]$codexCapabilities.version); $([string]$codexCapabilities.detail)" } else { "not selected" })
 
-$manifestPath = Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
+$manifestPath = if ($workerRuntime -eq "codex") {
+    Join-Path $context.pluginRoot ".codex-plugin\plugin.json"
+} else {
+    Join-Path $context.pluginRoot ".claude-plugin\plugin.json"
+}
 $manifestOk = $false
 $manifestDetail = "missing"
 try {
     $manifest = Read-FactoryJson -Path $manifestPath
-    $manifestOk = [string]$manifest.name -eq "factory"
+    $expectedManifestName = if ($workerRuntime -eq "codex") { "claude-factory-plugin" } else { "factory" }
+    $manifestOk = [string]$manifest.name -eq $expectedManifestName
     $manifestDetail = "$($manifest.name) v$($manifest.version)"
 } catch {
     $manifestDetail = $_.Exception.Message
@@ -132,7 +151,7 @@ Add-DoctorCheck -Name "pluginManifest" -Passed $manifestOk -Detail $manifestDeta
 Add-DoctorCheck -Name "repositoryRoot" -Passed (Test-Path -LiteralPath $context.repositoryRoot) -Detail ([string]$context.repositoryRoot)
 Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.projectData) -Detail ([string]$context.projectData)
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
-Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency), workers=$workerRuntime"
+Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency), runtime=$workerRuntime"
 
 $databaseIsolationSettings = $null
 try {
@@ -196,28 +215,43 @@ try {
 }
 Add-DoctorCheck -Name "factorySessionLock" -Passed $true -Severity "info" -Detail $(if ($factorySessionActive) { "active" } else { "not active" })
 
-$agentViewOk = $false
-$agentViewDetail = "unavailable"
-try {
-    $agentRowsResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("agents", "--json", "--all")
-    $agentRowsText = ([string]$agentRowsResult.output).Trim()
-    $agentViewOk = [int]$agentRowsResult.exitCode -eq 0
-    if ($agentViewOk) {
-        $parsedAgentRows = if ($agentRowsText) { $agentRowsText | ConvertFrom-Json } else { @() }
-        $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
-        $agentViewDetail = "$($agentRows.Count) known background session(s)"
-    } else {
-        $agentViewDetail = $agentRowsText
+$agentViewOk = $workerRuntime -eq "codex"
+$agentViewDetail = if ($workerRuntime -eq "codex") { "not used by the Codex runtime" } else { "unavailable" }
+if ($workerRuntime -eq "claude") {
+    try {
+        $agentRowsResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("agents", "--json", "--all")
+        $agentRowsText = ([string]$agentRowsResult.output).Trim()
+        $agentViewOk = [int]$agentRowsResult.exitCode -eq 0
+        if ($agentViewOk) {
+            $parsedAgentRows = if ($agentRowsText) { $agentRowsText | ConvertFrom-Json } else { @() }
+            $agentRows = @($parsedAgentRows | ForEach-Object { $_ })
+            $agentViewDetail = "$($agentRows.Count) known background session(s)"
+        } else {
+            $agentViewDetail = $agentRowsText
+        }
+    } catch {
+        $agentViewDetail = $_.Exception.Message
     }
-} catch {
-    $agentViewDetail = $_.Exception.Message
 }
-Add-DoctorCheck -Name "agentView" -Passed $agentViewOk -Detail $agentViewDetail
+Add-DoctorCheck -Name "agentView" -Passed $agentViewOk -Severity $(if ($workerRuntime -eq "codex") { "info" } else { "required" }) -Detail $agentViewDetail
 
-$mcpResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("mcp", "list")
-$mcpText = ([string]$mcpResult.output).Trim()
+$connectorCommand = if ($workerRuntime -eq "codex") { $CodexCommand } else { $ClaudeCommand }
+$mcpText = try {
+    $mcpResult = Invoke-FactoryNativeProcess -Command $connectorCommand -Arguments @("mcp", "list")
+    ([string]$mcpResult.output).Trim()
+} catch { $_.Exception.Message }
 $asanaMentioned = $mcpText -match '(?i)\basana\b'
-Add-DoctorCheck -Name "asanaConnector" -Passed $asanaMentioned -Severity "warning" -Detail $(if ($asanaMentioned) { "Asana appears in Claude MCP configuration." } else { "Asana was not found in 'claude mcp list'; confirm it inside the factory session with /mcp." })
+Add-DoctorCheck `
+    -Name "asanaConnector" `
+    -Passed $(if ($workerRuntime -eq "codex") { $true } else { $asanaMentioned }) `
+    -Severity $(if ($workerRuntime -eq "codex") { "info" } else { "warning" }) `
+    -Detail $(if ($asanaMentioned) {
+        "Asana appears in the selected runtime's MCP configuration."
+    } elseif ($workerRuntime -eq "codex") {
+        "not connected; optional for local tasks created with factory new"
+    } else {
+        "Asana was not found in 'claude mcp list'; confirm it inside the factory session with /mcp."
+    })
 
 $schedulerCheck = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-scheduler.ps1"),

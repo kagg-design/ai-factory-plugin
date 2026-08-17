@@ -271,7 +271,7 @@ function Get-CliGroup {
 }
 
 function Get-CliNextAction {
-    param($Task, $State)
+    param($Task, $State, $Config)
 
     $id = [string](Get-CliProperty -InputObject $Task -Name "id")
     $status = [string](Get-CliProperty -InputObject $Task -Name "status")
@@ -281,24 +281,26 @@ function Get-CliNextAction {
     $resultCommit = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $workerResult -Name "commit")
     $reason = Get-CliTaskReason -Task $Task
     $isMachineHeld = $status -eq "held" -and $reason -match '(?i)background session stopped|without a FACTORY_RESULT|recoverable|launch failed'
+    $runtime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
+    $prompt = if ($runtime -eq "codex") { "factory" } else { "/factory" }
 
     $primary = switch ($status) {
         "queued" {
             if ([bool](Get-CliProperty -InputObject $State -Name "paused" -Default $false) -or -not [bool](Get-CliProperty -InputObject $State -Name "active" -Default $false)) {
-                "/factory resume"
+                "$prompt resume"
             } else {
                 "automatic when worker capacity is available"
             }
         }
-        { $_ -in @("starting", "planning", "running", "awaiting-input") } { "/factory chat $id" }
-        "syncing" { "/factory sync $id" }
+        { $_ -in @("starting", "planning", "running", "awaiting-input") } { "$prompt chat $id" }
+        "syncing" { "$prompt sync $id" }
         "awaiting-review" {
             $review = Get-CliProperty -InputObject $Task -Name "review"
             if ([string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
                 [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
                 $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")) {
-                "/factory go $id"
-            } else { "/factory review $id" }
+                "$prompt go $id"
+            } else { "$prompt review $id" }
         }
         { $_ -in @("approved", "integrating", "production") } { "automatic; the factory will continue" }
         "held" {
@@ -306,18 +308,18 @@ function Get-CliNextAction {
             $hasApprovedPlan = [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
                 [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
                 $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")
-            if ($commit -and $resultCommit -eq $commit -and $hasApprovedPlan) { "/factory go $id" }
-            elseif ($commit -and $resultCommit -eq $commit) { "/factory review $id" }
-            elseif ($isMachineHeld) { "/factory retry $id" }
-            else { "/factory inspect $id" }
+            if ($commit -and $resultCommit -eq $commit -and $hasApprovedPlan) { "$prompt go $id" }
+            elseif ($commit -and $resultCommit -eq $commit) { "$prompt review $id" }
+            elseif ($isMachineHeld) { "$prompt retry $id" }
+            else { "$prompt inspect $id" }
         }
-        { $_ -in @("blocked", "failed", "rejected") } { "/factory inspect $id" }
-        "done" { "/factory inspect $id" }
-        default { "/factory inspect $id" }
+        { $_ -in @("blocked", "failed", "rejected") } { "$prompt inspect $id" }
+        "done" { "$prompt inspect $id" }
+        default { "$prompt inspect $id" }
     }
 
     $alternative = ""
-    if ($status -eq "awaiting-input") { $alternative = "/factory answer $id --text `"...`"" }
+    if ($status -eq "awaiting-input") { $alternative = "$prompt answer $id --text `"...`"" }
     elseif ($status -eq "awaiting-review") {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
@@ -325,7 +327,7 @@ function Get-CliNextAction {
             $alternative = "!factory go $id --direct"
         }
     }
-    elseif ($status -eq "held" -and -not $commit -and -not $isMachineHeld) { $alternative = "/factory answer $id --text `"Continue`"" }
+    elseif ($status -eq "held" -and -not $commit -and -not $isMachineHeld) { $alternative = "$prompt answer $id --text `"Continue`"" }
     elseif ($status -eq "held" -and $commit -and $resultCommit -eq $commit) {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
@@ -333,10 +335,10 @@ function Get-CliNextAction {
             $alternative = "!factory go $id --direct"
         }
     }
-    elseif ($status -in @("blocked", "failed") -and $session.Exists) { $alternative = "/factory chat $id" }
-    elseif ($status -eq "rejected") { $alternative = "/factory reject $id" }
+    elseif ($status -in @("blocked", "failed") -and $session.Exists) { $alternative = "$prompt chat $id" }
+    elseif ($status -eq "rejected") { $alternative = "$prompt reject $id" }
 
-    return [pscustomobject]@{ Primary = $primary; Alternative = $alternative }
+    return [pscustomobject]@{ Primary = $primary; Alternative = $alternative; Prompt = $prompt }
 }
 
 function Add-CliTaskTree {
@@ -344,6 +346,7 @@ function Add-CliTaskTree {
         [Collections.Generic.List[string]]$Lines,
         $Task,
         $State,
+        $Config,
         [bool]$IsLast
     )
 
@@ -385,9 +388,9 @@ function Add-CliTaskTree {
     if ($worktree -and $status -notin @("approved", "integrating", "production", "done")) {
         $details.Add("View in browser: factory preview $id")
     }
-    $action = Get-CliNextAction -Task $Task -State $State
+    $action = Get-CliNextAction -Task $Task -State $State -Config $Config
     $details.Add("$($script:Tree.Arrow) Next in orchestrator: $($action.Primary)")
-    if ($session.Exists -and $action.Primary -ne "/factory chat $id") { $details.Add("Open: /factory chat $id") }
+    if ($session.Exists -and $action.Primary -ne "$($action.Prompt) chat $id") { $details.Add("Open: $($action.Prompt) chat $id") }
     if ($action.Alternative) { $details.Add("Alternative: $($action.Alternative)") }
 
     for ($index = 0; $index -lt $details.Count; $index++) {
@@ -472,7 +475,7 @@ function Write-CliStatus {
     $lines = New-Object Collections.Generic.List[string]
     $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory $($script:Tree.Horizontal) $projectName")
     $workerRuntime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
-    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) workers $activeWorkers/$concurrency ($workerRuntime) $($script:Tree.Horizontal) scheduler $scheduler")
+    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) runtime $workerRuntime $($script:Tree.Horizontal) workers $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
     if ($cronId -and $schedulerStatus -eq "running") {
         $lines.Add("$($script:Tree.Vertical)  Legacy Claude cron $cronId will remove itself on its next one-shot tick.")
     }
@@ -490,7 +493,7 @@ function Write-CliStatus {
         if ($groupTasks.Count -eq 0) { continue }
         $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $($groupTasks.Count)")
         for ($index = 0; $index -lt $groupTasks.Count; $index++) {
-            Add-CliTaskTree -Lines $lines -Task $groupTasks[$index] -State $State -IsLast ($index -eq $groupTasks.Count - 1)
+            Add-CliTaskTree -Lines $lines -Task $groupTasks[$index] -State $State -Config $Config -IsLast ($index -eq $groupTasks.Count - 1)
         }
     }
 
@@ -522,7 +525,7 @@ function Add-CliInspectLine {
 }
 
 function Write-CliInspect {
-    param($Context, $State, [string]$TaskId, [string]$ReconcileWarning)
+    param($Context, $Config, $State, [string]$TaskId, [string]$ReconcileWarning)
 
     if (-not $TaskId) { throw "inspect requires a task ID: factory inspect <task-id>" }
     $matches = @($State.tasks | Where-Object { [string]$_.id -eq $TaskId })
@@ -531,7 +534,7 @@ function Write-CliInspect {
     $id = [string]$task.id
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
     $status = [string](Get-CliProperty -InputObject $task -Name "status")
-    $action = Get-CliNextAction -Task $task -State $State
+    $action = Get-CliNextAction -Task $task -State $State -Config $Config
     $lines = New-Object Collections.Generic.List[string]
     Add-CliWrappedLine `
         -Lines $lines `
@@ -1167,7 +1170,7 @@ function Write-CliHelp {
             "  factory purge [-Yes] [-Force]",
             "  factory help [command]",
             "",
-            "Claude Orchestrator shell mode:",
+            "Orchestrator native shell mode (Claude or Codex):",
             "  !factory status",
             "  !factory inspect <task-id>",
             "  !factory preview <task-id>",
@@ -1273,8 +1276,9 @@ function Write-CliHelp {
         "start" {
             @(
                 "factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
-                "Starts or reuses the repository's Claude Factory Orchestrator and starts its native scheduler.",
-                "-Agent changes the private per-project runtime for newly launched workers; it does not replace the Claude orchestrator.",
+                "Starts or reuses the repository's Factory Orchestrator and starts its native scheduler.",
+                "Without -Agent, both orchestrator and new workers use Claude. '-Agent codex' selects Codex for both.",
+                "Existing worker attempts keep the runtime with which they were launched.",
                 "Run this from PowerShell, not from inside an already open orchestrator."
             ) | Write-Output
         }
@@ -1315,7 +1319,7 @@ function Write-CliHelp {
             @(
                 "factory doctor",
                 "Runs deterministic local diagnostics and prints OK/WARN/FAIL checks.",
-                "It inspects Git remote refs, invokes Claude CLI diagnostics, and may connect to the configured test database."
+                "It inspects Git remote refs, verifies the selected Claude or Codex runtime, and may connect to the configured test database."
             ) | Write-Output
         }
         "help" { Write-CliHelp -Topic "" }
@@ -1463,7 +1467,7 @@ switch ($normalizedCommand) {
     }
     "inspect" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "inspect accepts exactly one task ID." }
-        Write-CliInspect -Context $context -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
+        Write-CliInspect -Context $context -Config $config -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
     }
     "chat" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "chat accepts exactly one task ID." }

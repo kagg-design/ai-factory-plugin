@@ -8,14 +8,13 @@ and authorizing integration.
 
 The factory has four distinct layers:
 
-1. **Orchestrator** — the main `Claude Factory Orchestrator` conversation.
-   Run all `/factory ...` commands there.
+1. **Orchestrator** — the main Claude or Codex Factory conversation. Start it
+   with `factory start` or `factory start -Agent codex`.
 2. **Factory task** — a persistent queue entry created by native code. An
    Asana ID looks like `1216632072822682`, another adapter ID looks like
    `linear:ENG-123`, and an operator-created task uses `local:...`.
-3. **Worker** — a separate Claude Code background session for one task. It has
-   a short session ID such as `1a20569f` and a name such as
-   `factory-1216632072822682-surface-pending-pto-requests`.
+3. **Worker** — a separate Claude Code or Codex session for one task. Claude
+   workers appear in Agent View; Codex workers have a resumable thread UUID.
 4. **Native scheduler** — one hidden PowerShell process that reconciles workers,
    fills capacity, executes formally approved publication plans, publishes a
    heartbeat, and sleeps without consuming AI turns.
@@ -30,10 +29,9 @@ the orchestrator conversation:
 Closing the orchestrator or starting a fresh orchestrator conversation does
 not remove tasks, worker sessions, branches, commits, or worktrees.
 
-The launcher also stores the orchestrator's exact conversation UUID in the
-private project runtime. Normal startup attaches to that conversation when it
-is in Agent View, or resumes it after an ordinary `Ctrl+C` exit. This prevents
-accidental duplicate orchestrators from normal repeated startup.
+The launcher stores separate exact conversation UUIDs for the Claude and Codex
+orchestrators in private project runtime. Normal startup resumes the selected
+conversation. A per-repository mutex prevents two live orchestrators.
 
 ## 2. Safe startup
 
@@ -44,16 +42,17 @@ cd C:\laragon\www\motivehr
 factory start
 ```
 
-Select the runtime for newly launched workers when needed:
+Claude is the default full runtime. Select Codex for both the orchestrator and
+new workers when needed:
 
 ```powershell
 factory start -Agent claude
 factory start -Agent codex
 ```
 
-The lead/orchestrator remains Claude in both cases. The selection is stored in
-the private project `config.json`, survives restart, and affects only new
-attempts. Existing Claude and Codex workers can coexist while they finish.
+Omitting `-Agent` always selects Claude. The selection is stored in private
+project `config.json` and affects only new attempts. Existing Claude and Codex
+workers keep their original runtime and can coexist while they finish.
 
 Then check its state without waiting for AI interpretation:
 
@@ -68,10 +67,18 @@ code:
 !factory status
 ```
 
-The AI-backed compatibility form remains available:
+In Claude, the AI-backed form is:
 
 ```text
 /factory status
+```
+
+In Codex, use natural commands without `$factory`:
+
+```text
+factory status
+factory new
+factory review <task-id>
 ```
 
 If orchestration was stopped or paused:
@@ -104,8 +111,9 @@ interactive or background orchestrator is live.
 
 ## 3. Where commands belong
 
-Run `/factory ...` commands inside the `Claude Factory Orchestrator`
-conversation.
+Run `/factory ...` commands inside Claude. Inside Codex, use `factory ...` or a
+clear command such as `review <task-id>`. `$factory` is only an internal skill
+identifier and is not part of the operator interface.
 
 Deterministic operations also have a native fast path:
 
@@ -129,7 +137,7 @@ Outside Claude, `factory start`, `factory paths`, `factory config`, and
 `factory scheduler` replace the old root-script commands. The `.ps1` files
 remain internal implementations and compatibility entry points.
 
-The `!` is Claude Code shell mode. The extensionless `factory` launcher in the
+The `!` is direct shell mode in both TUIs. The extensionless `factory` launcher in the
 plugin root translates the Bash/WSL path when necessary and delegates to the
 same `factory.ps1` implementation. The plugin root must be on `PATH`, as in the
 installation instructions. In an ordinary PowerShell terminal, omit `!` and
@@ -159,7 +167,11 @@ code judgment (`sync` and `review`) also use `/factory ...`. A plain native
 exist. Repeat with `-Yes` or `--yes` to remove the task and its artifacts, or
 use `-Keep` or `--keep` to retain artifacts in rejected state.
 
-Pressing `←` opens **Agent View**. Agent View is a background-session
+`factory new` is fully local and requires no Asana connection. Asana is needed
+only for importing an Asana URL; connect that adapter later if a project needs
+it.
+
+In Claude, pressing `←` opens **Agent View**. Agent View is a background-session
 dispatcher, not the orchestrator prompt.
 
 - `←` moves from the current conversation to Agent View.
@@ -169,6 +181,10 @@ dispatcher, not the orchestrator prompt.
 
 If `/factory status` is entered directly in Agent View, Claude may dispatch a
 new agent for it. Return to the orchestrator and run the command there.
+
+Codex does not mirror Claude Agent View. `factory start -Agent codex` resumes
+the exact stored orchestrator thread, and `factory chat <task-id>` prints the
+exact command for a Codex worker thread.
 
 ### Command help
 

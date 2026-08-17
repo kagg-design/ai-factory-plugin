@@ -1,0 +1,7 @@
+interface:
+  display_name: "Factory Orchestrator"
+  short_description: "Operate local Factory tasks from Codex"
+  default_prompt: "Use $factory to show the current factory status."
+
+policy:
+  allow_implicit_invocation: true

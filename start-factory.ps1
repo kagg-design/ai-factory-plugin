@@ -24,6 +24,30 @@ $standaloneRoot = Join-Path $pluginRoot "standalone"
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 . (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
+. (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1")
+
+function Start-FactoryLauncherScheduler {
+    param($Context, [string]$PluginRoot, [string]$ClaudeCommand)
+
+    $factoryConfig = Read-FactoryJson -Path ([string]$Context.configPath)
+    $nativeScheduler = if ($null -ne $factoryConfig.PSObject.Properties["nativeScheduler"]) {
+        $factoryConfig.nativeScheduler
+    } else { $null }
+    if ($null -ne $nativeScheduler -and (-not [bool]$nativeScheduler.enabled -or -not [bool]$nativeScheduler.startWithOrchestrator)) {
+        return
+    }
+    $schedulerResult = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PluginRoot "scripts\factory-scheduler.ps1"),
+        "-Action", "start", "-Repository", [string]$Context.repositoryRoot,
+        "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$Context.runtimeHome
+    )
+    if ([int]$schedulerResult.exitCode -eq 0) {
+        $schedulerStart = [string]$schedulerResult.stdout | ConvertFrom-Json
+        Write-Host "Native scheduler: PID $($schedulerStart.scheduler.pid)" -ForegroundColor Green
+    } else {
+        Write-Warning "Native scheduler did not start: $($schedulerResult.output)"
+    }
+}
 $env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) {
     [IO.Path]::GetFullPath($RuntimeHome)
 } else {
@@ -36,19 +60,18 @@ if ($Model) {
 $contextJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $Repository -Initialize
 $context = $contextJson | ConvertFrom-Json
 $factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
-if ($Agent) {
-    if ($Agent -eq "codex") {
-        $resolvedCodexCommand = Resolve-FactoryCodexCommand -Config $factoryConfig -ExplicitCommand $CodexCommand
-        $capabilities = Get-FactoryCodexCapabilities -CodexCommand $resolvedCodexCommand
-        if (-not [bool]$capabilities.supported) {
-            throw "Cannot select the Codex worker runtime: $($capabilities.detail)"
-        }
-        Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $resolvedCodexCommand
+$selectedAgent = if ($Agent) { $Agent } else { "claude" }
+$resolvedCodexCommand = ""
+if ($selectedAgent -eq "codex") {
+    $resolvedCodexCommand = Resolve-FactoryCodexCommand -Config $factoryConfig -ExplicitCommand $CodexCommand
+    $capabilities = Get-FactoryCodexCapabilities -CodexCommand $resolvedCodexCommand
+    if (-not [bool]$capabilities.supported) {
+        throw "Cannot start the Codex factory runtime: $($capabilities.detail)"
     }
-    Set-FactoryProperty -Target $factoryConfig -Name "workerAgent" -Value $Agent
-    Write-FactoryJsonAtomic -Path ([string]$context.configPath) -Value $factoryConfig
+    Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $resolvedCodexCommand
 }
-$workerAgent = if ([string]$factoryConfig.workerAgent) { [string]$factoryConfig.workerAgent } else { "claude" }
+Set-FactoryProperty -Target $factoryConfig -Name "workerAgent" -Value $selectedAgent
+$workerAgent = $selectedAgent
 
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")
@@ -63,14 +86,38 @@ try {
         throw "A factory session is already running for '$($context.repositoryRoot)'."
     }
 
+    # Runtime selection changes only after this launcher owns the project's lead
+    # session. A failed attempt to switch a live factory must not retarget workers.
+    Write-FactoryJsonAtomic -Path ([string]$context.configPath) -Value $factoryConfig
+
     Write-Host "Repository: $($context.repositoryRoot)" -ForegroundColor Cyan
     Write-Host "Project config: $($context.configPath)" -ForegroundColor Cyan
     Write-Host "Factory state: $($context.statePath)" -ForegroundColor Cyan
     Write-Host "Worktrees: $($context.worktreeRoot)" -ForegroundColor Cyan
-    Write-Host "Agent View: claude agents" -ForegroundColor Cyan
+    Write-Host "Orchestrator runtime: $selectedAgent" -ForegroundColor Cyan
+    if ($selectedAgent -eq "claude") {
+        Write-Host "Session view: claude agents" -ForegroundColor Cyan
+    } else {
+        Write-Host "Session view: the stored Codex thread is resumed directly" -ForegroundColor Cyan
+    }
     Write-Host "Worker runtime: $workerAgent" -ForegroundColor Cyan
-    Write-Host "Command: /factory" -ForegroundColor Cyan
+    Write-Host "Command: $(if ($selectedAgent -eq 'claude') { '/factory' } else { 'factory' })" -ForegroundColor Cyan
     Write-Host ""
+
+    if ($selectedAgent -eq "codex") {
+        Start-FactoryLauncherScheduler -Context $context -PluginRoot $pluginRoot -ClaudeCommand $ClaudeCommand
+        $factoryCodexExitCode = 1
+        Start-FactoryCodexOrchestrator `
+            -CodexCommand $resolvedCodexCommand `
+            -PluginRoot $pluginRoot `
+            -Context $context `
+            -New:$New `
+            -Resume:$Resume `
+            -Continue:$Continue `
+            -Model $Model `
+            -ExitCodeVariableName "factoryCodexExitCode"
+        exit $factoryCodexExitCode
+    }
 
     $identityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
     $identity = if (Test-Path -LiteralPath $identityPath) {
@@ -106,23 +153,7 @@ try {
         throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Attach to it or stop/remove it first."
     }
 
-    $factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
-    $nativeScheduler = if ($null -ne $factoryConfig.PSObject.Properties["nativeScheduler"]) {
-        $factoryConfig.nativeScheduler
-    } else { $null }
-    if ($null -eq $nativeScheduler -or ([bool]$nativeScheduler.enabled -and [bool]$nativeScheduler.startWithOrchestrator)) {
-        $schedulerResult = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\factory-scheduler.ps1"),
-            "-Action", "start", "-Repository", [string]$context.repositoryRoot,
-            "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
-        )
-        if ([int]$schedulerResult.exitCode -eq 0) {
-            $schedulerStart = [string]$schedulerResult.stdout | ConvertFrom-Json
-            Write-Host "Native scheduler: PID $($schedulerStart.scheduler.pid)" -ForegroundColor Green
-        } else {
-            Write-Warning "Native scheduler did not start: $($schedulerResult.output)"
-        }
-    }
+    Start-FactoryLauncherScheduler -Context $context -PluginRoot $pluginRoot -ClaudeCommand $ClaudeCommand
 
     if ($null -ne $background) {
         $backgroundId = [string]$background.id

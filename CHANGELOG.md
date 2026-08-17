@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- Made `-Agent` select the complete Factory runtime: `factory start` defaults
+  to Claude for both orchestrator and new workers, while `factory start -Agent
+  codex` bootstraps or resumes a dedicated Codex orchestrator and uses Codex for
+  new workers. Claude and Codex keep separate private conversation identities,
+  share the per-project single-orchestrator lock, and use one canonical Factory
+  protocol through a linked user-level Codex skill without target-repository
+  files. Codex accepts `factory review <id>` and other natural Factory commands;
+  `$factory` is not an operator command.
 - Added an extensionless Bash-compatible `factory` launcher so Claude Code's
   `!factory ...` direct shell commands reach the native PowerShell CLI instead
   of failing with `factory: command not found`.
@@ -11,8 +19,8 @@
   identity, safely reuses matching dependencies, and cleans Vite/dependency
   artifacts on stop. Approval, rejection, task/project cleanup, purge, and
   factory stop now shut preview down before integration or removal.
-- Added private per-project worker runtime selection with `factory start
-  -Agent claude|codex`. Claude remains the orchestrator; Codex workers use the
+- Added the initial private per-project worker runtime selection with `factory
+  start -Agent claude|codex`. Codex workers use the
   supported `codex exec --json` session contract, isolated worktrees and test
   databases, PID-aware reconciliation, a prohibited-operation Git proxy,
   capture-aware interactive resume, doctor/status visibility, and guarded
