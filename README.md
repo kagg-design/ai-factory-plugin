@@ -437,6 +437,13 @@ review and approval audit, pins the immutable plan hash, and runs the same
 isolated checks before each push. It refuses to override an existing
 `changes-required` or `blocked` review for that commit.
 
+`factory status` advertises the direct path only when the saved task result and
+private publication configuration pass a read-only preflight. Running the
+command directly performs the same preflight before any review state is
+written and names each blocking private setting with `factory config edit` as
+the corrective command. `factory doctor` reports this publication readiness as
+a warning rather than declaring an otherwise usable factory unhealthy.
+
 Other decisions:
 
 ```text
@@ -570,11 +577,12 @@ the background process receives only a short file pointer. Reconciliation binds
 identity-bearing metadata only through the background ID or full session UUID,
 so an older same-name Agent View row cannot replace the live attempt.
 `/factory doctor` reports the PowerShell runtime, required JSON cmdlets, worker
-definition readiness, fallback deviations, and the cached worker-agent
-resolution path. Having no working path for the installed CLI is a required
-failure. The worker Git guard fails closed when its hook payload cannot be
-parsed; an internal guard error is never treated as permission to run a
-prohibited Git operation.
+definition readiness, fallback deviations, the cached worker-agent resolution
+path, and publication-pipeline readiness. A disabled publication pipeline is a
+warning because planning and implementation remain usable; having no working
+worker-launch path for the installed CLI is a required failure. The worker Git
+guard fails closed when its hook payload cannot be parsed; an internal guard
+error is never treated as permission to run a prohibited Git operation.
 
 
 A session that stops without `FACTORY_RESULT` is machine-held and can be resumed

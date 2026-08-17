@@ -153,6 +153,19 @@ Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.pro
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
 Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency), runtime=$workerRuntime"
 
+$publicationReadiness = Get-FactoryPublicationReadiness -Config $config -State $state
+$publicationDetail = if ([bool]$publicationReadiness.ready) {
+    $remoteName = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
+    "ready for $remoteName/$($config.developmentBranch) -> $remoteName/$($config.productionBranch); $(@($publicationReadiness.integrationTestCommands).Count) integration and $(@($publicationReadiness.releaseTestCommands).Count) release check(s)"
+} else {
+    "not ready: $(@($publicationReadiness.blockers) -join '; '); run 'factory config edit'"
+}
+Add-DoctorCheck `
+    -Name "publicationPipeline" `
+    -Passed ([bool]$publicationReadiness.ready) `
+    -Severity "warning" `
+    -Detail $publicationDetail
+
 $databaseIsolationSettings = $null
 try {
     $databaseIsolationSettings = Get-FactoryTestDatabaseSettings -Config $config -RepositoryRoot ([string]$context.repositoryRoot)

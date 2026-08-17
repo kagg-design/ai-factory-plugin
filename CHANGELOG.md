@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Added side-effect-free publication readiness checks for direct approval.
+  Status now advertises `go --direct` only when the task and private
+  publication settings are ready, the command fails early with concise
+  actionable blockers, and `factory doctor` reports publication readiness as
+  a non-fatal warning when automatic push, promotion, or trusted checks are
+  unavailable.
 - Made local worker sessions recognizable in Agent View. Their display names
   now use the task's stable eight-character nonce plus the operator-supplied
   title, omit the timestamp and redundant filesystem artifact hash, preserve

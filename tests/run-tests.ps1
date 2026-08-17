@@ -667,9 +667,14 @@ try {
     $reviewCliTask = New-FactoryTestTask -Id "review-cli-task" -Title "Review CLI task without a stale reason" -Now $now
     $reviewCliTask.url = "https://app.asana.com/0/0/review-cli-task"
     $reviewCliTask.status = "awaiting-review"
-    $reviewCliTask.commit = "1234567890abcdef"
+    $reviewCliTask.commit = "1234567890abcdef1234567890abcdef12345678"
     $reviewCliTask.plan = [pscustomobject]@{ questions = @([Text.Encoding]::GetEncoding(437).GetString([Text.Encoding]::UTF8.GetBytes($staleQuestion))) }
-    $reviewCliTask.workerResult = [pscustomobject]@{ commit = "1234567890abcdef"; notes = "Ready."; tests = @(); changedFiles = @() }
+    $reviewCliTask.workerResult = [pscustomobject]@{
+        commit = $reviewCliTask.commit
+        notes = "Ready."
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        changedFiles = @()
+    }
     $rejectCliTask = New-FactoryTestTask -Id "reject-cli-task" -Title "Disposable CLI task without artifacts" -Now $now
     $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $doneCliTask, $rejectCliTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
@@ -690,9 +695,23 @@ try {
     Assert-True (-not $cliStatus.Contains($mojibakeFixture)) "Factory CLI status printed raw mojibake."
     Assert-True (-not $cliStatus.Contains($staleQuestion)) "Factory CLI status presented a stale plan question as the review reason."
     Assert-True ($cliStatus.Contains("/factory inspect held-cli-task")) "Factory CLI status omitted the exact next orchestrator command."
-    Assert-True ($cliStatus.Contains("!factory go review-cli-task --direct")) "Factory CLI status omitted direct approval as a review alternative."
+    Assert-True (-not $cliStatus.Contains("!factory go review-cli-task --direct")) "Factory CLI status advertised direct approval while publication was not configured."
     Assert-True ($cliStatus.Contains("History: factory status done")) "Factory CLI status does not collapse completed history."
     Assert-True (-not $cliStatus.Contains("Completed CLI history task")) "Factory CLI default status expanded completed history."
+
+    $previousDirectPreflightErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $directPreflightOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath go review-cli-task --direct -Repository $repository -ClaudeCommand $fakeClaude 2>&1 | ForEach-Object { [string]$_ })
+        $directPreflightExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousDirectPreflightErrorAction
+    }
+    $directPreflightText = $directPreflightOutput -join "`n"
+    Assert-True ($directPreflightExit -ne 0) "Direct approval preflight accepted disabled publication."
+    Assert-True ($directPreflightText.Contains("autoPushDevelopment=false")) "Direct approval preflight did not name the disabled setting."
+    Assert-True ($directPreflightText.Contains("factory config edit")) "Direct approval preflight omitted the corrective command."
+    Assert-True (-not $directPreflightText.Contains("record-review.ps1 exited")) "Direct approval failure still leaked a nested review-script error."
 
     $cliHeld = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status held -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cliHeld.Contains("held-cli-task")) "Factory CLI held filter omitted the held task."
@@ -1141,6 +1160,24 @@ try {
     Assert-Equal 64 ([string]$recordedReview.planHash).Length "Formal review plan was not hashed."
     Assert-True (-not (Test-Path -LiteralPath $reviewPath)) "Formal review input was not removed from private sessions."
 
+    $publicationReadyState = Read-FactoryJson -Path $context.statePath
+    $readyDirectCliTask = New-FactoryTestTask -Id "ready-direct-cli-task" -Title "Ready direct CLI task" -Now $now
+    $readyDirectCliTask.status = "held"
+    $readyDirectCliTask.commit = "abcdef1234567890abcdef1234567890abcdef12"
+    $readyDirectCliTask.workerResult = [pscustomobject]@{
+        commit = $readyDirectCliTask.commit
+        notes = "Ready."
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        changedFiles = @()
+    }
+    $publicationReadyState.tasks = @($publicationReadyState.tasks) + @($readyDirectCliTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $publicationReadyState
+    $publicationReadyStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status held -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($publicationReadyStatus.Contains("!factory go ready-direct-cli-task --direct")) "Factory CLI status omitted direct approval after publication became ready."
+    $publicationReadyState = Read-FactoryJson -Path $context.statePath
+    $publicationReadyState.tasks = @($publicationReadyState.tasks | Where-Object { [string]$_.id -ne "ready-direct-cli-task" })
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $publicationReadyState
+
     $tamperedState = Read-FactoryJson -Path $context.statePath
     $savedReview = $tamperedState.tasks[0].review | ConvertTo-Json -Depth 30 | ConvertFrom-Json
     $tamperedState.tasks[0].review.integrationPlan.integrationTestCommands = @("git diff --check", "git status --short")
@@ -1582,12 +1619,14 @@ try {
     $agentDefinitionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentDefinition" })[0]
     $resolutionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
     $databaseIsolationCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "testDatabaseIsolation" })[0]
+    $publicationCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "publicationPipeline" })[0]
     Assert-True ([bool]$runtimeCheck.passed) "Factory doctor did not verify PowerShell dependencies."
     Assert-True ([bool]$agentDefinitionCheck.passed) "Factory doctor did not verify the worker definition."
     Assert-True ([string]$agentDefinitionCheck.detail -match 'additive system-prompt') "Factory doctor hid the additive fallback semantics."
     Assert-Equal "required" ([string]$resolutionCheck.severity) "Worker resolution is not a required doctor check."
     Assert-True ([string]$resolutionCheck.detail -match 'system-prompt') "Factory doctor hid the active system fallback."
     Assert-True ([bool]$databaseIsolationCheck.passed) "Factory doctor did not validate isolated database prerequisites."
+    Assert-True ([bool]$publicationCheck.passed) "Factory doctor did not report the configured publication pipeline as ready."
     $cliDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") doctor -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
     Assert-True ($cliDoctor.Contains("[OK] powershellRuntime")) "Factory CLI doctor did not render successful checks."
     Assert-True ($cliDoctor.Contains("Healthy")) "Factory CLI doctor did not render its final verdict."

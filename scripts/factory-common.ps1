@@ -270,6 +270,132 @@ function Resolve-FactoryAsanaTaskUrl {
     }
 }
 
+function Resolve-FactoryReviewCommands {
+    param($InputValue = @(), $ConfigValue = @(), $SavedValue = @())
+
+    $commands = @($InputValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($commands.Count -eq 0) {
+        $commands = @($ConfigValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    }
+    if ($commands.Count -eq 0) {
+        $commands = @($SavedValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    }
+    foreach ($command in $commands) {
+        if ($command.Length -gt 4096 -or $command -match '[\r\n]') {
+            throw "Review test commands must be single-line strings no longer than 4096 characters."
+        }
+    }
+    return @($commands)
+}
+
+function Get-FactoryPublicationReadiness {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$State
+    )
+
+    $blockers = New-Object System.Collections.Generic.List[string]
+    if (-not [bool](Get-FactoryNestedValue -Target $Config -Name "autoPushDevelopment" -Default $false)) {
+        $blockers.Add("autoPushDevelopment=false")
+    }
+    if (-not [bool](Get-FactoryNestedValue -Target $Config -Name "autoPromoteToProduction" -Default $false)) {
+        $blockers.Add("autoPromoteToProduction=false")
+    }
+
+    $developmentBranch = ([string](Get-FactoryNestedValue -Target $Config -Name "developmentBranch" -Default "")).Trim()
+    $productionBranch = ([string](Get-FactoryNestedValue -Target $Config -Name "productionBranch" -Default "")).Trim()
+    if (-not $developmentBranch) { $blockers.Add("developmentBranch is not configured") }
+    if (-not $productionBranch) { $blockers.Add("productionBranch is not configured") }
+
+    $productionMode = [string](Get-FactoryNestedValue -Target $Config -Name "productionMode" -Default "merge-develop")
+    $allowsUnrelatedDevelopment = [bool](Get-FactoryNestedValue -Target $Config -Name "allowUnrelatedDevelopCommitsToProduction" -Default $false)
+    if ($productionMode -notin @("merge-develop", "task-only")) {
+        $blockers.Add("productionMode '$productionMode' is unsupported")
+    } elseif (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment) {
+        $blockers.Add("productionMode '$productionMode' conflicts with allowUnrelatedDevelopCommitsToProduction=$allowsUnrelatedDevelopment")
+    }
+
+    $savedCommands = Get-FactoryNestedValue -Target $State -Name "resolvedCommands"
+    $integrationCommands = @()
+    $releaseCommands = @()
+    try {
+        $integrationCommands = @(Resolve-FactoryReviewCommands `
+            -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "integrationTestCommands" -Default @()) `
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()))
+        if ($integrationCommands.Count -eq 0) {
+            $blockers.Add("no trusted integration test commands are configured or saved")
+        }
+        $releaseCommands = @(Resolve-FactoryReviewCommands `
+            -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "releaseTestCommands" -Default @()) `
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()))
+        if ($releaseCommands.Count -eq 0 -and $integrationCommands.Count -gt 0) {
+            $releaseCommands = @($integrationCommands)
+        }
+    } catch {
+        $blockers.Add($_.Exception.Message)
+    }
+
+    return [pscustomobject]@{
+        ready = ($blockers.Count -eq 0)
+        blockers = @($blockers | ForEach-Object { $_ })
+        integrationTestCommands = @($integrationCommands)
+        releaseTestCommands = @($releaseCommands)
+    }
+}
+
+function Get-FactoryDirectApprovalReadiness {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]$Task
+    )
+
+    $publication = Get-FactoryPublicationReadiness -Config $Config -State $State
+    $blockers = New-Object System.Collections.Generic.List[string]
+    foreach ($blocker in @($publication.blockers)) { $blockers.Add([string]$blocker) }
+
+    $taskId = [string](Get-FactoryNestedValue -Target $Task -Name "id" -Default "unknown")
+    $status = [string](Get-FactoryNestedValue -Target $Task -Name "status" -Default "")
+    if ($status -notin @("awaiting-review", "held")) {
+        $blockers.Add("task '$taskId' is '$status', not awaiting review")
+    }
+
+    $commit = ([string](Get-FactoryNestedValue -Target $Task -Name "commit" -Default "")).ToLowerInvariant()
+    if ($commit -notmatch '^[0-9a-f]{40}$') {
+        $blockers.Add("task '$taskId' has no validated 40-character worker commit")
+    }
+    $workerResult = Get-FactoryNestedValue -Target $Task -Name "workerResult"
+    $workerCommit = ([string](Get-FactoryNestedValue -Target $workerResult -Name "commit" -Default "")).ToLowerInvariant()
+    if ($commit -match '^[0-9a-f]{40}$' -and $workerCommit -ne $commit) {
+        $blockers.Add("the validated worker result does not match commit '$commit'")
+    }
+
+    $workerTests = @(Get-FactoryNestedValue -Target $workerResult -Name "tests" -Default @())
+    if (@($workerTests | Where-Object { [string]$_.status -eq "failed" }).Count -gt 0) {
+        $blockers.Add("the worker result contains failed checks")
+    } elseif (@($workerTests | Where-Object { [string]$_.status -eq "passed" }).Count -eq 0) {
+        $blockers.Add("the worker result contains no passed checks")
+    }
+
+    $review = Get-FactoryNestedValue -Target $Task -Name "review"
+    $reviewCommit = [string](Get-FactoryNestedValue -Target $review -Name "commit" -Default "")
+    $reviewVerdict = [string](Get-FactoryNestedValue -Target $review -Name "verdict" -Default "")
+    if ($reviewCommit -eq $commit -and $reviewVerdict -in @("changes-required", "blocked")) {
+        $blockers.Add("the existing '$reviewVerdict' review must be resolved first")
+    }
+
+    $backgroundSession = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
+    if ([string](Get-FactoryNestedValue -Target $backgroundSession -Name "state" -Default "") -eq "working") {
+        $blockers.Add("the worker session is still working")
+    }
+
+    return [pscustomobject]@{
+        ready = ($blockers.Count -eq 0)
+        blockers = @($blockers | ForEach-Object { $_ })
+        publication = $publication
+    }
+}
+
 function Get-FactoryIntegrationPlanCanonicalValue {
     param([Parameter(Mandatory = $true)]$Plan)
 

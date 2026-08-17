@@ -20,24 +20,6 @@ function Test-ReviewPathInsideRoot {
     )
 }
 
-function Get-ReviewCommands {
-    param($InputValue, $ConfigValue, $SavedValue)
-
-    $commands = @($InputValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-    if ($commands.Count -eq 0) {
-        $commands = @($ConfigValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-    }
-    if ($commands.Count -eq 0) {
-        $commands = @($SavedValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-    }
-    foreach ($command in $commands) {
-        if ($command.Length -gt 4096 -or $command -match '[\r\n]') {
-            throw "Review test commands must be single-line strings no longer than 4096 characters."
-        }
-    }
-    return @($commands)
-}
-
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $resolvedReviewPath = [IO.Path]::GetFullPath($ReviewPath)
@@ -144,7 +126,7 @@ try {
         }
 
         $savedCommands = Get-FactoryNestedValue -Target $state -Name "resolvedCommands"
-        $integrationCommands = @(Get-ReviewCommands `
+        $integrationCommands = @(Resolve-FactoryReviewCommands `
             -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "integrationTestCommands" -Default @()) `
             -ConfigValue (Get-FactoryNestedValue -Target $config -Name "integrationTestCommands" -Default @()) `
             -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()))
@@ -154,7 +136,7 @@ try {
             }
             throw "Approved review requires at least one integration test command."
         }
-        $releaseCommands = @(Get-ReviewCommands `
+        $releaseCommands = @(Resolve-FactoryReviewCommands `
             -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "releaseTestCommands" -Default @()) `
             -ConfigValue (Get-FactoryNestedValue -Target $config -Name "releaseTestCommands" -Default @()) `
             -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()))

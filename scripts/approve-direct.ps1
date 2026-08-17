@@ -34,10 +34,12 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $state = Read-FactoryJson -Path ([string]$context.statePath)
 $task = Get-FactoryTask -State $state -TaskId $TaskId
-$commit = ([string]$task.commit).ToLowerInvariant()
-if ($commit -notmatch '^[0-9a-f]{40}$') {
-    throw "Task '$TaskId' has no validated worker commit to approve directly."
+$config = Read-FactoryJson -Path ([string]$context.configPath)
+$readiness = Get-FactoryDirectApprovalReadiness -Config $config -State $state -Task $task
+if (-not [bool]$readiness.ready) {
+    throw "Direct approval is unavailable: $(@($readiness.blockers) -join '; '). Run 'factory config edit', then retry."
 }
+$commit = ([string]$task.commit).ToLowerInvariant()
 
 $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
 $reviewPath = Join-Path ([string]$context.sessionsPath) "$safeTaskId.direct-review.$([Guid]::NewGuid().ToString('N')).json"

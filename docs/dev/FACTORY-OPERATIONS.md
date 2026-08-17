@@ -543,6 +543,13 @@ the same commit. It also never copies a shell command from task text or a
 worker-reported test merely to make approval succeed. Configure trusted checks
 or use the normal review path instead.
 
+The status tree shows `go --direct` only when a read-only preflight finds the
+task result, automatic development push, automatic production promotion, and
+trusted commands ready. Invoking the command repeats that preflight before it
+writes review state and reports concise blockers plus `factory config edit`.
+The deeper review and integration checks still run afterward; the preflight
+does not replace or weaken them.
+
 Other decisions:
 
 ```text
@@ -694,9 +701,11 @@ factory scheduler status
 - `status` reconciles sessions and summarizes the queue.
 - `inspect` shows all normalized data for one task.
 - `transcript` summarizes the worker conversation.
-- `doctor` checks the selected worker CLI, PowerShell runtime and required cmdlets, parsed worker
-  definition, agent-resolution cache, runtime files, locks, worktrees, and
-  scheduler.
+- `doctor` checks the selected worker CLI, PowerShell runtime and required
+  cmdlets, parsed worker definition, agent-resolution cache, publication
+  readiness, runtime files, locks, worktrees, and scheduler. Publication
+  settings that intentionally disable direct release are a warning, not a
+  required factory-health failure.
 - `factory scheduler status` validates the recorded PID/start time and reports
   the native heartbeat without calling AI.
 

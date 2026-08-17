@@ -323,7 +323,8 @@ function Get-CliNextAction {
     elseif ($status -eq "awaiting-review") {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
-        if ($reviewVerdict -notin @("approved", "changes-required", "blocked")) {
+        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task
+        if ($reviewVerdict -notin @("approved", "changes-required", "blocked") -and [bool]$directReadiness.ready) {
             $alternative = "!factory go $id --direct"
         }
     }
@@ -331,7 +332,8 @@ function Get-CliNextAction {
     elseif ($status -eq "held" -and $commit -and $resultCommit -eq $commit) {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
-        if ($reviewVerdict -notin @("approved", "changes-required", "blocked")) {
+        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task
+        if ($reviewVerdict -notin @("approved", "changes-required", "blocked") -and [bool]$directReadiness.ready) {
             $alternative = "!factory go $id --direct"
         }
     }
@@ -734,10 +736,16 @@ function Write-CliHold {
 }
 
 function Write-CliGo {
-    param($Context, $State, [string]$TaskId, [bool]$DirectApproval)
+    param($Context, $Config, $State, [string]$TaskId, [bool]$DirectApproval)
 
     $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    if ($DirectApproval) {
+        $readiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $task
+        if (-not [bool]$readiness.ready) {
+            throw "Direct approval is unavailable: $(@($readiness.blockers) -join '; '). Run 'factory config edit', then retry."
+        }
+    }
     $result = if ($DirectApproval) {
         Invoke-CliJsonScript -ScriptName "approve-direct.ps1" -Arguments @(
             "-Repository", [string]$Repository,
@@ -1475,7 +1483,7 @@ switch ($normalizedCommand) {
     }
     "go" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "go accepts exactly one task ID." }
-        Write-CliGo -Context $context -State $state -TaskId $Target -DirectApproval $directOptionUsed
+        Write-CliGo -Context $context -Config $config -State $state -TaskId $Target -DirectApproval $directOptionUsed
     }
     "hold" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "hold accepts exactly one task ID." }
