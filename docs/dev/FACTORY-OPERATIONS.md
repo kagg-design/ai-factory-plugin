@@ -275,6 +275,13 @@ A task created with `factory new` uses a collision-safe ID such as
 `local:20260816-142530-a1b2c3d4`. Status and inspect output identify it as a
 local source without exposing the internal identity URI.
 
+Its worker session keeps that collision-safe identity but omits the separate
+filesystem artifact hash, leaving room for the operator title:
+
+```text
+factory-local-20260816-142530-a1b2c3d4-fix-profile-export
+```
+
 In Agent View, find the session name containing the full task ID:
 
 ```text

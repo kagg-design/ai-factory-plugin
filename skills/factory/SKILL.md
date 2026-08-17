@@ -32,6 +32,9 @@ integration, and output. Apply these Codex adaptations:
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.
+- When `factory new` includes text, preserve it verbatim as one quoted native
+  argument. Never execute a blank `factory new` for a named request, and treat
+  an unexpected `Untitled local task` result as a failed handoff.
 - Claude Agent View does not contain Codex workers. For task conversations, use
   the exact command printed by `factory chat <task-id>`.
 

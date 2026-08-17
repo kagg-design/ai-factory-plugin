@@ -91,10 +91,7 @@ try {
         $testDatabaseName = Get-FactoryTestDatabaseName -Settings $testDatabaseSettings -Scope "worker" -TaskId $TaskId
     }
 
-    $titleSlug = ConvertTo-FactorySafeName -Value ([string]$task.title) -Fallback "task"
-    if ($titleSlug.Length -gt 28) { $titleSlug = $titleSlug.Substring(0, 28).TrimEnd("-") }
-    $sessionName = "factory-$safeTaskId-$titleSlug"
-    if ($sessionName.Length -gt 64) { $sessionName = $sessionName.Substring(0, 64).TrimEnd("-") }
+    $sessionName = Get-FactoryWorkerSessionName -TaskId $TaskId -Title ([string]$task.title)
 
     Set-FactoryProperty -Target $task -Name "startMode" -Value $Mode
     Set-FactoryProperty -Target $task -Name "status" -Value "starting"

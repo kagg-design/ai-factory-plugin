@@ -367,6 +367,39 @@ function ConvertTo-FactoryTaskArtifactName {
     return "$prefix-$suffix"
 }
 
+function Get-FactoryWorkerSessionName {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$Title
+    )
+
+    $localMatch = [regex]::Match($TaskId, '^local:(\d{8})-(\d{6})-([0-9a-f]{8})$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $localMatch.Success) {
+        $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
+        $titleSlug = ConvertTo-FactorySafeName -Value $Title -Fallback "task"
+        if ($titleSlug.Length -gt 28) { $titleSlug = $titleSlug.Substring(0, 28).TrimEnd("-") }
+        $legacyName = "factory-$safeTaskId-$titleSlug"
+        if ($legacyName.Length -gt 64) { $legacyName = $legacyName.Substring(0, 64).TrimEnd("-") }
+        return $legacyName
+    }
+
+    # A local ID already contains a timestamp and random nonce. Do not append the
+    # artifact hash used for filesystem paths: it consumes the Agent View name
+    # without adding useful operator identity.
+    $sessionIdentity = "local-$($localMatch.Groups[1].Value)-$($localMatch.Groups[2].Value)-$($localMatch.Groups[3].Value.ToLowerInvariant())"
+    $titleSlug = ($Title.ToLowerInvariant() -replace '[^\p{L}\p{Nd}._-]', '-')
+    $titleSlug = ($titleSlug -replace '-+', '-').Trim('-', '.')
+    if (-not $titleSlug) { $titleSlug = "task" }
+    $prefix = "factory-$sessionIdentity-"
+    $maximumTitleLength = [Math]::Min(28, 64 - $prefix.Length)
+    if ($maximumTitleLength -lt 1) { throw "Local factory session identity is too long: $TaskId" }
+    if ($titleSlug.Length -gt $maximumTitleLength) {
+        $titleSlug = $titleSlug.Substring(0, $maximumTitleLength).TrimEnd("-")
+    }
+    if (-not $titleSlug) { $titleSlug = "task" }
+    return "$prefix$titleSlug"
+}
+
 function Get-FactoryNestedValue {
     param(
         $Target,

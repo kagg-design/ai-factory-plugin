@@ -135,6 +135,13 @@ Native code assigns a collision-safe `local:...` ID, writes the complete queue
 entry under the state mutex, and starts or wakes the scheduler. It reserves the
 `local` adapter so normalized file intake cannot impersonate a native task.
 
+When the user supplies text to `new`, pass the complete text verbatim to the
+native command as one quoted argument. Never drop, summarize, or reinterpret it.
+The returned task title must equal that text's normalized first non-empty line;
+`Untitled local task` is valid only when the user supplied no text. If a
+non-empty request returns `Untitled local task`, report the failed handoff and
+do not pretend the named task was created.
+
 Prefer the `!factory new` shell form inside an orchestrator launched by
 `factory start`. The plugin ships a Bash-compatible `factory` launcher beside
 `factory.ps1`, so Claude Code's direct shell mode reaches the same native
