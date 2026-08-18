@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Prepared both immutable publication candidates before pushing and now run
+  their integration and release check sets concurrently in separate processes
+  and isolated test databases. The scheduler still re-fetches reviewed bases,
+  pushes the exact tested development and production candidates sequentially
+  without force, and verifies both remotes. Existing schedulers hot-load this
+  pipeline for each approved task, so no factory restart is required.
 - Invalidated immutable publication plans after an integration or production
   failure. Status now directs the operator to a fresh review, while ordinary
   `go`, `go --direct`, and the integrator reject stale failed plans. Recording
@@ -64,9 +70,10 @@
   operator documentation for future adapters.
 - Added a formal exact-SHA review contract and native `factory go` publication
   pipeline. Reviews now pin both remote bases, trusted integration/release
-  commands, and a plan hash; the native scheduler serially merges, tests,
-  pushes development and production without force, verifies reachability, and
-  runs guarded cleanup without an AI integration turn.
+  commands, and a plan hash; the native scheduler prepares both candidates,
+  checks them concurrently, pushes development and production sequentially
+  without force, verifies reachability, and runs guarded cleanup without an AI
+  integration turn.
 - Replaced recurring AI cron polling with one hidden native PowerShell scheduler
   per repository. It reconciles workers, fills capacity, records heartbeat and
   bounded backoff, starts with the orchestrator, and sleeps without model calls.

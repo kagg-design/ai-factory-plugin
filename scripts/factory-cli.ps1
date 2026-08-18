@@ -779,7 +779,7 @@ function Write-CliGo {
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Review plan: $(Get-CliShortId -Value $result.approvedPlanHash)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Native scheduler: $([string]$scheduler.status)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Publication runs asynchronously; monitor: factory inspect $TaskId"
-    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Integration, checks, promotion, and cleanup will continue without an AI turn."
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Candidate checks run in parallel; verified branch pushes remain sequential."
 }
 
 function Write-CliAdd {
@@ -1239,7 +1239,8 @@ function Write-CliHelp {
                 "--direct skips independent AI code review but still requires passed worker checks, a clean current-base commit, and trusted integration commands.",
                 "It refuses to override an existing changes-required or blocked review.",
                 "A failed publication attempt requires a fresh review; the previous immutable plan cannot be retried.",
-                "The native scheduler then runs asynchronously; monitor it with 'factory inspect <task-id>'."
+                "The native scheduler checks both prepared candidates in parallel, then pushes the verified branches sequentially.",
+                "Publication runs asynchronously; monitor it with 'factory inspect <task-id>'."
             ) | Write-Output
         }
         "add" {

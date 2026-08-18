@@ -449,6 +449,9 @@ inspect <task-id>` as the monitoring command. If integration or promotion
 fails, the failed audit remains visible but its immutable plan cannot be
 approved again. Status points back to `review`, and only a freshly recorded
 formal review clears the active failure marker and enables another `go`.
+The already-running native scheduler hot-loads publication code in a fresh
+child process for each approved task, so updating the Factory plugin does not
+require restarting an active factory.
 
 Other decisions:
 
@@ -465,10 +468,14 @@ the text to paste. A full background session is independent, so the factory
 does not pretend it can inject keystrokes into the live TUI.
 
 If the worktree HEAD or a reviewed remote base changes after review, integration
-stops and requires synchronization/review again. The native scheduler merges
-the immutable approved SHA, runs every recorded check in isolated reusable
-worktrees, pushes both configured branches without force, verifies reachability,
-and cleans the worker. It never asks AI to resolve a merge conflict implicitly.
+stops and requires synchronization/review again. The native scheduler prepares
+the development and production candidates in the existing reusable integrator
+and release worktrees, then runs their recorded check sets concurrently in
+separate processes and isolated test databases. After both candidates pass, it
+re-fetches the remote tips and pushes the exact tested development candidate,
+then the exact tested production candidate, sequentially and without force. It
+verifies reachability and cleans the worker; it never asks AI to resolve a merge
+conflict implicitly.
 
 ## Dynamic concurrency
 

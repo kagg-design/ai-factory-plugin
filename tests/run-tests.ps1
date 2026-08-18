@@ -108,6 +108,7 @@ try {
     Assert-True ($bashLauncher.Contains('command -v pwsh.exe')) "The cross-shell factory launcher does not prefer PowerShell 7 on Windows."
     Assert-True ($bashLauncher.Contains('command -v wslpath')) "The cross-shell factory launcher does not translate WSL paths for Windows PowerShell."
     Assert-True (@($bundleManifest.files) -contains "scripts/approve-direct.ps1") "The plugin manifest omits native direct approval."
+    Assert-True (@($bundleManifest.files) -contains "scripts/run-pipeline-check-set.ps1") "The plugin manifest omits the parallel pipeline check runner."
     Assert-True (@($bundleManifest.files) -contains "scripts/codex-runtime.ps1") "The plugin manifest omits the Codex worker adapter."
     Assert-True (@($bundleManifest.files) -contains "scripts/codex-orchestrator.ps1") "The plugin manifest omits the Codex orchestrator adapter."
     Assert-True (@($bundleManifest.files) -contains ".codex-plugin/plugin.json") "The bundle manifest omits the Codex plugin manifest."
@@ -1395,14 +1396,20 @@ try {
     Assert-True ($failedPlanGoExit -ne 0 -and ($failedPlanGoOutput -join "`n") -match "Run review again") "Native go reused a failed publication plan."
     Assert-True ($failedPlanDirectExit -ne 0 -and ($failedPlanDirectOutput -join "`n") -match "fresh review") "Direct approval reused a failed publication plan."
 
+    $parallelIntegratorMarker = Join-Path $testRoot "parallel-integrator.ready"
+    $parallelReleaseMarker = Join-Path $testRoot "parallel-release.ready"
+    $parallelIntegratorLiteral = $parallelIntegratorMarker.Replace("'", "''")
+    $parallelReleaseLiteral = $parallelReleaseMarker.Replace("'", "''")
+    $parallelIntegrationCommand = "`$self='$parallelIntegratorLiteral'; `$peer='$parallelReleaseLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; git diff --check"
+    $parallelReleaseCommand = "`$self='$parallelReleaseLiteral'; `$peer='$parallelIntegratorLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; git diff --check"
     $retryReviewPath = Join-Path $context.sessionsPath "pipeline-task.retry-review.json"
     Write-FactoryJsonAtomic -Path $retryReviewPath -Value ([pscustomobject]@{
         commit = $pipelineCommit
         verdict = "approved"
         summary = "Fresh review replaced the failed publication plan."
         riskNotes = @("Synthetic retry after a failed plan.")
-        integrationTestCommands = @("git diff --check")
-        releaseTestCommands = @("git diff --check")
+        integrationTestCommands = @($parallelIntegrationCommand)
+        releaseTestCommands = @($parallelReleaseCommand)
     })
     $retryReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "pipeline-task" -ReviewPath $retryReviewPath) | ConvertFrom-Json
     Assert-Equal "approved" ([string]$retryReview.verdict) "Fresh review was not recorded after publication failure."
@@ -1414,13 +1421,16 @@ try {
     Assert-Equal "approved" ([string]$pipelineRetryGo.status) "Freshly reviewed publication plan could not be approved."
 
     $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    $pipelineTickErrors = @($pipelineTick.errors | ForEach-Object { [string]$_ })
+    Assert-Equal 0 $pipelineTickErrors.Count "Native pipeline reported an error: $($pipelineTickErrors -join ' | ')"
     Assert-Equal 1 ([int]$pipelineTick.integratedCount) "Native scheduler did not integrate exactly one approved task."
-    Assert-Equal 0 @($pipelineTick.errors).Count "Native pipeline reported an error."
     $pipelineFinalState = Read-FactoryJson -Path $context.statePath
     $pipelineFinalTask = @($pipelineFinalState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-Equal "done" ([string]$pipelineFinalTask.status) "Native pipeline did not finish cleanup."
     Assert-Equal "published" ([string]$pipelineFinalTask.integration.status) "Native pipeline did not audit development publication."
     Assert-Equal "published" ([string]$pipelineFinalTask.production.status) "Native pipeline did not audit production publication."
+    Assert-True ([bool]$pipelineFinalTask.integration.checksParallel -and [bool]$pipelineFinalTask.production.checksParallel) "Native pipeline did not audit parallel candidate checks."
+    Assert-True ((Test-Path -LiteralPath $parallelIntegratorMarker) -and (Test-Path -LiteralPath $parallelReleaseMarker)) "Integration and release checks did not overlap."
     Assert-True (-not (Test-Path -LiteralPath $pipelineWorktree)) "Native pipeline left its worker worktree behind."
     & git -C $repository fetch origin develop master 1> $null
     & git -C $repository merge-base --is-ancestor $pipelineCommit origin/develop

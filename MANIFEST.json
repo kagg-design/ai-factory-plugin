@@ -49,6 +49,7 @@
     "scripts/record-review.ps1",
     "scripts/reject-task.ps1",
     "scripts/resume-codex-worker.ps1",
+    "scripts/run-pipeline-check-set.ps1",
     "scripts/run-isolated-test-command.ps1",
     "scripts/set-concurrency.ps1",
     "scripts/start-worker-session.ps1",

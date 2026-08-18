@@ -2,14 +2,20 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [ValidateSet("integrator", "release")][string]$Scope,
     [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-    [Parameter(Mandatory = $true)][string]$Command
+    [Parameter(Mandatory = $true)][string]$Command,
+    [switch]$SkipContextInitialization
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 
-$context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
-    ConvertFrom-Json
+$contextScript = Join-Path $PSScriptRoot "project-context.ps1"
+$contextJson = if ($SkipContextInitialization) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $contextScript -Repository $Repository
+} else {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $contextScript -Repository $Repository -Initialize
+}
+$context = $contextJson | ConvertFrom-Json
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 $workingFull = [IO.Path]::GetFullPath($WorkingDirectory)
 $expectedWorktree = [IO.Path]::GetFullPath((Join-Path ([string]$context.worktreeRoot) "factory-$Scope"))

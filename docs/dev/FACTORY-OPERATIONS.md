@@ -509,12 +509,20 @@ If the result is acceptable:
 
 `go` approves only the exact clean worker SHA and matching formal plan hash. It
 is also available directly as `factory go <id>` or `!factory go <id>`; those
-forms do not invoke AI. The native scheduler merges the approved SHA, runs all
-recorded checks in its isolated integrator/release worktrees, pushes without
-force, verifies both remotes, and performs guarded cleanup. If either remote
+forms do not invoke AI. The native scheduler prepares development and production
+candidates in its existing isolated integrator/release worktrees and runs both
+recorded check sets concurrently in separate processes and isolated test
+databases. Only after both pass does it re-fetch the reviewed bases and push the
+exact tested development and production candidates sequentially, without force.
+It then verifies both remotes and performs guarded cleanup. If either remote
 moved since review, the worker HEAD changed, a check failed, or a conflict
 occurred, publication stops with an exact saved reason instead of asking AI to
 repair it implicitly.
+
+The scheduler invokes the publication pipeline as a fresh child process for
+each approved task. Plugin updates to that pipeline are therefore hot-loaded by
+an already-running factory; the scheduler and its active task queue do not need
+to be restarted.
 
 For a small change whose worker output is sufficient for the operator to make
 the decision, skip the separate AI review explicitly:
