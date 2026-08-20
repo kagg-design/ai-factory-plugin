@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Separated scheduler process control from factory permission: `stop`/`start`
+  now preserve `active` and `paused`, while `pause`/`resume` own suspension.
+  Starting into an explicit pause returns a warning, and scheduler/status views
+  mark paused runnable work as actionable instead of healthy idle.
 - Made the native scheduler observable during long work: status now reports the
   active operation, task, start time, and refreshed heartbeat; start/resume
   refuse duplicate ownership; JSONL tick and error logs record normal and fatal

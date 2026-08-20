@@ -44,6 +44,9 @@ function Start-FactoryLauncherScheduler {
     if ([int]$schedulerResult.exitCode -eq 0) {
         $schedulerStart = [string]$schedulerResult.stdout | ConvertFrom-Json
         Write-Host "Native scheduler: PID $($schedulerStart.scheduler.pid)" -ForegroundColor Green
+        if ([string](Get-FactoryNestedValue -Target $schedulerStart -Name "warning" -Default "")) {
+            Write-Warning ([string]$schedulerStart.warning)
+        }
     } else {
         Write-Warning "Native scheduler did not start: $($schedulerResult.output)"
     }

@@ -692,7 +692,8 @@ editing state directly.
 ### `pause`
 
 Run `factory-scheduler.ps1 -Action pause`. It sets `paused: true` while keeping
-the low-cost scheduler process, existing sessions, and worktrees.
+the low-cost scheduler process, existing sessions, and worktrees. This is the
+operator control that suspends new worker launches and publication.
 
 ### `resume`
 
@@ -711,10 +712,14 @@ and queues the task. Run `factory-scheduler.ps1 -Action resume` afterward. A man
 
 ### `stop`
 
-Run `factory-scheduler.ps1 -Action stop`. It sets `active: false`,
-`paused: true`, gracefully stops the exact recorded native scheduler process,
-and preserves sessions, commits, branches, and worktrees. Stop worker sessions
-only when the user explicitly asks to abort them.
+Run `factory-scheduler.ps1 -Action stop`. It gracefully stops only the exact
+recorded native scheduler process, preserves the existing `active` and `paused`
+flags, and preserves sessions, commits, branches, and worktrees. The matching
+`start` action starts only that process and must never clear an explicit
+operator pause. If start returns a pause warning, report it and name `factory
+resume`; a running process with runnable work in a paused factory is actionable,
+not healthy idle. Stop worker sessions only when the user explicitly asks to
+abort them.
 
 ## Scheduler
 
@@ -730,6 +735,9 @@ Use `factory scheduler status` for process identity and heartbeat. New tasks,
 native scheduler. AI remains responsible for planning, implementation,
 conflict-aware sync, and formal code review; the approved plan's execution is
 deterministic.
+
+Keep the two control pairs distinct: scheduler `stop`/`start` control process
+liveness, while factory `pause`/`resume` control whether work is allowed.
 
 Long scheduler children refresh `activityHeartbeatAt`; status identifies their
 activity, task ID/title, and start time. Start/resume must accept the native

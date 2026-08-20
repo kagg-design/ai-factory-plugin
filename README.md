@@ -538,6 +538,16 @@ running; the scheduler simply waits before starting more.
 /factory stop
 ```
 
+Scheduler process control and factory permission are deliberately separate.
+`factory scheduler stop`/`start` (and the top-level `factory stop`) stop or
+start only the native process and preserve both `active` and `paused`. Use
+`factory pause` to suspend new launches/publication while keeping the process,
+and `factory resume` to permit work, start the scheduler if necessary, and tick
+immediately. Starting a scheduler while an explicit pause remains set does not
+clear that pause: the command warns that the process is running but inert and
+names `factory resume`. With runnable work, both scheduler and factory status
+show this combination as an actionable problem.
+
 Successful `/factory cleanup` removes every background row belonging to the
 task from Claude Agent View, including older attempts. Live processes are
 stopped and verified before the worktree is touched. An individual `claude rm`

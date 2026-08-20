@@ -200,6 +200,13 @@ function Get-SchedulerStatusResult {
     } else {
         "stopped"
     }
+    $runnableTaskCount = @($state.tasks | Where-Object { [string]$_.status -in @("queued", "approved") }).Count
+    $actionRequired = $runnableTaskCount -gt 0 -and ([bool]$state.paused -or $operationalStatus -in @("stopped", "failed"))
+    $problem = if ($runnableTaskCount -gt 0 -and [bool]$state.paused) {
+        "Factory is paused with $runnableTaskCount runnable task(s); the scheduler will not launch or publish them. Run 'factory resume'."
+    } elseif ($runnableTaskCount -gt 0 -and $operationalStatus -in @("stopped", "failed")) {
+        "Scheduler is $operationalStatus with $runnableTaskCount runnable task(s); run 'factory resume' or inspect the scheduler error log."
+    } else { $null }
     return [ordered]@{
         projectKey = [string]$context.projectKey
         repository = [string]$context.repositoryRoot
@@ -208,6 +215,10 @@ function Get-SchedulerStatusResult {
         status = $operationalStatus
         active = [bool]$state.active
         paused = [bool]$state.paused
+        runnableTaskCount = $runnableTaskCount
+        actionRequired = $actionRequired
+        problem = $problem
+        recommendedAction = if ($actionRequired) { "factory resume" } else { $null }
         pid = if ($running) { [int]$scheduler.pid } else { $null }
         intervalSeconds = if ($running -and [int](Get-CliSafeProperty -InputObject $scheduler -Name "intervalSeconds" -Default 0) -gt 0) {
             [int]$scheduler.intervalSeconds
@@ -461,7 +472,10 @@ function Start-NativeScheduler {
         } else {
             "Scheduler ownership is already held; a second scheduler was not started."
         }
-        return [ordered]@{ started = $false; alreadyRunning = $true; reason = $reason; scheduler = $current }
+        $warning = if ([bool]$current.paused) {
+            "Factory remains paused; the scheduler will not launch or publish tasks. Run 'factory resume'."
+        } else { $null }
+        return [ordered]@{ started = $false; alreadyRunning = $true; reason = $reason; warning = $warning; scheduler = $current }
     }
     Initialize-SchedulerLogs
     Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue
@@ -484,12 +498,18 @@ function Start-NativeScheduler {
         Start-Sleep -Milliseconds 100
         $status = Get-SchedulerStatusResult
         if ([bool]$status.running -and [int]$status.pid -eq $process.Id) {
-            return [ordered]@{ started = $true; alreadyRunning = $false; scheduler = $status }
+            $warning = if ([bool]$status.paused) {
+                "Factory remains paused; the scheduler is running but will not launch or publish tasks. Run 'factory resume'."
+            } else { $null }
+            return [ordered]@{ started = $true; alreadyRunning = $false; warning = $warning; scheduler = $status }
         }
         if ($process.HasExited) {
             $winner = Get-SchedulerStatusResult
             if ([bool]$winner.running) {
-                return [ordered]@{ started = $false; alreadyRunning = $true; scheduler = $winner }
+                $warning = if ([bool]$winner.paused) {
+                    "Factory remains paused; the scheduler will not launch or publish tasks. Run 'factory resume'."
+                } else { $null }
+                return [ordered]@{ started = $false; alreadyRunning = $true; warning = $warning; scheduler = $winner }
             }
             throw "Native scheduler exited during startup. Inspect scheduler state for its last error."
         }
@@ -498,12 +518,7 @@ function Start-NativeScheduler {
 }
 
 function Stop-NativeScheduler {
-    param([bool]$PauseFactory)
-
     $current = Get-SchedulerStatusResult
-    if ($PauseFactory) {
-        Update-SchedulerState -Active $false -Paused $true
-    }
     if (-not [bool]$current.running) {
         Update-SchedulerState -Values @{
             status = "stopped"; pid = $null; processStartTimeUtc = $null
@@ -553,7 +568,7 @@ switch ($Action) {
         Start-NativeScheduler | ConvertTo-Json -Depth 20
     }
     "stop" {
-        Stop-NativeScheduler -PauseFactory $true | ConvertTo-Json -Depth 20
+        Stop-NativeScheduler | ConvertTo-Json -Depth 20
     }
     "pause" {
         Update-SchedulerState -Paused $true

@@ -29,6 +29,11 @@ integration, and output. Apply these Codex adaptations:
   internal explicit skill name used during bootstrap.
 - Run native operations through the installed `factory` command. In the Codex
   TUI the user may also run them directly as `!factory ...`.
+- Keep scheduler `stop`/`start` separate from factory `pause`/`resume`:
+  stop/start control only the native process and preserve the pause flag;
+  pause/resume control whether queued or approved work may run. Surface the
+  canonical warning whenever a scheduler starts into an explicitly paused
+  factory.
 - `rework` is a queued redelivery, not text for the operator to paste into an
   old chat. `release` is the explicit stale-session escape hatch; use the
   canonical `task-action.ps1 -Action release` flow and never edit state JSON.

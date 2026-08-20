@@ -369,6 +369,45 @@ try {
     Assert-True ([bool]$schedulerSecondStart.alreadyRunning) "Native scheduler allowed a duplicate process."
     $schedulerStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-True ([bool]$schedulerStop.stopped) "Native scheduler did not stop gracefully."
+    Assert-Equal $false ([bool]$schedulerStop.scheduler.paused) "Scheduler stop implicitly paused the factory."
+
+    $pausedRestartState = Read-FactoryJson -Path $context.statePath
+    $pausedRestartTask = New-FactoryTestTask -Id "paused-restart-task" -Title "Paused scheduler restart" -Now (Get-FactoryUtcTimestamp)
+    $pausedRestartState.tasks = @($pausedRestartState.tasks) + @($pausedRestartTask)
+    $pausedRestartState.active = $true
+    $pausedRestartState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $pausedRestartState
+    $pausedFactoryResult = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action pause -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal $true ([bool]$pausedFactoryResult.scheduler.paused) "Explicit pause did not suspend the factory."
+
+    $pausedInitialStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+    Assert-True ([bool]$pausedInitialStart.started) "Scheduler could not start while the factory was explicitly paused."
+    Assert-True ([string]$pausedInitialStart.warning -match "factory resume") "Scheduler start did not warn that the explicit pause remained in effect."
+    $pausedProcessStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-True ([bool]$pausedProcessStop.stopped) "Paused scheduler process did not stop."
+    Assert-Equal $true ([bool]$pausedProcessStop.scheduler.paused) "Scheduler stop cleared an explicit operator pause."
+    Assert-Equal $true ([bool]$pausedProcessStop.scheduler.active) "Scheduler stop changed the factory active flag."
+
+    $pausedRestart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+    Assert-True ([bool]$pausedRestart.started) "Scheduler did not restart after stop."
+    Assert-Equal $true ([bool]$pausedRestart.scheduler.paused) "Scheduler start cleared an explicit operator pause."
+    Assert-True ([string]$pausedRestart.warning -match "factory resume") "Stopped/started scheduler did not return an explicit paused warning."
+    Assert-Equal $true ([bool]$pausedRestart.scheduler.actionRequired) "Paused scheduler with queued work was not actionable in the returned object."
+    Assert-Equal 1 ([int]$pausedRestart.scheduler.runnableTaskCount) "Paused scheduler status reported the wrong runnable task count."
+    Assert-True ([string]$pausedRestart.scheduler.problem -match "factory resume") "Paused scheduler problem did not name the recovery command."
+    $pausedRestartTaskState = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "paused-restart-task"
+    Assert-Equal "queued" ([string]$pausedRestartTaskState.status) "Paused scheduler launched queued work."
+    $pausedSchedulerCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath scheduler status -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-True ($pausedSchedulerCli.Contains("Problem:") -and $pausedSchedulerCli.Contains("factory resume")) "Factory scheduler output rendered paused runnable work as healthy."
+    $pausedFactoryCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($pausedFactoryCli.Contains("NEEDS YOUR ACTION") -and $pausedFactoryCli.Contains("SCHEDULER") -and $pausedFactoryCli.Contains("paused") -and $pausedFactoryCli.Contains("factory resume")) "Factory status did not surface paused runnable work as actionable."
+    $pausedRestartFinalStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal $true ([bool]$pausedRestartFinalStop.scheduler.paused) "Final scheduler stop changed the explicit pause state."
+    $pausedRestartCleanup = Read-FactoryJson -Path $context.statePath
+    $pausedRestartCleanup.tasks = @($pausedRestartCleanup.tasks | Where-Object { [string]$_.id -ne "paused-restart-task" })
+    $pausedRestartCleanup.active = $false
+    $pausedRestartCleanup.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $pausedRestartCleanup
 
     $idleHeartbeatBefore = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "heartbeatAt" -Default "")
     Start-Sleep -Milliseconds 25

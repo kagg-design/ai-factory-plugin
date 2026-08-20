@@ -473,8 +473,10 @@ function Write-CliStatus {
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
-    $scheduler = if ($schedulerStatus -eq "busy") {
-        $busyTarget = @($schedulerTaskId, $schedulerTaskTitle) | Where-Object { $_ }
+    $scheduler = if ($paused -and $schedulerStatus -in @("running", "busy")) {
+        "native $schedulerStatus but factory paused (PID $schedulerPid)"
+    } elseif ($schedulerStatus -eq "busy") {
+        $busyTarget = @(@($schedulerTaskId, $schedulerTaskTitle) | Where-Object { $_ })
         $busySuffix = if ($busyTarget.Count -gt 0) { " " + ($busyTarget -join " - ") } else { "" }
         "native busy: $schedulerActivity$busySuffix (PID $schedulerPid)"
     } elseif ($schedulerStatus -eq "failed") {
@@ -488,7 +490,7 @@ function Write-CliStatus {
     } else {
         "native stopped"
     }
-    $schedulerProblem = $runnable -gt 0 -and $schedulerStatus -in @("stopped", "failed")
+    $schedulerProblem = $runnable -gt 0 -and ($paused -or $schedulerStatus -in @("stopped", "failed"))
     $projectName = Split-Path ([string]$Context.repositoryRoot) -Leaf
 
     $lines = New-Object Collections.Generic.List[string]
@@ -514,17 +516,25 @@ function Write-CliStatus {
         if ($groupCount -eq 0) { continue }
         $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $groupCount")
         if ($schedulerRows -gt 0) {
+            $schedulerProblemStatus = if ($paused) { "paused" } else { $schedulerStatus }
             $schedulerConnector = if ($groupTasks.Count -eq 0) { $script:Tree.Last } else { $script:Tree.Branch }
             $schedulerDetailPrefix = if ($groupTasks.Count -eq 0) { "$($script:Tree.Vertical)     " } else { "$($script:Tree.Vertical)  $($script:Tree.Vertical)  " }
             Add-CliWrappedLine `
                 -Lines $lines `
                 -FirstPrefix "$($script:Tree.Vertical)  $schedulerConnector$($script:Tree.Horizontal) " `
                 -ContinuationPrefix $schedulerDetailPrefix `
-                -Text "SCHEDULER $($script:Tree.Horizontal) $schedulerStatus $($script:Tree.Horizontal) runnable work is not being processed"
-            $schedulerReason = if ($schedulerError) { $schedulerError } else { "No live native scheduler owns this project." }
+                -Text "SCHEDULER $($script:Tree.Horizontal) $schedulerProblemStatus $($script:Tree.Horizontal) runnable work is not being processed"
+            $schedulerReason = if ($paused) {
+                "Factory is paused; the scheduler will not launch or publish tasks."
+            } elseif ($schedulerError) { $schedulerError } else { "No live native scheduler owns this project." }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Reason: $schedulerReason"
-            Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Log: $(Join-Path ([string]$Context.projectData) 'scheduler.stderr.log')"
-            $schedulerNext = if ($schedulerStatus -eq "stopped") { "factory resume" } else { "factory scheduler status" }
+            $schedulerDiagnostic = if ($paused -and $schedulerStatus -in @("running", "busy")) {
+                "Process: running (PID $schedulerPid); pause is intentional state, not process failure."
+            } else {
+                "Log: $(Join-Path ([string]$Context.projectData) 'scheduler.stderr.log')"
+            }
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text $schedulerDiagnostic
+            $schedulerNext = if ($paused -or $schedulerStatus -eq "stopped") { "factory resume" } else { "factory scheduler status" }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix   " -Text "$($script:Tree.Arrow) Next: $schedulerNext"
         }
         for ($index = 0; $index -lt $groupTasks.Count; $index++) {
@@ -1118,6 +1128,13 @@ function Write-CliSchedulerResult {
     if ([string]$scheduler.heartbeatAt) { Write-Output "Heartbeat: $([string]$scheduler.heartbeatAt)" }
     if ([string]$scheduler.lastTickAt) { Write-Output "Last tick: $([string]$scheduler.lastTickAt)" }
     if ([string]$scheduler.lastError) { Write-Output "Last error: $(ConvertTo-CliLine -Value $scheduler.lastError)" }
+    $warning = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Result -Name "warning")
+    $problem = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $scheduler -Name "problem")
+    if ($warning) {
+        Write-Output "Problem: $warning"
+    } elseif ($problem) {
+        Write-Output "Problem: $problem"
+    }
     if ([string]$scheduler.lastExitReason) { Write-Output "Last exit: $(ConvertTo-CliLine -Value $scheduler.lastExitReason)" }
     if ([string]$scheduler.stdoutPath) { Write-Output "Tick log: $([string]$scheduler.stdoutPath)" }
     if ([string]$scheduler.stderrPath) { Write-Output "Error log: $([string]$scheduler.stderrPath)" }
@@ -1350,7 +1367,8 @@ function Write-CliHelp {
         "scheduler" {
             @(
                 "factory scheduler [status|start|stop|tick]",
-                "Controls the deterministic local scheduler process.",
+                "Controls only the deterministic local scheduler process; start/stop do not change the factory pause flag.",
+                "Use factory pause/resume to suspend or permit launches and publication.",
                 "'tick' reconciles workers, integrates one formally approved commit, and fills worker capacity once."
             ) | Write-Output
         }
@@ -1365,7 +1383,8 @@ function Write-CliHelp {
             @(
                 "factory tick | factory pause | factory resume | factory stop",
                 "Controls the native scheduler without an AI request.",
-                "pause keeps the process and artifacts; resume starts it and ticks immediately; stop pauses the factory and ends the process."
+                "pause keeps the process but suspends factory work; resume permits work, starts the process if needed, and ticks immediately.",
+                "stop ends only the scheduler process and preserves active/paused; start never clears an explicit pause."
             ) | Write-Output
         }
         "doctor" {

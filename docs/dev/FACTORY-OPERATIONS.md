@@ -700,12 +700,20 @@ Resume orchestration:
 factory resume
 ```
 
-Deactivate the queue and stop its scheduler while retaining sessions,
-branches, commits, and worktrees:
+Stop only the scheduler process while retaining the factory's current
+active/paused permission and all sessions, branches, commits, and worktrees:
 
 ```powershell
 factory stop
 ```
+
+The verbs are two independent pairs. Scheduler `stop`/`start` control process
+liveness and never change `paused`; factory `pause`/`resume` control whether
+queued workers or approved publication may run. Therefore normal `stop` then
+`start` resumes the same permission state. If an operator explicitly paused the
+factory, `start` preserves that pause and returns a warning naming `factory
+resume`. A running scheduler plus a paused factory and runnable work is rendered
+as `NEEDS YOUR ACTION`, not healthy idle.
 
 After restarting the computer or Claude Code, run:
 
