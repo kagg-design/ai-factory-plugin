@@ -96,6 +96,49 @@ function Stop-PreviewProcess {
     throw "Preview PID $processId is still running after taskkill."
 }
 
+function Stop-PreviewWorktreeProcesses {
+    param([string]$Worktree)
+
+    if (-not $Worktree) { return @() }
+    $fullWorktree = [IO.Path]::GetFullPath($Worktree).TrimEnd('\', '/')
+    if (-not (Test-PreviewPathInsideRoot -Path $fullWorktree -Root ([string]$context.worktreeRoot))) {
+        throw "Refusing to stop preview processes outside the factory worktree root: $fullWorktree"
+    }
+    $allowedNames = @("powershell.exe", "pwsh.exe", "node.exe", "esbuild.exe", "php.exe", "npm.exe", "npx.exe")
+    $stopped = New-Object Collections.Generic.List[int]
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    do {
+        $matches = @(
+            Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+                [int]$_.ProcessId -ne $PID -and
+                [string]$_.Name -in $allowedNames -and
+                [string]$_.CommandLine -and
+                ([string]$_.CommandLine).IndexOf($fullWorktree, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            }
+        )
+        if ($matches.Count -eq 0) { return @($stopped.ToArray()) }
+        foreach ($match in $matches) {
+            $matchedPid = [int]$match.ProcessId
+            if ($stopped -contains $matchedPid) { continue }
+            $kill = Invoke-FactoryNativeProcess -Command "taskkill" -Arguments @("/PID", [string]$matchedPid, "/T", "/F")
+            if ([int]$kill.exitCode -ne 0) {
+                try { $null = Get-Process -Id $matchedPid -ErrorAction Stop } catch { continue }
+                throw "Failed to stop residual preview process '$([string]$match.Name)' PID $matchedPid for '$fullWorktree': $($kill.output)"
+            }
+            $stopped.Add($matchedPid)
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $remaining = @(
+        Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            [string]$_.Name -in $allowedNames -and [string]$_.CommandLine -and
+            ([string]$_.CommandLine).IndexOf($fullWorktree, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        } | ForEach-Object { "$($_.Name) PID $($_.ProcessId)" }
+    )
+    throw "Preview processes still reference '$fullWorktree': $($remaining -join ', ')"
+}
+
 function Test-PreviewPortOpen {
     param([string]$HostName, [int]$Port, [int]$TimeoutMilliseconds = 200)
 
@@ -199,6 +242,7 @@ function Stop-CurrentPreview {
     }
     $assetsStop = Stop-PreviewProcess -Record (Get-PreviewProperty -InputObject $preview -Name "assets")
     $appStop = Stop-PreviewProcess -Record (Get-PreviewProperty -InputObject $preview -Name "app")
+    $residualPids = @(Stop-PreviewWorktreeProcesses -Worktree ([string]$preview.worktree))
     $hotRemoved = Remove-PreviewHotFile -Preview $preview
     $removedLinks = @(Remove-PreviewDependencyLinks -Preview $preview)
     Remove-Item -LiteralPath $previewPath -Force -ErrorAction SilentlyContinue
@@ -211,6 +255,7 @@ function Stop-CurrentPreview {
         url = [string]$preview.url
         appPort = [int]$preview.appPort
         assetPort = [int]$preview.assetPort
+        stoppedResidualPids = $residualPids
         removedDependencyLinks = $removedLinks
         removedHotFile = $hotRemoved
     }

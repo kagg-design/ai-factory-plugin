@@ -23,10 +23,12 @@ $config = Read-FactoryJson -Path $context.configPath
 $CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 
 $agentRows = @()
+$claudeListingAvailable = $true
 try {
     $agentRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
 } catch {
     $agentRows = @()
+    $claudeListingAvailable = $false
 }
 
 $mutex = $null
@@ -38,7 +40,7 @@ try {
     $state = Read-FactoryJson -Path $context.statePath
 
     foreach ($task in @($state.tasks)) {
-        if ($null -eq $task.backgroundSession -or -not [string]$task.backgroundSession.id) {
+        if ($null -eq $task.backgroundSession -or -not [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "")) {
             continue
         }
 
@@ -53,22 +55,26 @@ try {
         # first-match loop can bind a live worker's task to the dead attempt's row and then
         # "reconcile" a working session into held.
         $sessionRow = $null
+        $sessionLookupAvailable = $true
+        $sessionMarkedMissing = $false
+        $expectedBackgroundId = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "")
+        $expectedSessionId = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "sessionId" -Default "")
+        $expectedName = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "name" -Default "")
         if ($sessionRuntime -eq "codex") {
             $sessionRow = Get-FactoryCodexSessionSnapshot -Session $task.backgroundSession
             $codexSessionsSeen++
         } else {
+            $sessionLookupAvailable = $claudeListingAvailable
             foreach ($pass in @("backgroundId", "sessionId", "shape")) {
                 foreach ($candidateSessionRow in @($agentRows)) {
                 $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
                 $rowSessionId = if ($null -ne $candidateSessionRow.PSObject.Properties["sessionId"]) { [string]$candidateSessionRow.sessionId } else { "" }
                 $rowName = if ($null -ne $candidateSessionRow.PSObject.Properties["name"]) { [string]$candidateSessionRow.name } else { "" }
                 $rowCwd = if ($null -ne $candidateSessionRow.PSObject.Properties["cwd"]) { [string]$candidateSessionRow.cwd } else { "" }
-                $expectedSessionId = [string]$task.backgroundSession.sessionId
-                $expectedName = [string]$task.backgroundSession.name
                 $expectedCwd = [string]$task.worktree
 
                 $matchesSession = if ($pass -eq "backgroundId") {
-                    $rowId -and $rowId -eq [string]$task.backgroundSession.id
+                    $rowId -and $rowId -eq $expectedBackgroundId
                 } elseif ($pass -eq "sessionId") {
                     $rowSessionId -and $expectedSessionId -and $rowSessionId -eq $expectedSessionId
                 } else {
@@ -86,6 +92,17 @@ try {
                 }
             }
         }
+        if ($null -eq $sessionRow -and $sessionLookupAvailable) {
+            $recordedSessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
+            if ($recordedSessionState -notin @("stopped", "done", "failed")) {
+                $missingAt = Get-FactoryUtcTimestamp
+                Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value "stopped"
+                Set-FactoryProperty -Target $task.backgroundSession -Name "stoppedAt" -Value $missingAt
+                Set-FactoryProperty -Target $task.backgroundSession -Name "missingAt" -Value $missingAt
+                $metadataChanged = $true
+                $sessionMarkedMissing = $true
+            }
+        }
 
         if ($null -ne $sessionRow) {
             $metadataChanged = $true
@@ -94,17 +111,17 @@ try {
             } elseif ($null -ne $sessionRow.PSObject.Properties["status"] -and [string]$sessionRow.status) {
                 [string]$sessionRow.status
             } else {
-                [string]$task.backgroundSession.state
+                [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
             }
             Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value $rowState
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastSeenAt" -Value (Get-FactoryUtcTimestamp)
             # Only adopt a UUID from a row that IS this background session (or when nothing is
             # recorded yet). A name+cwd match can land on a previous attempt's row, and writing
             # its UUID here would permanently pin the task to the dead session.
-            $storedSessionId = [string]$task.backgroundSession.sessionId
+            $storedSessionId = $expectedSessionId
             $rowMatchesBackgroundId = (
                 $null -ne $sessionRow.PSObject.Properties["id"] -and
-                [string]$sessionRow.id -eq [string]$task.backgroundSession.id
+                [string]$sessionRow.id -eq $expectedBackgroundId
             )
             $rowMatchesStoredSessionId = (
                 $storedSessionId -and
@@ -161,7 +178,9 @@ try {
         } else {
             $null
         }
-        $expectedEventSessionId = [string]$task.backgroundSession.sessionId
+        # A Codex snapshot can discover and persist the thread UUID during this
+        # same pass, so event matching must read the updated session object.
+        $expectedEventSessionId = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "sessionId" -Default "")
         $latestEventIsCurrent = (
             $null -ne $latestEvent -and
             $expectedEventSessionId -and
@@ -291,7 +310,10 @@ try {
             } elseif ($resultStatus -eq "completed") {
                 Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
                 Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
+                Set-FactoryProperty -Target $task -Name "review" -Value $null
                 Set-FactoryProperty -Target $task -Name "approval" -Value $null
+                Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
+                Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $null
                 Set-FactoryProperty -Target $task -Name "error" -Value $null
             } elseif ($resultStatus -eq "blocked") {
                 Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
@@ -303,16 +325,24 @@ try {
                 Set-FactoryProperty -Target $task -Name "error" -Value ([string]$result.blockingReason)
             }
             Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value ([string]$resultEvent.capturedAt)
-        } elseif ($null -ne $sessionRow) {
-            $sessionState = [string]$task.backgroundSession.state
-            if ($sessionState -eq "working" -and [string]$task.status -in @("starting", "planning", "awaiting-input")) {
+        } elseif ($null -ne $sessionRow -or $sessionMarkedMissing) {
+            $sessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
+            $validatedArtifacts = (
+                [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "") -and
+                $null -ne (Get-FactoryNestedValue -Target $task -Name "workerResult") -and
+                [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "workerResult") -Name "commit" -Default "") -eq
+                    [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "")
+            )
+            if ($validatedArtifacts) {
+                # Validated Git artifacts outrank a lagging or vanished session row.
+            } elseif ($sessionState -eq "working" -and [string]$task.status -in @("starting", "planning")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value $(if ([string]$task.startMode -eq "interactive") { "planning" } else { "running" })
             } elseif ($sessionState -eq "blocked" -and [string]$task.status -in @("starting", "planning", "running")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
-            } elseif ($sessionState -eq "failed" -and [string]$task.status -notin @("awaiting-review", "approved", "done")) {
+            } elseif ($sessionState -eq "failed" -and [string]$task.status -in @("starting", "planning", "running")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
                 Set-FactoryProperty -Target $task -Name "error" -Value "Worker session failed before a valid FACTORY_RESULT was captured."
-            } elseif ($sessionState -eq "stopped" -and [string]$task.status -notin @("awaiting-review", "approved", "done")) {
+            } elseif ($sessionState -eq "stopped" -and [string]$task.status -in @("starting", "planning", "running")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "held"
                 Set-FactoryProperty -Target $task -Name "holdReason" -Value "background session stopped without a FACTORY_RESULT"
                 Set-FactoryProperty -Target $task -Name "error" -Value "Background session stopped without a FACTORY_RESULT. Use /factory retry or /factory answer."

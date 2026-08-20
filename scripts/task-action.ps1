@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry")][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry", "release")][string]$Action,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$Instructions = "",
     [string]$ClaudeCommand = "",
@@ -103,11 +103,44 @@ try {
             if ($null -eq $task.backgroundSession -or -not [string]$task.backgroundSession.id) {
                 throw "Task '$TaskId' has no background session to continue."
             }
+            if (-not [string]$task.worktree -or -not (Test-Path -LiteralPath ([string]$task.worktree) -PathType Container)) {
+                throw "Task '$TaskId' has no usable retained worktree."
+            }
+            $deliveryInstructions = $Instructions.Trim()
+            if (-not $deliveryInstructions) {
+                $existingReview = Get-FactoryNestedValue -Target $task -Name "review"
+                $reviewSummary = [string](Get-FactoryNestedValue -Target $existingReview -Name "summary" -Default "")
+                $reviewRisks = @((Get-FactoryNestedValue -Target $existingReview -Name "riskNotes" -Default @()) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+                $deliveryInstructions = @($reviewSummary, @($reviewRisks | ForEach-Object { "- $_" })) | Where-Object { $_ } | ForEach-Object { [string]$_ }
+                $deliveryInstructions = ($deliveryInstructions -join [Environment]::NewLine).Trim()
+            }
+            if (-not $deliveryInstructions) {
+                throw "Rework instructions are required when the recorded review contains no findings."
+            }
+            $oldBackgroundId = [string]$task.backgroundSession.id
+            $sessionCleanup = Close-FactoryTaskWorkerSessions `
+                -Session $task.backgroundSession `
+                -TaskId $TaskId `
+                -Worktree ([string]$task.worktree) `
+                -ClaudeCommand $ClaudeCommand `
+                -CodexCommand $CodexCommand `
+                -CodexDisposition "archive"
+            if (@($sessionCleanup.stopFailures).Count -gt 0) {
+                $blockedIds = @($sessionCleanup.stopFailures | ForEach-Object { [string]$_.id }) -join ", "
+                throw "Failed to stop task session(s) $blockedIds; rework was not queued."
+            }
             Set-FactoryProperty -Target $task -Name "approval" -Value $null
             Set-FactoryProperty -Target $task -Name "review" -Value $null
-            Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
+            Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
+            Set-FactoryProperty -Target $task -Name "agentId" -Value $null
+            Set-FactoryProperty -Target $task -Name "status" -Value "queued"
             Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $now
-            Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $Instructions
+            Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $deliveryInstructions
+            Set-FactoryProperty -Target $task -Name "error" -Value $null
+            Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+            Set-FactoryProperty -Target $state -Name "active" -Value $true
+            Set-FactoryProperty -Target $state -Name "paused" -Value $false
+            $Instructions = $deliveryInstructions
         }
         "retry" {
             $machineHoldReason = "background session stopped without a FACTORY_RESULT"
@@ -147,6 +180,58 @@ try {
             Set-FactoryProperty -Target $task -Name "status" -Value "queued"
             Set-FactoryProperty -Target $state -Name "active" -Value $true
             Set-FactoryProperty -Target $state -Name "paused" -Value $false
+        }
+        "release" {
+            if ([string]$task.status -in @("approved", "integrating", "production", "syncing", "done", "rejected")) {
+                throw "Task '$TaskId' is in operator-controlled state '$($task.status)' and cannot release its session."
+            }
+            if ($null -eq $task.backgroundSession -or -not [string]$task.backgroundSession.id) {
+                throw "Task '$TaskId' has no recorded background session to release."
+            }
+            $recordedSession = $task.backgroundSession
+            $sessionRuntime = [string](Get-FactoryNestedValue -Target $recordedSession -Name "runtime" -Default "claude")
+            $liveSession = $null
+            if ($sessionRuntime -eq "codex") {
+                $liveSession = Get-FactoryCodexSessionSnapshot -Session $recordedSession
+            } else {
+                $rows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
+                $recordedId = [string](Get-FactoryNestedValue -Target $recordedSession -Name "id" -Default "")
+                $recordedSessionId = [string](Get-FactoryNestedValue -Target $recordedSession -Name "sessionId" -Default "")
+                $liveSession = @($rows | Where-Object {
+                    ($recordedId -and [string](Get-FactoryNestedValue -Target $_ -Name "id" -Default "") -eq $recordedId) -or
+                    ($recordedSessionId -and [string](Get-FactoryNestedValue -Target $_ -Name "sessionId" -Default "") -eq $recordedSessionId)
+                } | Select-Object -First 1)
+                $liveSession = if ($liveSession.Count -gt 0) { $liveSession[0] } else { $null }
+            }
+            $liveState = [string](Get-FactoryNestedValue -Target $liveSession -Name "state" -Default (Get-FactoryNestedValue -Target $liveSession -Name "status" -Default ""))
+            if ($null -ne $liveSession -and $liveState -notin @("stopped", "done", "failed")) {
+                throw "Task '$TaskId' session is still reported as '$liveState'; use chat, answer, or rework instead of release."
+            }
+            $validatedResult = (
+                [string]$task.commit -and
+                $null -ne $task.workerResult -and
+                [string](Get-FactoryNestedValue -Target $task.workerResult -Name "commit" -Default "") -eq [string]$task.commit
+            )
+            $hasReworkDelivery = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -and
+                [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")
+            $restoredStatus = if ($validatedResult) {
+                "awaiting-review"
+            } elseif ($hasReworkDelivery) {
+                "queued"
+            } elseif ($null -ne (Get-FactoryNestedValue -Target $task -Name "plan")) {
+                "awaiting-input"
+            } else {
+                "held"
+            }
+            Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
+            Set-FactoryProperty -Target $task -Name "agentId" -Value $null
+            Set-FactoryProperty -Target $task -Name "status" -Value $restoredStatus
+            Set-FactoryProperty -Target $task -Name "error" -Value $null
+            Set-FactoryProperty -Target $task -Name "holdReason" -Value $(if ($restoredStatus -eq "held") { "stale worker session released by operator" } else { $null })
+            if ($restoredStatus -eq "queued") {
+                Set-FactoryProperty -Target $state -Name "active" -Value $true
+                Set-FactoryProperty -Target $state -Name "paused" -Value $false
+            }
         }
     }
 

@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+- Made the native scheduler observable during long work: status now reports the
+  active operation, task, start time, and refreshed heartbeat; start/resume
+  refuse duplicate ownership; JSONL tick and error logs record normal and fatal
+  exits; doctor and status surface failed schedulers with runnable work. Pipeline
+  test records now preserve the exact command and exit code, keep only a bounded
+  ANSI-free diagnostic tail in state, and link to the full output beside the
+  task event artifacts.
+- Made rework deliverable by closing the old worker, queuing a fresh attempt,
+  and embedding review findings plus the retained commit in its durable prompt.
+  Reconciliation now marks vanished sessions stopped without falsifying
+  `lastSeenAt`, preserves operator/artifact-owned states, and exposes explicit
+  stale-session `release` recovery. Conflicting syncs can adopt a manually
+  resolved clean one-commit HEAD; optional sync-report fields are StrictMode
+  safe. The worker Git guard allows read-only `merge-*`, cherry-pick, and revert
+  while naming blocked mutating commands. Cleanup is now a separate retryable
+  post-publication stage, JSON replacement is atomic with read retries, and
+  preview stop verifies all worktree-referencing process trees are gone.
 - Prepared both immutable publication candidates before pushing and now run
   their integration and release check sets concurrently in separate processes
   and isolated test databases. The scheduler still re-fetches reviewed bases,

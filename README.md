@@ -461,11 +461,15 @@ Other decisions:
 /factory reject <task-id> --yes
 /factory reject <task-id> --keep
 /factory rework <task-id> "Keep the old endpoint compatible"
+/factory release <task-id>
 ```
 
-`rework` preserves the same conversation and prints the attach command plus
-the text to paste. A full background session is independent, so the factory
-does not pretend it can inject keystrokes into the live TUI.
+`rework` stops the previous worker session, preserves its branch, worktree,
+commit, and result, clears review and approval, and queues a new attempt. The
+launcher writes the findings and retained commit into the new worker prompt,
+then clears the pending delivery marker. `release` is the explicit recovery
+path for a saved session identity that is no longer present in the runtime; it
+restores the state implied by validated artifacts without changing Git.
 
 If the worktree HEAD or a reviewed remote base changes after review, integration
 stops and requires synchronization/review again. The native scheduler prepares
@@ -525,6 +529,7 @@ running; the scheduler simply waits before starting more.
 /factory go <task-id>
 /factory hold <task-id>
 /factory rework <task-id> [instructions]
+/factory release <task-id>
 /factory reject <task-id> [reason] [--yes|--keep]
 /factory cleanup <task-id>
 /factory retry <task-id>
@@ -555,13 +560,27 @@ When the queue contains only tasks waiting for input or review, the native
 scheduler remains asleep and emits no AI messages. Adding a task, approving one,
 resuming, or increasing concurrency wakes it immediately.
 
+During reconciliation, worker launch, or publication, scheduler status changes
+to `busy` and includes the operation, task ID/title, start time, and a heartbeat
+that continues to refresh while the child process runs. `factory start` and
+`factory resume` refuse to start or tick a second scheduler while that ownership
+is in flight. Every tick is appended as one JSON line to
+`scheduler.stdout.log`; failures and unexpected process loss go to
+`scheduler.stderr.log`. Both paths are shown by `factory scheduler status`.
+If runnable work exists while the scheduler is stopped or failed, `factory
+status` places the scheduler under `NEEDS YOUR ACTION` instead of describing it
+as sleeping, and `factory doctor` reports the same failure and log path.
+
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,
 reruns appropriate checks through the orchestrator, records the new SHA and
 test results, and returns the task to `awaiting-review`. It does not create a
 second preview worktree. Conflicts are aborted without changing the original
-branch, and an interrupted validation remains `syncing` and cannot be approved
-until `/factory sync <task-id>` successfully resumes and finalizes it.
+branch. An operator or worker may resolve one by placing a clean, single-parent
+commit directly on the recorded worker branch, with the current development
+tip as its parent; rerunning `/factory sync <task-id>` validates and adopts that
+HEAD. An interrupted validation remains `syncing` and cannot be approved until
+the same command successfully finalizes it.
 
 `cleanup` is intentionally strict. It reconciles the task first, refuses
 active sessions and dirty worktrees, refreshes the configured remote branches,
@@ -645,6 +664,9 @@ links `vendor` and `node_modules` from the main repository only when the worker
 does not have its own directories and the relevant lock file still matches.
 Those junctions are removed when preview stops. The app uses the copied project
 environment and development database, not the isolated worker test database.
+Stop also finds `powershell`, `pwsh`, `php`, `node`, `npm`, `npx`, and `esbuild`
+processes whose command lines still reference the worktree, terminates their
+trees, and verifies that none remain before removing dependency junctions.
 
 Only one preview is active per repository. Starting another task performs an
 automatic switch:
@@ -681,6 +703,11 @@ factory:
 7. runs release tests and verifies remote reachability;
 8. cleans the worker only after verification.
 
+Cleanup is audited as a separate stage after both remote pushes are verified.
+If it fails, development and production remain recorded as `published`, the
+task becomes `blocked` with `cleanup: failed`, and `factory cleanup <task-id>`
+retries only artifact cleanup without republishing anything.
+
 `merge-develop` promotes the complete current development branch:
 
 ```json
@@ -713,6 +740,13 @@ Set canonical project checks explicitly when possible:
   ]
 }
 ```
+
+Each executed check retains its command verbatim and its numeric exit code. The
+task audit stores an ANSI-free summary capped at 8,192 characters; for failures
+that summary is the useful tail rather than the start of a large test run. The
+complete ANSI-free output is written under the task's private `events`
+directory, and the test row's `outputPath` points to that file. This keeps
+`state.json` bounded without losing diagnostics.
 
 ### Isolated PostgreSQL test databases
 
@@ -750,6 +784,10 @@ The full object in `config.default.json` allows custom environment-variable
 names, connection file, maintenance database, and `psql` command. Keep this
 configuration private; it does not belong in the target repository.
 
+Private config and state writes use a validated temporary file followed by an
+atomic same-directory replacement. Readers retry briefly so a scheduler or
+child process does not fail during the replacement window.
+
 ## Private state
 
 Show the paths for one repository:
@@ -772,7 +810,7 @@ Private data is stored under:
 
 It includes config, queue state, background-session metadata, captured Stop
 events, transcript paths, scheduler identity/heartbeat, and resolved test
-commands. Older config is migrated to v5 and state to v4 by adding missing
+commands. Older config is migrated to v7 and state to v9 by adding missing
 fields; repository-specific settings are preserved. Test database isolation
 remains disabled unless explicitly enabled per repository.
 
@@ -791,7 +829,8 @@ Run the local PowerShell runtime suite:
 The suite uses a temporary local Git remote and a fake Claude CLI. It does not
 call a model, Asana, or a real project remote. It verifies external worktree
 creation, background-session metadata, Stop-hook capture, the review gate,
-exact-SHA approval, linked-worktree project identity, and dynamic concurrency.
+exact-SHA approval, linked-worktree project identity, dynamic concurrency,
+scheduler failure/busy recovery, and bounded pipeline-output persistence.
 
 ## Safe cleanup
 

@@ -85,6 +85,7 @@ if ($Initialize) {
                 approval = $null
                 integration = $null
                 production = $null
+                cleanup = $null
                 reworkRequestedAt = $null
                 planRecordedAt = $null
                 resultRecordedAt = $null

@@ -83,9 +83,6 @@ try {
     $head = (& git -C $worktree rev-parse HEAD 2>$null).Trim()
     $currentBranch = (& git -C $worktree branch --show-current 2>$null).Trim()
     $dirty = @(& git -C $worktree status --porcelain 2>$null)
-    if ($head -ne $commit) {
-        throw "Worker HEAD '$head' differs from recorded commit '$commit'."
-    }
     if ($currentBranch -ne $branch) {
         throw "Worker worktree is on '$currentBranch', expected '$branch'."
     }
@@ -94,11 +91,11 @@ try {
     }
 
     if ($Action -eq "finalize") {
-        if ([string]$task.status -ne "syncing") {
-            throw "Task '$TaskId' is '$($task.status)', not awaiting sync validation."
+        if ([string]$task.status -notin @("syncing", "awaiting-review", "held")) {
+            throw "Task '$TaskId' is '$($task.status)'; finalize requires syncing, awaiting-review, or held."
         }
         if (-not $TestsPath) {
-            throw "Finalize requires a test-results JSON file."
+            throw "Finalize field 'TestsPath' requires a test-results JSON file."
         }
         $resolvedTestsPath = [IO.Path]::GetFullPath($TestsPath)
         if (-not (Test-FactoryPathInsideRoot -Path $resolvedTestsPath -Root ([string]$context.sessionsPath))) {
@@ -109,44 +106,70 @@ try {
         }
 
         $testReport = Read-FactoryJson -Path $resolvedTestsPath
-        $tests = @($testReport.tests)
+        $tests = @(Get-FactoryNestedValue -Target $testReport -Name "tests" -Default @())
         if ($tests.Count -eq 0) {
-            throw "Sync validation must report at least one check."
+            throw "Sync test report '$resolvedTestsPath' field 'tests' must contain at least one check."
         }
         $passedCount = 0
-        foreach ($test in $tests) {
-            if (-not [string]$test.command -or -not [string]$test.summary) {
-                throw "Every sync check requires command and summary text."
+        for ($testIndex = 0; $testIndex -lt $tests.Count; $testIndex++) {
+            $test = $tests[$testIndex]
+            $testCommand = [string](Get-FactoryNestedValue -Target $test -Name "command" -Default "")
+            $testSummary = [string](Get-FactoryNestedValue -Target $test -Name "summary" -Default "")
+            $testStatus = [string](Get-FactoryNestedValue -Target $test -Name "status" -Default "")
+            if (-not $testCommand -or -not $testSummary) {
+                throw "Sync test report '$resolvedTestsPath' fields 'tests[$testIndex].command' and 'tests[$testIndex].summary' are required."
             }
-            if ([string]$test.status -notin @("passed", "failed", "skipped")) {
-                throw "Invalid sync check status '$($test.status)'."
+            if ($testStatus -notin @("passed", "failed", "skipped")) {
+                throw "Sync test report '$resolvedTestsPath' field 'tests[$testIndex].status' has invalid value '$testStatus'."
             }
-            if ([string]$test.status -eq "failed") {
-                throw "Sync check failed: $($test.command) - $($test.summary)"
+            if ($testStatus -eq "failed") {
+                throw "Sync check failed: $testCommand - $testSummary"
             }
-            if ([string]$test.status -eq "passed") { $passedCount++ }
+            if ($testStatus -eq "passed") { $passedCount++ }
         }
         if ($passedCount -eq 0) {
-            throw "Sync validation requires at least one passed check."
+            throw "Sync test report '$resolvedTestsPath' field 'tests' requires at least one passed check."
         }
 
-        $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $commit)
+        $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
+        $development = if ([string]$config.developmentBranch) { [string]$config.developmentBranch } else { "develop" }
+        $baseRef = "$remote/$development"
+        & git -C $repositoryRoot fetch $remote $development 1> $null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to fetch '$baseRef' while finalizing sync." }
+        $baseCommit = (& git -C $repositoryRoot rev-parse "$baseRef^{commit}" 2>$null).Trim()
+        if (-not $baseCommit) { throw "Configured development branch does not exist: $baseRef" }
+        & git -C $worktree merge-base --is-ancestor $baseCommit $head
+        if ($LASTEXITCODE -ne 0) {
+            throw "Sync candidate '$head' does not contain current development base '$baseCommit'."
+        }
+        $parentLine = (& git -C $worktree rev-list --parents -n 1 $head 2>$null).Trim()
+        if (($parentLine -split '\s+').Count -ne 2) {
+            throw "Sync candidate '$head' is not a single-parent task commit."
+        }
+        $commitCount = (& git -C $worktree rev-list --count "$baseRef..$head").Trim()
+        if ([int]$commitCount -ne 1) {
+            throw "Synchronized branch contains $commitCount task commits above '$baseRef'; expected one."
+        }
+
+        $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $head)
+        $notes = [string](Get-FactoryNestedValue -Target $testReport -Name "notes" -Default "")
         $result = [pscustomobject]@{
             status = "completed"
             taskId = $TaskId
             branch = $branch
-            commit = $commit
+            commit = $head
             worktree = $worktree
             changedFiles = $changedFiles
             tests = $tests
-            notes = if ([string]$testReport.notes) {
-                [string]$testReport.notes
+            notes = if ($notes) {
+                $notes
             } else {
                 "Rebased onto the configured development branch and revalidated."
             }
             blockingReason = ""
         }
         $now = Get-FactoryUtcTimestamp
+        Set-FactoryProperty -Target $task -Name "commit" -Value $head
         Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
         Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
         Set-FactoryProperty -Target $task -Name "review" -Value $null
@@ -162,12 +185,17 @@ try {
         [ordered]@{
             taskId = $TaskId
             status = "awaiting-review"
-            commit = $commit
+            commit = $head
             worktree = $worktree
             changedFiles = $changedFiles
             tests = $tests
+            adoptedResolvedHead = ($head -ne $commit)
         } | ConvertTo-Json -Depth 20
         exit 0
+    }
+
+    if ($head -ne $commit) {
+        throw "Worker HEAD '$head' differs from recorded commit '$commit'. Use sync finalize with a test report to adopt a manually resolved one-commit rebase."
     }
 
     if ([string]$task.status -eq "syncing") {

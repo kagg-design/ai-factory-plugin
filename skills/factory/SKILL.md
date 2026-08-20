@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, reject, cleanup, sync, preview, chat, scheduler, or asks to manage factory tasks and workers.
+description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, rework, release, reject, cleanup, sync, preview, chat, scheduler, or asks to manage factory tasks and workers.
 ---
 
 # Factory orchestrator for Codex
@@ -29,6 +29,9 @@ integration, and output. Apply these Codex adaptations:
   internal explicit skill name used during bootstrap.
 - Run native operations through the installed `factory` command. In the Codex
   TUI the user may also run them directly as `!factory ...`.
+- `rework` is a queued redelivery, not text for the operator to paste into an
+  old chat. `release` is the explicit stale-session escape hatch; use the
+  canonical `task-action.ps1 -Action release` flow and never edit state JSON.
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.

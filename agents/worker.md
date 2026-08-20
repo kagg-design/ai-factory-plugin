@@ -24,7 +24,10 @@ or task-source quotations merely to match this setting.
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
-- Never merge, cherry-pick, rebase, or modify shared branches.
+- Never merge, rebase, or modify shared branches.
+- Cherry-pick and revert are allowed only inside the supplied worker worktree.
+  Preserve the final one-task-commit invariant; prefer `--no-commit` followed
+  by amending the task commit when the branch already has one.
 - Never switch to `develop`, `master`, `main`, or another shared branch.
 - Never remove a worktree or delete a branch.
 - Never update factory state, configuration, session metadata, or event files.

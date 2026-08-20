@@ -19,25 +19,24 @@ $command = [string]$payload.tool_input.command
 $cwd = [string]$payload.cwd
 if (-not $command -or -not $cwd) { Stop-FactoryGuardClosed -Reason "hook payload has no command or cwd" }
 
-$patterns = @(
-    '(?i)(^|[;&|]\s*)git\s+push\b',
-    '(?i)(^|[;&|]\s*)git\s+merge\b',
-    '(?i)(^|[;&|]\s*)git\s+cherry-pick\b',
-    '(?i)(^|[;&|]\s*)git\s+rebase\b',
-    '(?i)(^|[;&|]\s*)git\s+worktree\s+(remove|prune)\b',
-    '(?i)(^|[;&|]\s*)git\s+branch\s+(-d|-D|--delete)\b',
-    '(?i)(^|[;&|]\s*)git\s+(switch|checkout)\b[^\r\n]*(master|main|develop|development)\b',
-    '(?i)(^|[;&|]\s*)gh\s+pr\s+merge\b'
+$rules = @(
+    [pscustomobject]@{ name = "git push"; pattern = '(?i)(^|[;&|]\s*)git\s+push(?![-\w])' },
+    [pscustomobject]@{ name = "git merge"; pattern = '(?i)(^|[;&|]\s*)git\s+merge(?![-\w])' },
+    [pscustomobject]@{ name = "git rebase"; pattern = '(?i)(^|[;&|]\s*)git\s+rebase(?![-\w])' },
+    [pscustomobject]@{ name = "git worktree remove/prune"; pattern = '(?i)(^|[;&|]\s*)git\s+worktree\s+(remove|prune)(?![-\w])' },
+    [pscustomobject]@{ name = "git branch delete"; pattern = '(?i)(^|[;&|]\s*)git\s+branch\s+(-d|-D|--delete)(?![-\w])' },
+    [pscustomobject]@{ name = "git checkout/switch shared branch"; pattern = '(?i)(^|[;&|]\s*)git\s+(switch|checkout)(?![-\w])[^\r\n]*(master|main|develop|development)\b' },
+    [pscustomobject]@{ name = "gh pr merge"; pattern = '(?i)(^|[;&|]\s*)gh\s+pr\s+merge(?![-\w])' }
 )
 
-$prohibited = $false
-foreach ($pattern in $patterns) {
-    if ($command -match $pattern) {
-        $prohibited = $true
+$offendingCommand = ""
+foreach ($rule in $rules) {
+    if ($command -match [string]$rule.pattern) {
+        $offendingCommand = [string]$rule.name
         break
     }
 }
-if (-not $prohibited) { exit 0 }
+if (-not $offendingCommand) { exit 0 }
 
 try {
     $branchOutput = @(& git -C $cwd branch --show-current 2>&1 | ForEach-Object { [string]$_ })
@@ -52,7 +51,7 @@ if ($branch -like "factory-worker/*") {
             hookSpecificOutput = [ordered]@{
                 hookEventName = "PreToolUse"
                 permissionDecision = "deny"
-                permissionDecisionReason = "Factory worker branches may edit, test, and commit only. Push, merge, rebase, shared-branch checkout, and worktree deletion are reserved for the factory orchestrator."
+                permissionDecisionReason = "Factory Git guard blocked '$offendingCommand' on worker branch '$branch'. Push, merge, rebase, shared-branch checkout, and worktree deletion are reserved for the factory orchestrator. Read-only history commands plus cherry-pick and revert inside the worker branch are allowed."
             }
         } | ConvertTo-Json -Depth 10 -Compress
         exit 0

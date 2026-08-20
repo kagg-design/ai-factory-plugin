@@ -271,18 +271,24 @@ $schedulerCheck = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @
     "-Action", "status", "-Repository", [string]$context.repositoryRoot,
     "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
 )
-$schedulerPassed = [int]$schedulerCheck.exitCode -eq 0
-$schedulerDetail = if ($schedulerPassed) {
+$schedulerCommandPassed = [int]$schedulerCheck.exitCode -eq 0
+$schedulerInfo = $null
+$schedulerDetail = if ($schedulerCommandPassed) {
     $schedulerInfo = [string]$schedulerCheck.stdout | ConvertFrom-Json
-    if ([bool]$schedulerInfo.running) {
-        "native PID $($schedulerInfo.pid), heartbeat $($schedulerInfo.heartbeatAt)"
+    if ([string]$schedulerInfo.status -eq "busy") {
+        "native PID $($schedulerInfo.pid), busy $($schedulerInfo.activity) task '$($schedulerInfo.activityTaskId)' since $($schedulerInfo.activitySince), heartbeat $($schedulerInfo.heartbeatAt)"
+    } elseif ([string]$schedulerInfo.status -eq "failed") {
+        "native scheduler failed: $($schedulerInfo.lastError); stderr $($schedulerInfo.stderrPath)"
+    } elseif ([bool]$schedulerInfo.running) {
+        "native PID $($schedulerInfo.pid), heartbeat $($schedulerInfo.heartbeatAt), logs $($schedulerInfo.stdoutPath) and $($schedulerInfo.stderrPath)"
     } else {
-        "native scheduler stopped"
+        "native scheduler stopped; last exit '$($schedulerInfo.lastExitReason)', logs $($schedulerInfo.stdoutPath) and $($schedulerInfo.stderrPath)"
     }
 } else {
     ([string]$schedulerCheck.output -replace '[\r\n\t]+', ' ').Trim()
 }
-Add-DoctorCheck -Name "scheduler" -Passed $schedulerPassed -Severity "info" -Detail $schedulerDetail
+$schedulerPassed = $schedulerCommandPassed -and ($null -eq $schedulerInfo -or [string]$schedulerInfo.status -ne "failed")
+Add-DoctorCheck -Name "scheduler" -Passed $schedulerPassed -Severity "warning" -Detail $schedulerDetail
 
 $requiredFailures = @($checks | Where-Object { $_.severity -eq "required" -and -not $_.passed })
 $warnings = @($checks | Where-Object { $_.severity -eq "warning" -and -not $_.passed })

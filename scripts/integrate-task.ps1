@@ -194,6 +194,7 @@ function Update-PipelineTask {
         [string]$ErrorText,
         $IntegrationValue,
         $ProductionValue,
+        $CleanupValue,
         [bool]$ClearApproval = $false,
         [string[]]$ExpectedStatuses = @(),
         [string]$ExpectedPlanHash = ""
@@ -220,6 +221,7 @@ function Update-PipelineTask {
         Set-FactoryProperty -Target $currentTask -Name "error" -Value $(if ($ErrorText) { $ErrorText } else { $null })
         if ($null -ne $IntegrationValue) { Set-FactoryProperty -Target $currentTask -Name "integration" -Value $IntegrationValue }
         if ($null -ne $ProductionValue) { Set-FactoryProperty -Target $currentTask -Name "production" -Value $ProductionValue }
+        if ($null -ne $CleanupValue) { Set-FactoryProperty -Target $currentTask -Name "cleanup" -Value $CleanupValue }
         if ($ClearApproval) { Set-FactoryProperty -Target $currentTask -Name "approval" -Value $null }
         $now = Get-FactoryUtcTimestamp
         Set-FactoryProperty -Target $currentTask -Name "updatedAt" -Value $now
@@ -240,6 +242,7 @@ $currentStage = "validation"
 $developmentPublished = $false
 $integrationAudit = $null
 $productionAudit = $null
+$cleanupAudit = $null
 $script:LastCheckResults = @()
 $mayUpdateState = [string]$task.status -eq "approved"
 $claimAttempted = $false
@@ -407,12 +410,30 @@ try {
     Set-FactoryProperty -Target $productionAudit -Name "publishedAt" -Value (Get-FactoryUtcTimestamp)
     Set-FactoryProperty -Target $productionAudit -Name "summary" -Value "Approved commit was published to $remote/$developmentBranch and $remote/$productionBranch after parallel candidate checks."
 
-    Update-PipelineTask -Status "production" -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit
-    $cleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "cleanup-task.ps1") `
-        -Repository $repositoryRoot -TaskId $TaskId -ClaudeCommand $ClaudeCommand -FinalizeProduction) | ConvertFrom-Json
+    $currentStage = "cleanup"
+    $cleanupAudit = [pscustomobject]@{
+        status = "running"
+        taskCommit = $taskCommit
+        startedAt = Get-FactoryUtcTimestamp
+    }
+    Update-PipelineTask -Status "production" -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $cleanupAudit
+    $cleanupRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "cleanup-task.ps1"),
+        "-Repository", $repositoryRoot, "-TaskId", $TaskId, "-ClaudeCommand", $ClaudeCommand,
+        "-FinalizeProduction"
+    )
+    if ([int]$cleanupRun.exitCode -ne 0) {
+        $detail = ([string]$cleanupRun.output -replace '[\r\n\t]+', ' ').Trim()
+        throw "Cleanup failed after both branch pushes were verified: $detail"
+    }
+    $cleanupText = ([string]$cleanupRun.stdout).Trim()
+    if (-not $cleanupText) { throw "Cleanup returned no result after both branch pushes were verified." }
+    try { $cleanup = $cleanupText | ConvertFrom-Json } catch { throw "Cleanup returned invalid JSON after both branch pushes were verified." }
+    $cleanupStatus = [string](Get-FactoryNestedValue -Target $cleanup -Name "status" -Default "")
+    if (-not $cleanupStatus) { throw "Cleanup result is missing required field 'status' after both branch pushes were verified." }
     [ordered]@{
         taskId = $TaskId
-        status = [string]$cleanup.status
+        status = $cleanupStatus
         commit = $taskCommit
         integration = $integrationAudit
         production = $productionAudit
@@ -430,7 +451,9 @@ try {
     }
     try {
         if ($mayUpdateState -and (-not $claimAttempted -or $pipelineClaimed)) {
-            if ($currentStage -eq "production") {
+            if ($currentStage -eq "cleanup") {
+                Update-PipelineTask -Status "blocked" -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $failureAudit -ClearApproval $true
+            } elseif ($currentStage -eq "production") {
                 Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $failureAudit -ClearApproval $true
             } else {
                 Update-PipelineTask -Status "awaiting-review" -ErrorText $failure -IntegrationValue $failureAudit -ProductionValue $null -ClearApproval $true

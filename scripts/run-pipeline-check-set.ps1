@@ -24,13 +24,20 @@ $input = Read-FactoryJson -Path $resolvedCommandsPath
 if ([int](Get-FactoryNestedValue -Target $input -Name "version" -Default 0) -ne 1) {
     throw "Unsupported pipeline check input version."
 }
-$commands = @((Get-FactoryNestedValue -Target $input -Name "commands" -Default @()) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+$taskId = [string](Get-FactoryNestedValue -Target $input -Name "taskId" -Default "")
+if (-not $taskId) { throw "Pipeline check input has no taskId." }
+$commands = @((Get-FactoryNestedValue -Target $input -Name "commands" -Default @()) | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
 if ($commands.Count -eq 0) { throw "Pipeline check input contains no commands." }
+$safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
+$taskEventRoot = Join-Path ([string]$context.eventsPath) $safeTaskId
+New-Item -ItemType Directory -Path $taskEventRoot -Force | Out-Null
 
 $results = New-Object System.Collections.Generic.List[object]
 $success = $true
 $failure = ""
+$commandIndex = 0
 foreach ($command in $commands) {
+    $commandIndex++
     if ($command.Length -gt 4096 -or $command -match '[\r\n]') {
         throw "Pipeline test commands must be single-line strings no longer than 4096 characters."
     }
@@ -43,15 +50,22 @@ foreach ($command in $commands) {
         "-Command", $command,
         "-SkipContextInitialization"
     )
+    $cleanOutput = Remove-FactoryAnsiSequences -Value ([string]$run.output)
+    $cleanOutput = $cleanOutput.Replace([string][char]0, "")
+    $outputPath = Join-Path $taskEventRoot ("pipeline-{0}-{1:D2}-{2}.log" -f $Scope, $commandIndex, [Guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($outputPath, $cleanOutput + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
     $summary = if ([int]$run.exitCode -eq 0) {
         "Exited successfully."
     } else {
-        ([string]$run.output -replace '[\r\n\t]+', ' ').Trim()
+        (Get-FactoryBoundedTextTail -Value $cleanOutput -MaximumLength 8192).Trim()
     }
+    if (-not $summary) { $summary = "Command exited with no diagnostic output." }
     $results.Add([pscustomobject]@{
         command = $command
+        exitCode = [int]$run.exitCode
         status = if ([int]$run.exitCode -eq 0) { "passed" } else { "failed" }
         summary = $summary
+        outputPath = $outputPath
         startedAt = $started
         completedAt = Get-FactoryUtcTimestamp
     })

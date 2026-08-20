@@ -185,6 +185,7 @@ try {
     Set-FactoryProperty -Target $task -Name "approval" -Value $null
     Set-FactoryProperty -Target $task -Name "integration" -Value $null
     Set-FactoryProperty -Target $task -Name "production" -Value $null
+    Set-FactoryProperty -Target $task -Name "cleanup" -Value $null
     Set-FactoryProperty -Target $task -Name "error" -Value $null
     Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now

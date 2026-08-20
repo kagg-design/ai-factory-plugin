@@ -34,7 +34,9 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
-    if ([string]$task.commit -or $null -ne $task.workerResult) {
+    $isActiveRework = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -and
+        [string]$task.status -in @("queued", "starting", "planning", "running", "awaiting-input", "blocked", "failed", "held")
+    if (([string]$task.commit -or $null -ne $task.workerResult) -and -not $isActiveRework) {
         throw "Task '$TaskId' already has a validated result or commit."
     }
     $worktree = [string]$task.worktree

@@ -226,6 +226,10 @@ try {
         }
     }
 
+    if ($env:CLAUDE_FACTORY_TEST_FAIL_CLEANUP -eq $TaskId) {
+        throw "Synthetic cleanup failure for '$TaskId'."
+    }
+
     # A terminal-looking row can still own a live process (and therefore hold
     # the worktree on Windows). Stop and verify every matching session before
     # touching the directory. Agent View rm failures remain best effort.
@@ -314,6 +318,11 @@ try {
     Set-FactoryProperty -Target $task -Name "approval" -Value $null
     Set-FactoryProperty -Target $task -Name "status" -Value "done"
     Set-FactoryProperty -Target $task -Name "error" -Value $null
+    Set-FactoryProperty -Target $task -Name "cleanup" -Value ([pscustomobject]@{
+        status = "completed"
+        taskCommit = $commit
+        completedAt = $now
+    })
     Set-FactoryProperty -Target $task -Name "testDatabase" -Value $null
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now

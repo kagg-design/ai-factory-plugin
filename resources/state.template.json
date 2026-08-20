@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 9,
   "active": false,
   "paused": false,
   "cronJobId": null,
@@ -14,7 +14,13 @@
     "lastTickAt": null,
     "lastTransitionAt": null,
     "lastError": null,
-    "failureCount": 0
+    "failureCount": 0,
+    "activity": "idle",
+    "activityTaskId": null,
+    "activityTaskTitle": null,
+    "activitySince": null,
+    "activityHeartbeatAt": null,
+    "lastExitReason": null
   },
   "createdAt": null,
   "agentResolutionCache": null,

@@ -284,6 +284,8 @@ function Get-CliNextAction {
     $runtime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
     $prompt = if ($runtime -eq "codex") { "factory" } else { "/factory" }
     $requiresFreshReview = Test-FactoryTaskRequiresFreshReview -Task $Task
+    $cleanup = Get-CliProperty -InputObject $Task -Name "cleanup"
+    $cleanupFailed = [string](Get-CliProperty -InputObject $cleanup -Name "status") -eq "failed"
 
     $primary = switch ($status) {
         "queued" {
@@ -316,7 +318,8 @@ function Get-CliNextAction {
             elseif ($isMachineHeld) { "$prompt retry $id" }
             else { "$prompt inspect $id" }
         }
-        { $_ -in @("blocked", "failed", "rejected") } { "$prompt inspect $id" }
+        { $_ -in @("blocked", "failed") } { if ($cleanupFailed) { "$prompt cleanup $id" } else { "$prompt inspect $id" } }
+        "rejected" { "$prompt inspect $id" }
         "done" { "$prompt inspect $id" }
         default { "$prompt inspect $id" }
     }
@@ -464,9 +467,19 @@ function Write-CliStatus {
     $schedulerState = Get-CliProperty -InputObject $State -Name "scheduler"
     $schedulerStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "status") -Fallback "stopped"
     $schedulerPid = [int](Get-CliProperty -InputObject $schedulerState -Name "pid" -Default 0)
+    $schedulerActivity = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activity") -Fallback "idle"
+    $schedulerTaskId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activityTaskId")
+    $schedulerTaskTitle = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activityTaskTitle")
+    $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
-    $scheduler = if ($schedulerStatus -eq "running") {
+    $scheduler = if ($schedulerStatus -eq "busy") {
+        $busyTarget = @($schedulerTaskId, $schedulerTaskTitle) | Where-Object { $_ }
+        $busySuffix = if ($busyTarget.Count -gt 0) { " " + ($busyTarget -join " - ") } else { "" }
+        "native busy: $schedulerActivity$busySuffix (PID $schedulerPid)"
+    } elseif ($schedulerStatus -eq "failed") {
+        "native failed$(if ($schedulerPid -gt 0) { ' (PID ' + $schedulerPid + '; retrying)' } else { '' })"
+    } elseif ($schedulerStatus -eq "running") {
         if ($runnable -eq 0) { "native sleeping (PID $schedulerPid)" } else { "native running (PID $schedulerPid)" }
     } elseif ($cronId) {
         "legacy cron $cronId"
@@ -475,6 +488,7 @@ function Write-CliStatus {
     } else {
         "native stopped"
     }
+    $schedulerProblem = $runnable -gt 0 -and $schedulerStatus -in @("stopped", "failed")
     $projectName = Split-Path ([string]$Context.repositoryRoot) -Leaf
 
     $lines = New-Object Collections.Generic.List[string]
@@ -495,8 +509,24 @@ function Write-CliStatus {
     )
     foreach ($group in $groups) {
         $groupTasks = @($selected | Where-Object { (Get-CliGroup -Status ([string]$_.status)) -eq $group.Key })
-        if ($groupTasks.Count -eq 0) { continue }
-        $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $($groupTasks.Count)")
+        $schedulerRows = if ($group.Key -eq "Needs your action" -and $schedulerProblem) { 1 } else { 0 }
+        $groupCount = $groupTasks.Count + $schedulerRows
+        if ($groupCount -eq 0) { continue }
+        $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $groupCount")
+        if ($schedulerRows -gt 0) {
+            $schedulerConnector = if ($groupTasks.Count -eq 0) { $script:Tree.Last } else { $script:Tree.Branch }
+            $schedulerDetailPrefix = if ($groupTasks.Count -eq 0) { "$($script:Tree.Vertical)     " } else { "$($script:Tree.Vertical)  $($script:Tree.Vertical)  " }
+            Add-CliWrappedLine `
+                -Lines $lines `
+                -FirstPrefix "$($script:Tree.Vertical)  $schedulerConnector$($script:Tree.Horizontal) " `
+                -ContinuationPrefix $schedulerDetailPrefix `
+                -Text "SCHEDULER $($script:Tree.Horizontal) $schedulerStatus $($script:Tree.Horizontal) runnable work is not being processed"
+            $schedulerReason = if ($schedulerError) { $schedulerError } else { "No live native scheduler owns this project." }
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Reason: $schedulerReason"
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Log: $(Join-Path ([string]$Context.projectData) 'scheduler.stderr.log')"
+            $schedulerNext = if ($schedulerStatus -eq "stopped") { "factory resume" } else { "factory scheduler status" }
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix   " -Text "$($script:Tree.Arrow) Next: $schedulerNext"
+        }
         for ($index = 0; $index -lt $groupTasks.Count; $index++) {
             Add-CliTaskTree -Lines $lines -Task $groupTasks[$index] -State $State -Config $Config -IsLast ($index -eq $groupTasks.Count - 1)
         }
@@ -629,7 +659,7 @@ function Write-CliInspect {
     if ($approvedCommit) { Add-CliInspectLine -Lines $lines -Text "Approved commit: $approvedCommit" }
     $approvalMode = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $approval -Name "mode")
     if ($approvalMode) { Add-CliInspectLine -Lines $lines -Text "Approval mode: $approvalMode" }
-    foreach ($stageName in @("integration", "production")) {
+    foreach ($stageName in @("integration", "production", "cleanup")) {
         $stage = Get-CliProperty -InputObject $task -Name $stageName
         $stageStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $stage -Name "status")
         if ($stageStatus) { Add-CliInspectLine -Lines $lines -Text "$stageName`: $stageStatus" }
@@ -1082,9 +1112,15 @@ function Write-CliSchedulerResult {
     Write-Output "Native scheduler: $([string]$scheduler.status)"
     Write-Output "Factory: $(if ([bool]$scheduler.paused) { 'paused' } elseif ([bool]$scheduler.active) { 'active' } else { 'idle' })"
     if ([bool]$scheduler.running) { Write-Output "Process: PID $([int]$scheduler.pid); interval $([int]$scheduler.intervalSeconds)s" }
+    if ([string]$scheduler.activity -and [string]$scheduler.activity -ne "idle") {
+        Write-Output "Activity: $([string]$scheduler.activity) $([string]$scheduler.activityTaskId) $([string]$scheduler.activityTaskTitle) since $([string]$scheduler.activitySince)"
+    }
     if ([string]$scheduler.heartbeatAt) { Write-Output "Heartbeat: $([string]$scheduler.heartbeatAt)" }
     if ([string]$scheduler.lastTickAt) { Write-Output "Last tick: $([string]$scheduler.lastTickAt)" }
     if ([string]$scheduler.lastError) { Write-Output "Last error: $(ConvertTo-CliLine -Value $scheduler.lastError)" }
+    if ([string]$scheduler.lastExitReason) { Write-Output "Last exit: $(ConvertTo-CliLine -Value $scheduler.lastExitReason)" }
+    if ([string]$scheduler.stdoutPath) { Write-Output "Tick log: $([string]$scheduler.stdoutPath)" }
+    if ([string]$scheduler.stderrPath) { Write-Output "Error log: $([string]$scheduler.stderrPath)" }
 }
 
 function Invoke-CliSchedulerAction {
@@ -1097,6 +1133,9 @@ function Invoke-CliSchedulerAction {
         "-RuntimeHome", [string]$Context.runtimeHome
     )
     if ($Action -eq "resume") {
+        if ($null -ne (Get-CliProperty -InputObject $result -Name "resumed") -and -not [bool](Get-CliProperty -InputObject $result -Name "resumed" -Default $true)) {
+            Write-Output "Resume refused: $(ConvertTo-CliLine -Value (Get-CliProperty -InputObject $result -Name 'reason'))"
+        }
         Write-CliSchedulerResult -Result (Get-CliProperty -InputObject $result -Name "scheduler") -Action "status"
         $tickResult = Get-CliProperty -InputObject $result -Name "tick"
         if ($null -ne $tickResult) { Write-CliSchedulerResult -Result $tickResult -Action "tick" }

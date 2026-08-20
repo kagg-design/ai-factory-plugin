@@ -223,6 +223,11 @@ try {
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
     Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
     Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
+    Assert-True ($publicSkill.Contains("release <task-id>")) "The public skill does not expose stale-session release."
+    Assert-True ($publicSkill.Contains("queues a new attempt")) "The public skill still describes rework as an undelivered chat continuation."
+    $commonSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\factory-common.ps1") -Raw
+    Assert-True ($commonSource.Contains("[IO.File]::Replace")) "Factory JSON writes do not use atomic replacement."
+    Assert-True ($commonSource.Contains("RetryCount")) "Factory JSON reads do not retry transient replacement races."
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
     & git init --bare $remote 1> $null
@@ -277,7 +282,7 @@ try {
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
     Assert-Equal 7 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
-    Assert-Equal 7 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
@@ -346,12 +351,15 @@ try {
         $liveLauncherMutex.Dispose()
     }
 
+    $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $schedulerScript = Join-Path $pluginRoot "scripts\factory-scheduler.ps1"
     $schedulerStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
     Assert-True ([bool]$schedulerStart.started) "Native scheduler did not start."
     Assert-True ([int]$schedulerStart.scheduler.pid -gt 0) "Native scheduler did not report its PID."
     $schedulerStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-True ([bool]$schedulerStatus.running) "Native scheduler status did not find the live process."
+    Assert-True (Test-Path -LiteralPath ([string]$schedulerStatus.stdoutPath)) "Scheduler stdout log was not created by the transient launcher."
+    Assert-True (Test-Path -LiteralPath ([string]$schedulerStatus.stderrPath)) "Scheduler stderr log was not created by the transient launcher."
     & powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action run -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2
     if ($LASTEXITCODE -ne 0) { throw "Duplicate scheduler run probe failed." }
     $schedulerAfterDuplicateRun = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
@@ -361,6 +369,91 @@ try {
     Assert-True ([bool]$schedulerSecondStart.alreadyRunning) "Native scheduler allowed a duplicate process."
     $schedulerStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-True ([bool]$schedulerStop.stopped) "Native scheduler did not stop gracefully."
+
+    $idleHeartbeatBefore = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "heartbeatAt" -Default "")
+    Start-Sleep -Milliseconds 25
+    $idleSchedulerTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    $idleSchedulerState = (Read-FactoryJson -Path $context.statePath).scheduler
+    Assert-Equal 0 ([int]$idleSchedulerTick.launchedCount) "Idle scheduler tick unexpectedly launched work."
+    Assert-True ([string]$idleSchedulerState.heartbeatAt -and [string]$idleSchedulerState.heartbeatAt -ne $idleHeartbeatBefore) "A no-op scheduler tick did not refresh its heartbeat."
+    Assert-True ([string]$idleSchedulerState.lastTickAt -ne "") "A no-op scheduler tick did not record its completion time."
+    $schedulerTickLog = [IO.File]::ReadAllText([string]$schedulerStatus.stdoutPath, [Text.Encoding]::UTF8)
+    Assert-True ($schedulerTickLog.Contains('"event":"tick"') -and $schedulerTickLog.Contains('"event":"process-exit"')) "Scheduler stdout log omitted a tick or final exit reason."
+
+    $schedulerFailureState = Read-FactoryJson -Path $context.statePath
+    $schedulerFailureTask = New-FactoryTestTask -Id "scheduler-failure-task" -Title "Runnable scheduler failure" -Now (Get-FactoryUtcTimestamp)
+    $schedulerFailureTask.status = "approved"
+    $schedulerFailureState.tasks = @($schedulerFailureState.tasks) + @($schedulerFailureTask)
+    $schedulerFailureState.active = $true
+    $schedulerFailureState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerFailureState
+    $env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK = "1"
+    try {
+        $schedulerFailureStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+        Assert-True ([bool]$schedulerFailureStart.started) "Synthetic failing scheduler did not start."
+        $schedulerFailureStatus = $null
+        $schedulerFailureDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $schedulerFailureStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        } while ([string]$schedulerFailureStatus.status -ne "failed" -and [DateTime]::UtcNow -lt $schedulerFailureDeadline)
+        Assert-Equal "failed" ([string]$schedulerFailureStatus.status) "A throwing scheduler loop was reported as sleeping or stopped."
+        Assert-True ([string]$schedulerFailureStatus.lastError -match "Synthetic scheduler loop failure") "A throwing scheduler loop did not persist lastError."
+        $schedulerFailureLog = [IO.File]::ReadAllText([string]$schedulerFailureStatus.stderrPath, [Text.Encoding]::UTF8)
+        Assert-True ($schedulerFailureLog.Contains('"event":"tick-exception"') -and $schedulerFailureLog.Contains("Synthetic scheduler loop failure")) "Scheduler stderr log omitted the tick failure reason."
+        $failedSchedulerCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+        Assert-True ($failedSchedulerCli.Contains("NEEDS YOUR ACTION") -and $failedSchedulerCli.Contains("SCHEDULER") -and $failedSchedulerCli.Contains("runnable work is not being processed")) "Factory status rendered a failed scheduler with runnable work as decoration."
+        $failedSchedulerDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+        $failedSchedulerDoctorCheck = @($failedSchedulerDoctor.checks | Where-Object { [string]$_.name -eq "scheduler" })[0]
+        Assert-True (-not [bool]$failedSchedulerDoctorCheck.passed -and [string]$failedSchedulerDoctorCheck.detail -match "failed") "Factory doctor did not diagnose the failed scheduler."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -ErrorAction SilentlyContinue
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    }
+    $schedulerFailureCleanup = Read-FactoryJson -Path $context.statePath
+    $schedulerFailureCleanup.tasks = @($schedulerFailureCleanup.tasks | Where-Object { [string]$_.id -ne "scheduler-failure-task" })
+    $schedulerFailureCleanup.active = $false
+    $schedulerFailureCleanup.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerFailureCleanup
+
+    $schedulerBusyState = Read-FactoryJson -Path $context.statePath
+    $schedulerBusyTask = New-FactoryTestTask -Id "scheduler-busy-task" -Title "Long scheduler integration" -Now (Get-FactoryUtcTimestamp)
+    $schedulerBusyTask.status = "approved"
+    $schedulerBusyState.tasks = @($schedulerBusyState.tasks) + @($schedulerBusyTask)
+    $schedulerBusyState.active = $true
+    $schedulerBusyState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerBusyState
+    $env:CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS = "15000"
+    try {
+        $schedulerBusyStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+        Assert-True ([bool]$schedulerBusyStart.started) "Synthetic busy scheduler did not start."
+        $schedulerBusyStatus = $null
+        $schedulerBusyDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $schedulerBusyStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        } while ([string]$schedulerBusyStatus.activity -ne "integrating" -and [DateTime]::UtcNow -lt $schedulerBusyDeadline)
+        Assert-Equal "busy" ([string]$schedulerBusyStatus.status) "Long integration was not reported as scheduler busy."
+        Assert-Equal "scheduler-busy-task" ([string]$schedulerBusyStatus.activityTaskId) "Busy scheduler status omitted the task id."
+        Assert-Equal "Long scheduler integration" ([string]$schedulerBusyStatus.activityTaskTitle) "Busy scheduler status omitted the task title."
+        Assert-True ([string]$schedulerBusyStatus.activitySince -ne "") "Busy scheduler status omitted the activity start time."
+        $busyHeartbeatBefore = [string]$schedulerBusyStatus.activityHeartbeatAt
+        Start-Sleep -Milliseconds 700
+        $schedulerBusyHeartbeat = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        Assert-True ([string]$schedulerBusyHeartbeat.activityHeartbeatAt -ne $busyHeartbeatBefore) "Long integration did not refresh the activity heartbeat."
+        $schedulerBusyResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action resume -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        Assert-Equal $false ([bool]$schedulerBusyResume.resumed) "Resume started or ticked another scheduler during in-flight work."
+        Assert-True ([string]$schedulerBusyResume.reason -match "busy integrating") "Resume refusal did not explain the in-flight scheduler work."
+        Assert-Equal ([int]$schedulerBusyStatus.pid) ([int]$schedulerBusyResume.scheduler.pid) "Resume replaced the busy scheduler process."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS -ErrorAction SilentlyContinue
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    }
+    $schedulerBusyCleanup = Read-FactoryJson -Path $context.statePath
+    $schedulerBusyCleanup.tasks = @($schedulerBusyCleanup.tasks | Where-Object { [string]$_.id -ne "scheduler-busy-task" })
+    $schedulerBusyCleanup.active = $false
+    $schedulerBusyCleanup.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerBusyCleanup
 
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
@@ -399,6 +492,33 @@ try {
         -Command $isolatedCommand
     if ($LASTEXITCODE -ne 0) { throw "Isolated integrator command fixture failed." }
     Assert-Equal "factory_test_integrator" ([IO.File]::ReadAllText($integratorDatabaseCapture)) "Integrator checks did not receive their own database."
+
+    $ansiFailureCommand = '$escape=[char]27; [Console]::Out.Write($escape + ''[31m'' + (''X'' * 20000) + ''FAILURE_TAIL'' + $escape + ''[0m''); exit 7'
+    $ansiCommandsPath = Join-Path ([string]$context.sessionsPath) "ansi-output-checks.json"
+    Write-FactoryJsonAtomic -Path $ansiCommandsPath -Value ([pscustomobject][ordered]@{
+        version = 1
+        taskId = "ansi-output-task"
+        scope = "integrator"
+        commands = @($ansiFailureCommand)
+    })
+    try {
+        $ansiCheckResult = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\run-pipeline-check-set.ps1") -Repository $repository -Scope integrator -WorkingDirectory $integratorWorktree -CommandsPath $ansiCommandsPath) | ConvertFrom-Json
+    } finally {
+        Remove-Item -LiteralPath $ansiCommandsPath -Force -ErrorAction SilentlyContinue
+    }
+    Assert-Equal $false ([bool]$ansiCheckResult.success) "ANSI failure fixture unexpectedly passed."
+    $ansiTestResult = @($ansiCheckResult.tests)[0]
+    Assert-Equal $ansiFailureCommand ([string]$ansiTestResult.command) "Pipeline state changed the test command instead of preserving it verbatim."
+    Assert-Equal 7 ([int]$ansiTestResult.exitCode) "Pipeline state omitted or changed the native exit code."
+    Assert-True ([string]$ansiTestResult.summary -and ([string]$ansiTestResult.summary).Length -le 8192) "Pipeline failure summary was not bounded."
+    Assert-True ([string]$ansiTestResult.summary -match "FAILURE_TAIL") "Pipeline failure summary did not retain the useful output tail."
+    Assert-True (-not ([string]$ansiTestResult.summary).Contains([string][char]27)) "Pipeline failure summary retained ANSI escape bytes."
+    Assert-True (Test-Path -LiteralPath ([string]$ansiTestResult.outputPath)) "Pipeline test row points to a missing full-output artifact."
+    $ansiEventRoot = [IO.Path]::GetFullPath((Join-Path ([string]$context.eventsPath) (ConvertTo-FactoryTaskArtifactName -TaskId "ansi-output-task"))).TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+    Assert-True ([IO.Path]::GetFullPath([string]$ansiTestResult.outputPath).StartsWith($ansiEventRoot, [StringComparison]::OrdinalIgnoreCase)) "Pipeline full output was not stored next to the task events."
+    $ansiFullOutput = [IO.File]::ReadAllText([string]$ansiTestResult.outputPath, [Text.Encoding]::UTF8)
+    Assert-True ($ansiFullOutput.Length -gt 15000 -and $ansiFullOutput.Contains("FAILURE_TAIL")) "Pipeline full-output artifact was truncated."
+    Assert-True (-not $ansiFullOutput.Contains([string][char]27)) "Pipeline full-output artifact retained ANSI escape bytes."
     Remove-Item -LiteralPath $integratorWorktree -Recurse -Force
     $dropFailureTask = "drop-failure-task"
     $dropFailureDatabase = Initialize-FactoryTestDatabase -Config $migratedConfig -RepositoryRoot $repository -Scope worker -TaskId $dropFailureTask
@@ -615,6 +735,7 @@ try {
                 approval = $null
                 integration = $null
                 production = $null
+                cleanup = $null
                 reworkRequestedAt = $null
                 pendingInstructions = $null
                 error = $null
@@ -626,19 +747,22 @@ try {
         )
     }
     $state.version = 2
-    foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
+    foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "cleanup", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
         $state.tasks[0].PSObject.Properties.Remove($propertyName)
     }
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal 7 ([int]$migratedState.version) "Legacy state version was not migrated."
+    Assert-Equal 9 ([int]$migratedState.version) "Legacy state version was not migrated."
     Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
+    Assert-Equal "idle" ([string]$migratedState.scheduler.activity) "Legacy scheduler activity state was not migrated."
+    Assert-True ($null -ne $migratedState.scheduler.PSObject.Properties["lastExitReason"]) "Legacy scheduler exit diagnostics were not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
     Assert-True ($null -ne $migratedState.PSObject.Properties["agentResolutionCache"]) "Legacy state agent resolution cache field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["planRecordedAt"]) "Legacy task plan timestamp field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["source"]) "Legacy task source field was not added."
+    Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["cleanup"]) "Legacy task cleanup audit field was not added."
 
     $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
@@ -910,8 +1034,23 @@ try {
     Assert-Equal ([int]$secondPreview.assets.pid) ([int]$reusedPreview.assets.pid) "Repeated preview start replaced the Vite process."
     $previewStatusOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview -Repository $repository | Out-String)
     Assert-True ($previewStatusOutput.Contains("preview-switch-task") -and $previewStatusOutput.Contains([string]$secondPreview.url)) "Preview status omitted active task identity or URL."
-    $previewStopOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview stop -Repository $repository | Out-String)
+    $previewWorktreeLiteral = $previewSwitchWorktree.Replace("'", "''")
+    $residualPreviewProcess = Start-Process powershell -ArgumentList @(
+        "-NoProfile", "-Command", "`$factoryPreviewWorktree='$previewWorktreeLiteral'; Start-Sleep -Seconds 120"
+    ) -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 250
+    $residualAliveAfterStop = $true
+    try {
+        $previewStopOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview stop -Repository $repository | Out-String)
+        try { $null = Get-Process -Id $residualPreviewProcess.Id -ErrorAction Stop } catch { $residualAliveAfterStop = $false }
+    } finally {
+        if ($residualAliveAfterStop) {
+            & taskkill /PID ([string]$residualPreviewProcess.Id) /T /F 1> $null 2> $null
+        }
+        $residualPreviewProcess.Dispose()
+    }
     Assert-True ($previewStopOutput.Contains("Factory preview stopped: preview-switch-task")) "Factory preview stop did not report the stopped task."
+    Assert-Equal $false $residualAliveAfterStop "Factory preview stop left an unrecorded process that referenced the worktree."
     Assert-True (-not (Test-Path -LiteralPath ([string]$context.previewPath))) "Factory preview stop retained active metadata."
     Assert-True (-not (Test-Path -LiteralPath $secondPreviewDependency)) "Factory preview stop retained its dependency junction."
     foreach ($stoppedPid in @([int]$secondPreview.app.pid, [int]$secondPreview.assets.pid)) {
@@ -938,19 +1077,36 @@ try {
     }
     Assert-Equal 2 $malformedGuardExit "Malformed Git guard input did not fail closed."
     Assert-True (($malformedGuardOutput -join "`n") -match 'safety check failed') "Malformed Git guard failure was not explicit."
-    $blockedGuardPayload = [ordered]@{
-        cwd = [string]$launch.worktree
-        tool_input = [ordered]@{ command = "git push origin HEAD" }
-    } | ConvertTo-Json -Depth 5 -Compress
-    $blockedGuardResult = ($blockedGuardPayload | & powershell -NoProfile -ExecutionPolicy Bypass -File $guardScript) | ConvertFrom-Json
-    Assert-Equal "deny" ([string]$blockedGuardResult.hookSpecificOutput.permissionDecision) "Worker Git push was not denied."
-    $harmlessGuardPayload = [ordered]@{
-        cwd = [string]$launch.worktree
-        tool_input = [ordered]@{ command = "git status --short" }
-    } | ConvertTo-Json -Depth 5 -Compress
-    $harmlessGuardOutput = @($harmlessGuardPayload | & powershell -NoProfile -ExecutionPolicy Bypass -File $guardScript)
-    Assert-Equal 0 $LASTEXITCODE "Harmless worker Git command failed the guard."
-    Assert-Equal 0 $harmlessGuardOutput.Count "Harmless worker Git command emitted a denial."
+    foreach ($allowedGuardCommand in @(
+        "git status --short",
+        "git merge-base A B",
+        "git merge-tree A B",
+        "git log --merges --oneline",
+        "git diff A B",
+        "git cherry-pick deadbeef",
+        "git revert deadbeef"
+    )) {
+        $allowedGuardPayload = [ordered]@{
+            cwd = [string]$launch.worktree
+            tool_input = [ordered]@{ command = $allowedGuardCommand }
+        } | ConvertTo-Json -Depth 5 -Compress
+        $allowedGuardOutput = @($allowedGuardPayload | & powershell -NoProfile -ExecutionPolicy Bypass -File $guardScript)
+        Assert-Equal 0 $LASTEXITCODE "Allowed worker command failed the guard: $allowedGuardCommand"
+        Assert-Equal 0 $allowedGuardOutput.Count "Allowed worker command emitted a denial: $allowedGuardCommand"
+    }
+    foreach ($blockedGuardFixture in @(
+        [pscustomobject]@{ command = "git push origin HEAD"; name = "git push" },
+        [pscustomobject]@{ command = "git merge feature"; name = "git merge" },
+        [pscustomobject]@{ command = "git rebase origin/develop"; name = "git rebase" }
+    )) {
+        $blockedGuardPayload = [ordered]@{
+            cwd = [string]$launch.worktree
+            tool_input = [ordered]@{ command = [string]$blockedGuardFixture.command }
+        } | ConvertTo-Json -Depth 5 -Compress
+        $blockedGuardResult = ($blockedGuardPayload | & powershell -NoProfile -ExecutionPolicy Bypass -File $guardScript) | ConvertFrom-Json
+        Assert-Equal "deny" ([string]$blockedGuardResult.hookSpecificOutput.permissionDecision) "Worker command was not denied: $($blockedGuardFixture.command)"
+        Assert-True ([string]$blockedGuardResult.hookSpecificOutput.permissionDecisionReason -match [regex]::Escape([string]$blockedGuardFixture.name)) "Git guard denial did not name '$($blockedGuardFixture.name)'."
+    }
 
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = [string]$launch.worktree
     $sessionReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) |
@@ -1112,8 +1268,47 @@ try {
     Assert-Equal $unicodeFixture ([string]$task.workerResult.notes) "Stop-hook input corrupted UTF-8 worker output."
     Assert-True (-not [string]$task.approval) "Task was approved automatically."
 
+    $operatorState = Read-FactoryJson -Path $context.statePath
+    $operatorStateTask = New-FactoryTestTask -Id "operator-state-task" -Title "Operator-owned input state" -Now $now
+    $operatorStateTask.status = "awaiting-input"
+    Set-FactoryProperty -Target $operatorStateTask -Name "reworkRequestedAt" -Value (Get-FactoryUtcTimestamp)
+    Set-FactoryProperty -Target $operatorStateTask -Name "backgroundSession" -Value ([pscustomobject]@{
+        runtime = "claude"; id = "test1234"; sessionId = $fakeSessionId
+        name = "factory-operator-state-task"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
+    })
+    $operatorStateTask.worktree = [string]$launch.worktree
+    $operatorState.tasks = @($operatorState.tasks) + @($operatorStateTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorState
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $operatorStateAfter = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "awaiting-input" ([string](Get-FactoryTask -State $operatorStateAfter -TaskId "operator-state-task").status) "A working row overrode an operator-owned awaiting-input state."
+    $operatorStateAfter.tasks = @($operatorStateAfter.tasks | Where-Object { [string]$_.id -ne "operator-state-task" })
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorStateAfter
+
+    $beforeMissingState = Read-FactoryJson -Path $context.statePath
+    $beforeMissingTask = Get-FactoryTask -State $beforeMissingState -TaskId "test-task"
+    $lastSeenBeforeMissing = [string]$beforeMissingTask.backgroundSession.lastSeenAt
+    $env:CLAUDE_FACTORY_TEST_NO_AGENTS = "1"
+    $missingReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_NO_AGENTS -ErrorAction SilentlyContinue
+    $missingState = Read-FactoryJson -Path $context.statePath
+    $missingTask = Get-FactoryTask -State $missingState -TaskId "test-task"
+    Assert-Equal "stopped" ([string]$missingTask.backgroundSession.state) "A vanished worker session was not recorded as stopped."
+    Assert-Equal "awaiting-review" ([string]$missingTask.status) "A vanished session downgraded a validated awaiting-review task."
+    Assert-Equal $lastSeenBeforeMissing ([string]$missingTask.backgroundSession.lastSeenAt) "A missing session falsely refreshed lastSeenAt."
+
+    $missingTask.status = "running"
+    $missingTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"; id = "missing-release"; sessionId = "missing-release-session"
+        name = "factory-test-task-missing-release"; state = "working"; lastSeenAt = $lastSeenBeforeMissing
+    }
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $missingState
+    $released = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action release -TaskId "test-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "awaiting-review" ([string]$released.status) "Explicit stale-session release did not restore the artifact-derived review state."
+    $releasedState = Read-FactoryJson -Path $context.statePath
+    Assert-True ($null -eq $releasedState.tasks[0].backgroundSession) "Explicit stale-session release retained the missing session identity."
+
     $syncState = Read-FactoryJson -Path $context.statePath
-    $syncState.tasks[0].backgroundSession.state = "done"
     Write-FactoryJsonAtomic -Path $context.statePath -Value $syncState
     [IO.File]::WriteAllText(
         (Join-Path $repository "BASE.md"),
@@ -1136,13 +1331,14 @@ try {
             status = "passed"
             summary = "No whitespace errors."
         })
-        notes = "Synchronized test fixture."
     })
     $syncFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "test-task" -Action finalize -TestsPath $syncReportPath) |
         ConvertFrom-Json
     Assert-Equal "awaiting-review" ([string]$syncFinal.status) "Task sync did not return to review."
     Assert-Equal $commit ([string]$syncFinal.commit) "Task sync finalized the wrong commit."
     Assert-True (-not (Test-Path -LiteralPath $syncReportPath)) "Task sync did not remove its temporary test report."
+    $syncFinalState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "Rebased onto the configured development branch and revalidated." ([string]$syncFinalState.tasks[0].workerResult.notes) "Sync finalize did not default an omitted optional notes field under StrictMode."
 
     $phaseFourConfig = Read-FactoryJson -Path $context.configPath
     $phaseFourConfig.autoPushDevelopment = $true
@@ -1162,6 +1358,83 @@ try {
     Assert-Equal "approved" ([string]$recordedReview.verdict) "Formal review verdict was not recorded."
     Assert-Equal 64 ([string]$recordedReview.planHash).Length "Formal review plan was not hashed."
     Assert-True (-not (Test-Path -LiteralPath $reviewPath)) "Formal review input was not removed from private sessions."
+
+    $reworkWorktree = Join-Path ([string]$context.worktreeRoot) "worker-rework-task"
+    $reworkBranch = "factory-worker/rework-task"
+    & git -C $repository fetch origin develop 1> $null
+    & git -C $repository worktree add -b $reworkBranch $reworkWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create rework delivery fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $reworkWorktree "REWORK.md"), "first version`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $reworkWorktree add REWORK.md
+    & git -C $reworkWorktree commit -m "test: rework delivery" 1> $null
+    $reworkCommit = (& git -C $reworkWorktree rev-parse HEAD).Trim()
+    $reworkState = Read-FactoryJson -Path $context.statePath
+    $reworkTask = New-FactoryTestTask -Id "rework-task" -Title "Deliver review findings" -Now (Get-FactoryUtcTimestamp)
+    $reworkTask.status = "awaiting-review"
+    $reworkTask.attempts = 1
+    $reworkTask.branch = $reworkBranch
+    $reworkTask.commit = $reworkCommit
+    $reworkTask.worktree = $reworkWorktree
+    $reworkTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = "rework-task"; branch = $reworkBranch; commit = $reworkCommit
+        worktree = $reworkWorktree; changedFiles = @("REWORK.md")
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        notes = "Initial result."; blockingReason = ""
+    }
+    $reworkTask.review = [pscustomobject]@{
+        verdict = "changes-required"; commit = $reworkCommit; summary = "Compatibility must be retained."
+        riskNotes = @("Preserve the legacy field."); reviewedAt = Get-FactoryUtcTimestamp
+    }
+    $reworkTask.approval = [pscustomobject]@{ commit = $reworkCommit; approvedAt = Get-FactoryUtcTimestamp }
+    $reworkTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"; id = "rework-old"; sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        name = "factory-rework-task-old"; state = "stopped"; lastSeenAt = Get-FactoryUtcTimestamp
+    }
+    $reworkState.tasks = @($reworkState.tasks) + @($reworkTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $reworkState
+    [IO.File]::AppendAllText(
+        [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
+        "launch`trework-old`t$reworkWorktree`tfactory-rework-task-old`tstopped`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+
+    $reworkFindings = "Keep the exact legacy response field and add its regression test."
+    $reworked = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action rework -TaskId "rework-task" -Instructions $reworkFindings -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "queued" ([string]$reworked.status) "Rework did not queue a deliverable worker attempt."
+    $reworkedState = Read-FactoryJson -Path $context.statePath
+    $reworkedTask = Get-FactoryTask -State $reworkedState -TaskId "rework-task"
+    Assert-Equal $reworkCommit ([string]$reworkedTask.commit) "Rework discarded the validated commit."
+    Assert-Equal $reworkCommit ([string]$reworkedTask.workerResult.commit) "Rework discarded the prior worker result."
+    Assert-True ($null -eq $reworkedTask.review -and $null -eq $reworkedTask.approval) "Rework retained review or approval."
+    Assert-True ($null -eq $reworkedTask.backgroundSession) "Rework retained the old session identity."
+    Assert-Equal $reworkFindings ([string]$reworkedTask.pendingInstructions) "Rework changed the requested findings."
+
+    $postCommitAnswer = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\answer-task.ps1") -Repository $repository -TaskId "rework-task" -Text "Apply the review findings to the retained commit." -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "queued" ([string]$postCommitAnswer.status) "An explicit rework task rejected a post-commit answer."
+    $reworkPromptCopy = Join-Path $testRoot "rework-prompt-copy.txt"
+    $previousPromptCopy = $env:CLAUDE_FACTORY_TEST_PROMPT_COPY
+    try {
+        $env:CLAUDE_FACTORY_TEST_PROMPT_COPY = $reworkPromptCopy
+        $reworkTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    } finally {
+        $env:CLAUDE_FACTORY_TEST_PROMPT_COPY = $previousPromptCopy
+    }
+    Assert-Equal 1 ([int]$reworkTick.launchedCount) "Rework was not relaunched within one scheduler tick."
+    $relaunchedState = Read-FactoryJson -Path $context.statePath
+    $relaunchedTask = Get-FactoryTask -State $relaunchedState -TaskId "rework-task"
+    Assert-True ($null -ne $relaunchedTask.backgroundSession -and [string]$relaunchedTask.backgroundSession.id -ne "rework-old") "Rework reused the previous session identity."
+    Assert-True ($null -eq $relaunchedTask.pendingInstructions) "Rework instructions were not cleared after prompt delivery."
+    Assert-True ($null -eq $relaunchedTask.review -and $null -eq $relaunchedTask.approval) "Relaunch restored a stale review or approval."
+    $reworkPromptText = [IO.File]::ReadAllText($reworkPromptCopy, [Text.Encoding]::UTF8)
+    Assert-True ($reworkPromptText.Contains($reworkFindings)) "Relaunched worker prompt omitted the review findings."
+    Assert-True ($reworkPromptText.Contains($reworkCommit)) "Relaunched worker prompt omitted the retained commit."
+    Assert-True ($reworkPromptText.Contains("exactly one task commit")) "Relaunched worker prompt omitted the amend/single-commit invariant."
+    $reworkRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $fakeClaude)
+    Assert-Equal 0 (@($reworkRows | Where-Object {
+        $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "rework-old"
+    }).Count) "Rework left the previous Agent View row alive."
+    $reworkDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "rework-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-True ([bool]$reworkDiscard.removedFromState) "Rework fixture could not be discarded after relaunch."
 
     $publicationReadyState = Read-FactoryJson -Path $context.statePath
     $readyDirectCliTask = New-FactoryTestTask -Id "ready-direct-cli-task" -Title "Ready direct CLI task" -Now $now
@@ -1228,9 +1501,15 @@ try {
     Assert-Equal "held" ([string]$held.status) "Approved task could not be held before cleanup."
     & git -C $launch.worktree push origin HEAD:develop HEAD:master 1> $null
     if ($LASTEXITCODE -ne 0) { throw "Failed to publish cleanup fixture commit." }
-    $cleanupState = Read-FactoryJson -Path $context.statePath
-    $cleanupState.tasks[0].backgroundSession.state = "done"
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupState
+    $cleanupSessionState = Read-FactoryJson -Path $context.statePath
+    $cleanupSessionState.tasks[0].backgroundSession = $launch.backgroundSession
+    $cleanupSessionState.tasks[0].backgroundSession.state = "done"
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupSessionState
+    [IO.File]::AppendAllText(
+        [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
+        "launch`ttest1234`t$($launch.worktree)`t$([string]$launch.backgroundSession.name)`tworking`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
 
     $externalSentinel = Join-Path $testRoot "external-sentinel"
     New-Item -ItemType Directory -Path $externalSentinel -Force | Out-Null
@@ -1310,6 +1589,68 @@ try {
         $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "other999"
     }).Count) "Answer or cleanup removed another task's row."
     Assert-Equal 1 (@($rowsAfterCleanup | Where-Object { [string]$_.kind -eq "interactive" }).Count) "Answer or cleanup removed the id-less interactive row."
+
+    & git -C $repository fetch origin develop 1> $null
+    & git -C $repository merge --ff-only origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not fast-forward the conflict fixture repository." }
+    $conflictWorktree = Join-Path ([string]$context.worktreeRoot) "worker-sync-conflict-task"
+    $conflictBranch = "factory-worker/sync-conflict-task"
+    & git -C $repository worktree add -b $conflictBranch $conflictWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create conflicting sync fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $conflictWorktree "SYNC-CONFLICT.md"), "worker version`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $conflictWorktree add SYNC-CONFLICT.md
+    & git -C $conflictWorktree commit -m "test: worker side of sync conflict" 1> $null
+    $conflictOriginalCommit = (& git -C $conflictWorktree rev-parse HEAD).Trim()
+    $conflictState = Read-FactoryJson -Path $context.statePath
+    $conflictTask = New-FactoryTestTask -Id "sync-conflict-task" -Title "Recover a conflicting sync" -Now (Get-FactoryUtcTimestamp)
+    $conflictTask.status = "awaiting-review"
+    $conflictTask.branch = $conflictBranch
+    $conflictTask.commit = $conflictOriginalCommit
+    $conflictTask.worktree = $conflictWorktree
+    $conflictTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = "sync-conflict-task"; branch = $conflictBranch; commit = $conflictOriginalCommit
+        worktree = $conflictWorktree; changedFiles = @("SYNC-CONFLICT.md")
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        notes = "Ready before development changed."; blockingReason = ""
+    }
+    $conflictState.tasks = @($conflictState.tasks) + @($conflictTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $conflictState
+
+    [IO.File]::WriteAllText((Join-Path $repository "SYNC-CONFLICT.md"), "development version`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $repository add SYNC-CONFLICT.md
+    & git -C $repository commit -m "test: development side of sync conflict" 1> $null
+    & git -C $repository push origin develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not publish the conflicting development fixture." }
+    $previousConflictErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $conflictPrepareOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "sync-conflict-task" -Action prepare 2>&1 | ForEach-Object { [string]$_ })
+        $conflictPrepareExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousConflictErrorAction
+    }
+    Assert-True ($conflictPrepareExit -ne 0 -and ($conflictPrepareOutput -join "`n") -match "Conflicts: SYNC-CONFLICT.md") "Conflicting sync did not report the conflicted path."
+    $conflictAfterPrepare = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "sync-conflict-task"
+    Assert-Equal "awaiting-review" ([string]$conflictAfterPrepare.status) "Failed sync changed the task into an unrecoverable state."
+    Assert-Equal $conflictOriginalCommit ([string]$conflictAfterPrepare.commit) "Failed sync replaced the recorded commit."
+
+    & git -C $conflictWorktree reset --hard origin/develop 1> $null
+    [IO.File]::WriteAllText((Join-Path $conflictWorktree "SYNC-CONFLICT.md"), "development version`nworker behavior retained`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $conflictWorktree add SYNC-CONFLICT.md
+    & git -C $conflictWorktree commit -m "test: resolved sync conflict" 1> $null
+    $conflictResolvedCommit = (& git -C $conflictWorktree rev-parse HEAD).Trim()
+    $conflictReportPath = Join-Path $context.sessionsPath "sync-conflict-task.sync-tests.json"
+    Write-FactoryJsonAtomic -Path $conflictReportPath -Value ([pscustomobject]@{
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Resolved tree is clean." })
+    })
+    $conflictFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "sync-conflict-task" -Action finalize -TestsPath $conflictReportPath) | ConvertFrom-Json
+    Assert-Equal "awaiting-review" ([string]$conflictFinal.status) "Manually resolved sync did not return to review."
+    Assert-Equal $conflictResolvedCommit ([string]$conflictFinal.commit) "Sync finalize did not adopt the resolved HEAD."
+    Assert-True ([bool]$conflictFinal.adoptedResolvedHead) "Sync finalize did not audit adoption of an operator-resolved HEAD."
+    $conflictCount = (& git -C $conflictWorktree rev-list --count "origin/develop..$conflictResolvedCommit").Trim()
+    Assert-Equal 1 ([int]$conflictCount) "Resolved sync violated the one-task-commit invariant."
+    $conflictDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "sync-conflict-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-True ([bool]$conflictDiscard.removedFromState) "Resolved sync fixture could not be discarded safely."
 
     $pipelineState = Read-FactoryJson -Path $context.statePath
     $pipelineWorktree = Join-Path ([string]$context.worktreeRoot) "worker-pipeline-task"
@@ -1420,15 +1761,38 @@ try {
     $pipelineRetryGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task") | ConvertFrom-Json
     Assert-Equal "approved" ([string]$pipelineRetryGo.status) "Freshly reviewed publication plan could not be approved."
 
-    $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    $env:CLAUDE_FACTORY_TEST_FAIL_CLEANUP = "pipeline-task"
+    try {
+        $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
+    }
     $pipelineTickErrors = @($pipelineTick.errors | ForEach-Object { [string]$_ })
-    Assert-Equal 0 $pipelineTickErrors.Count "Native pipeline reported an error: $($pipelineTickErrors -join ' | ')"
-    Assert-Equal 1 ([int]$pipelineTick.integratedCount) "Native scheduler did not integrate exactly one approved task."
+    Assert-Equal 1 $pipelineTickErrors.Count "Synthetic cleanup failure was not reported exactly once."
+    Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after both branch pushes were verified") "Pipeline hid the cleanup stage failure."
+    Assert-Equal 0 ([int]$pipelineTick.integratedCount) "Scheduler reported a cleanup-failed task as fully integrated."
+    $cleanupFailedState = Read-FactoryJson -Path $context.statePath
+    $cleanupFailedTask = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    Assert-Equal "blocked" ([string]$cleanupFailedTask.status) "Cleanup failure did not leave the published task recoverable."
+    Assert-Equal "published" ([string]$cleanupFailedTask.integration.status) "Cleanup failure rewrote development publication as failed."
+    Assert-Equal "published" ([string]$cleanupFailedTask.production.status) "Cleanup failure rewrote production publication as failed."
+    Assert-Equal "failed" ([string]$cleanupFailedTask.cleanup.status) "Cleanup failure was not audited as its own stage."
+    Assert-Equal "cleanup" ([string]$cleanupFailedTask.cleanup.stage) "Cleanup failure audit names the wrong pipeline stage."
+    Assert-True (Test-Path -LiteralPath $pipelineWorktree) "Cleanup failure unexpectedly removed the retained worktree."
+    $cleanupFailedInspect = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath inspect pipeline-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($cleanupFailedInspect.Contains("cleanup: failed") -and $cleanupFailedInspect.Contains("/factory cleanup pipeline-task")) "Factory inspect did not offer the cleanup-only retry."
+    $pipelineCleanupRetry = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "pipeline-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "done" ([string]$pipelineCleanupRetry.status) "Manual cleanup-only retry did not finish the published task."
     $pipelineFinalState = Read-FactoryJson -Path $context.statePath
     $pipelineFinalTask = @($pipelineFinalState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-Equal "done" ([string]$pipelineFinalTask.status) "Native pipeline did not finish cleanup."
     Assert-Equal "published" ([string]$pipelineFinalTask.integration.status) "Native pipeline did not audit development publication."
     Assert-Equal "published" ([string]$pipelineFinalTask.production.status) "Native pipeline did not audit production publication."
+    Assert-Equal "completed" ([string]$pipelineFinalTask.cleanup.status) "Cleanup retry did not replace the failed cleanup audit."
+    foreach ($pipelineTestRow in @($pipelineFinalTask.integration.tests) + @($pipelineFinalTask.production.tests)) {
+        Assert-True ($null -ne $pipelineTestRow.PSObject.Properties["exitCode"]) "Persisted pipeline test row omitted its exit code."
+        Assert-True ([string]$pipelineTestRow.outputPath -and (Test-Path -LiteralPath ([string]$pipelineTestRow.outputPath))) "Persisted pipeline test row omitted its full-output artifact path."
+    }
     Assert-True ([bool]$pipelineFinalTask.integration.checksParallel -and [bool]$pipelineFinalTask.production.checksParallel) "Native pipeline did not audit parallel candidate checks."
     Assert-True ((Test-Path -LiteralPath $parallelIntegratorMarker) -and (Test-Path -LiteralPath $parallelReleaseMarker)) "Integration and release checks did not overlap."
     Assert-True (-not (Test-Path -LiteralPath $pipelineWorktree)) "Native pipeline left its worker worktree behind."
@@ -1901,6 +2265,9 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_DB_ENV_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue

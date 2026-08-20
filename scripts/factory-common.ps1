@@ -102,11 +102,49 @@ function Invoke-FactoryNativeProcess {
     }
 }
 
+function Remove-FactoryAnsiSequences {
+    param([AllowNull()][string]$Value)
+
+    if (-not $Value) { return "" }
+    $withoutOsc = [regex]::Replace($Value, '\x1B\][^\x07]*(?:\x07|\x1B\\)', "")
+    $withoutCsi = [regex]::Replace($withoutOsc, '\x1B\[[0-?]*[ -/]*[@-~]', "")
+    return [regex]::Replace($withoutCsi, '\x1B[@-_]', "")
+}
+
+function Get-FactoryBoundedTextTail {
+    param(
+        [AllowNull()][string]$Value,
+        [int]$MaximumLength = 8192
+    )
+
+    if ($MaximumLength -lt 128) { throw "MaximumLength must be at least 128 characters." }
+    $text = [string]$Value
+    if ($text.Length -le $MaximumLength) { return $text }
+    $marker = "[... earlier output omitted; full output is in outputPath ...]" + [Environment]::NewLine
+    $tailLength = $MaximumLength - $marker.Length
+    if ($tailLength -lt 1) { return $text.Substring($text.Length - $MaximumLength) }
+    return $marker + $text.Substring($text.Length - $tailLength)
+}
+
 function Read-FactoryJson {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$RetryCount = 6,
+        [int]$RetryDelayMilliseconds = 25
+    )
 
     $utf8 = New-Object System.Text.UTF8Encoding($false)
-    return [IO.File]::ReadAllText($Path, $utf8) | ConvertFrom-Json
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+        try {
+            return [IO.File]::ReadAllText($fullPath, $utf8) | ConvertFrom-Json
+        } catch {
+            if ($attempt -ge $RetryCount) {
+                throw "Could not read valid JSON from '$fullPath' after $RetryCount attempt(s): $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
 }
 
 function Write-FactoryJsonAtomic {
@@ -120,17 +158,39 @@ function Write-FactoryJsonAtomic {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
 
-    $temporaryPath = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $temporaryPath = "$fullPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = "$fullPath.$([Guid]::NewGuid().ToString('N')).bak"
     $json = $Value | ConvertTo-Json -Depth 100
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $utf8)
 
     try {
         Read-FactoryJson -Path $temporaryPath | Out-Null
-        Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
+        $replaced = $false
+        for ($attempt = 1; $attempt -le 8 -and -not $replaced; $attempt++) {
+            try {
+                if ([IO.File]::Exists($fullPath)) {
+                    [IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
+                } else {
+                    [IO.File]::Move($temporaryPath, $fullPath)
+                }
+                $replaced = $true
+            } catch [IO.IOException] {
+                if ($attempt -ge 8) { throw }
+                Start-Sleep -Milliseconds (25 * $attempt)
+            } catch [UnauthorizedAccessException] {
+                if ($attempt -ge 8) { throw }
+                Start-Sleep -Milliseconds (25 * $attempt)
+            }
+        }
+        if (-not $replaced) { throw "Could not atomically replace '$fullPath'." }
     } finally {
         if (Test-Path -LiteralPath $temporaryPath) {
             Remove-Item -LiteralPath $temporaryPath -Force
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force
         }
     }
 }

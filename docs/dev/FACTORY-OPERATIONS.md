@@ -248,8 +248,15 @@ action. The default view omits completed task rows.
 
 The native scheduler normally remains alive and sleeps cheaply when every task
 requires an operator decision. `factory scheduler status` shows its exact PID,
-heartbeat, last tick, and last error. `factory start` and `factory resume`
-restart it when needed; no Claude cron job is created.
+heartbeat, last tick, current activity/task, last error, last exit reason, and
+the two log paths. Long reconciliation, launch, and publication work is shown as
+`busy` with its start time while the heartbeat continues to refresh. `factory
+start` and `factory resume` refuse duplicate ownership while that work is in
+flight. If runnable work exists and the scheduler is stopped or failed, status
+adds a scheduler card to `NEEDS YOUR ACTION`; `doctor` reports the failure and
+stderr path. The JSONL stdout log contains one entry per tick plus process
+start/exit records, while stderr records tick failures and unexpected process
+loss. No Claude cron job is created.
 
 ## 5. IDs shown in status output
 
@@ -524,6 +531,12 @@ each approved task. Plugin updates to that pipeline are therefore hot-loaded by
 an already-running factory; the scheduler and its active task queue do not need
 to be restarted.
 
+Every integration and release check row preserves the exact command, exit code,
+status, timestamps, and `outputPath`. State retains only an ANSI-free diagnostic
+tail of at most 8,192 characters; the complete ANSI-free output is stored below
+the task's private `events` directory at `outputPath`. Inspect the artifact when
+the bounded tail is insufficient instead of expanding `state.json`.
+
 For a small change whose worker output is sufficient for the operator to make
 the decision, skip the separate AI review explicitly:
 
@@ -574,10 +587,19 @@ Other decisions:
 /factory reject 1216632072822682 --yes
 /factory reject 1216632072822682 --keep
 /factory rework 1216632072822682 "Keep the old endpoint compatible"
+/factory release 1216632072822682
 ```
 
-`rework` retains the conversation and worktree. The orchestrator prints the
-instructions to paste into the worker conversation.
+`rework` stops and removes the previous worker session, preserves the branch,
+worktree, validated commit, and result, clears review and approval, and queues
+a new attempt. The launcher embeds the findings and retained commit in the new
+prompt and clears the pending instructions only after that prompt is durable.
+No operator paste into an old conversation is required.
+
+Use `release` only when the runtime no longer lists the stored session. It
+refuses live sessions and publication/sync states, clears the stale identity,
+and restores `awaiting-review` for matching validated artifacts, `queued` for
+pending rework, `awaiting-input` for a saved plan, or `held` otherwise.
 
 `reject` is a final discard by default. Before changing anything, the
 orchestrator lists the background session, worktree, local worker branch,
@@ -610,9 +632,13 @@ application directly from the existing worker path returned by
 
 Synchronization requires a clean, idle task in `awaiting-review` or `held`.
 The task SHA changes, so prior review and approval are cleared. Rebase conflicts
-are aborted and reported without modifying the original branch. If validation
-is interrupted after a successful rebase, the task remains `syncing`, cannot be
-approved, and the same `/factory sync <task-id>` resumes its checks.
+are aborted and reported without modifying the original branch. To resolve one
+manually, produce a clean, single-parent commit on the recorded worker branch
+whose parent is the current configured development tip, then run the same
+`/factory sync <task-id>` again. Finalization verifies the branch, ancestry,
+clean tree, and exactly one task commit before adopting the new SHA. If
+validation is interrupted after a successful rebase, the task remains
+`syncing`, cannot be approved, and the same command resumes its checks.
 
 The source branch is configured per repository:
 
@@ -654,6 +680,11 @@ commit. This is deliberately different from `reject`: cleanup is for published
 work, preserves a `done` history record, and will not discard unique changes.
 Reject is for abandoned work, removes the task record, and requires an explicit
 preview confirmation unless `--yes` is supplied.
+
+Native publication treats cleanup as a separate stage. Once both remote
+branches are verified, a cleanup failure cannot rewrite either publication
+audit as failed. The task remains `blocked` with `cleanup: failed`; rerun
+`/factory cleanup <task-id>` to remove only the retained artifacts.
 
 ## 11. Pause, stop, and recovery
 
@@ -722,8 +753,9 @@ factory scheduler status
   readiness, runtime files, locks, worktrees, and scheduler. Publication
   settings that intentionally disable direct release are a warning, not a
   required factory-health failure.
-- `factory scheduler status` validates the recorded PID/start time and reports
-  the native heartbeat without calling AI.
+- `factory scheduler status` validates the recorded PID/start time and named
+  ownership, reports busy activity and its live heartbeat, and prints the tick
+  and error log paths without calling AI.
 
 A worker session reports `agentResolution: plugin` when Claude resolved the
 session-only plugin agent directly. `inline-fallback` means the launcher safely

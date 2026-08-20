@@ -43,11 +43,17 @@ $agentResolutionPreference = "plugin"
 $testDatabaseName = $null
 $testDatabase = [pscustomobject]@{ enabled = $false; name = $null; environmentVariable = $null; created = $false }
 $workerEnvironment = @{}
+$pendingInstructions = ""
+$reworkRequestedAt = ""
+$existingCommit = ""
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+$pendingInstructions = [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")
+$reworkRequestedAt = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "")
+$existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "")
 
     if (
         $null -ne $task.backgroundSession -and
@@ -235,6 +241,8 @@ try {
         conversationLanguage = [string]$config.conversationLanguage
         requiredChecks = @($config.workerRequiredChecks)
         testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
+        existingCommit = if ($existingCommit) { $existingCommit } else { $null }
+        reworkRequestedAt = if ($reworkRequestedAt) { $reworkRequestedAt } else { $null }
     }
     $payloadJson = $taskPayload | ConvertTo-Json -Depth 30
     $modeInstruction = if ($Mode -eq "interactive") {
@@ -250,6 +258,21 @@ This is an automatic start. Begin implementation immediately. The user may
 attach to this session and interrupt or redirect you at any time.
 "@
     }
+
+    $reworkInstruction = if ($pendingInstructions) {
+@"
+
+REWORK_REQUEST
+This retained worker branch already has validated commit '$existingCommit'. A
+previous review and approval were cleared. Amend the existing task commit (and
+its implementation) so the branch still contains exactly one task commit above
+the configured development branch, rerun appropriate checks, and emit a fresh
+FACTORY_RESULT for the new HEAD. The operator findings below are authoritative
+requirements for this rework attempt:
+
+$pendingInstructions
+"@
+    } else { "" }
 
     $prompt = @"
 You are the dedicated worker session for one Factory task.
@@ -267,6 +290,7 @@ quotations merely to match this setting.
 
 FACTORY_TASK
 $payloadJson
+$reworkInstruction
 "@
 
     if ($workerRuntime -eq "codex") {
@@ -277,6 +301,25 @@ $payloadJson
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($promptPath, $prompt, $utf8WithoutBom)
     $promptSha256 = Get-FactoryFileSha256 -Path $promptPath
+    if ($pendingInstructions) {
+        $promptMutex = $null
+        try {
+            $promptMutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+            $promptState = Read-FactoryJson -Path $context.statePath
+            $promptTask = Get-FactoryTask -State $promptState -TaskId $TaskId
+            $stillPending = [string](Get-FactoryNestedValue -Target $promptTask -Name "pendingInstructions" -Default "")
+            $sameRequest = [string](Get-FactoryNestedValue -Target $promptTask -Name "reworkRequestedAt" -Default "") -eq $reworkRequestedAt
+            if ($stillPending -eq $pendingInstructions -and $sameRequest) {
+                Set-FactoryProperty -Target $promptTask -Name "pendingInstructions" -Value $null
+                Set-FactoryProperty -Target $promptTask -Name "reworkInstructionsDeliveredAt" -Value (Get-FactoryUtcTimestamp)
+                Set-FactoryProperty -Target $promptTask -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
+                Set-FactoryProperty -Target $promptState -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
+                Write-FactoryJsonAtomic -Path $context.statePath -Value $promptState
+            }
+        } finally {
+            Exit-FactoryMutex -Mutex $promptMutex
+        }
+    }
 
     $metadata = [ordered]@{
         taskId = $TaskId
@@ -507,6 +550,9 @@ $payloadJson
         $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
+        if ($pendingInstructions -and -not [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")) {
+            Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $pendingInstructions
+        }
         Set-FactoryProperty -Target $task -Name "status" -Value "failed"
         if ($null -ne $resolutionOutcomes -and $claudeVersion) {
             Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{

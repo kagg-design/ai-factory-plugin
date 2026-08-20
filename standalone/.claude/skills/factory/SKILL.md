@@ -87,7 +87,8 @@ Prepare and decide
   answer <id>              record decisions and relaunch
   review <id>              review exact commit
   go <id> [--direct]       approve reviewed SHA, or explicitly skip AI review
-  rework <id> [text]       return work to the worker
+  rework <id> [text]       relaunch the retained worker with review findings
+  release <id>             clear a verified stale session record
   hold <id>                retain without integration
   reject <id> [reason]     discard task and its artifacts
   cleanup <id>             remove published worker artifacts
@@ -317,7 +318,11 @@ Default `status` rules:
    - at most one useful alternative command.
 6. End with a compact completed-history node and one `╰─` technical footer:
    active workers/concurrency, scheduler, and paused/running. Explain an absent
-   scheduler in plain language only when no runnable work exists.
+   scheduler in plain language only when no runnable work exists. If runnable
+   work exists while the scheduler is stopped or failed, include the native
+   scheduler problem under `NEEDS YOUR ACTION` with its saved reason, stderr log
+   path, and exact recovery/diagnostic command. A busy scheduler is healthy:
+   show its activity and task, and never recommend starting or resuming another.
 
 The tree layout is mandatory and must follow this shape:
 
@@ -460,9 +465,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 The bundled script requires a clean, idle `awaiting-review` or `held` task with
 one validated single-parent task commit. It fetches the configured development
 branch and rebases that one commit onto it. A conflict is aborted and reported,
-leaving the original branch intact. A successful rebase changes the SHA,
-clears stale review and approval, and moves the task to `syncing` so `go` cannot
-approve results tested against the old base.
+leaving the original branch intact. The operator or worker may then resolve and
+rebase the same recorded worker branch manually. `finalize` accepts that clean
+replacement HEAD only when it is a single-parent commit, the current configured
+development base is its ancestor, and it is exactly one commit above that base.
+A successful rebase changes the SHA, clears stale review and approval, and
+moves the task to `syncing` so `go` cannot approve results tested against the
+old base.
 
 If `alreadyCurrent` is true, report that no synchronization or retesting was
 needed. Otherwise, validate the rebased result in the returned `worktree`:
@@ -491,11 +500,12 @@ needed. Otherwise, validate the rebased result in the returned `worktree`:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action finalize -TestsPath "TEST_REPORT_PATH"
 ```
 
-Finalize verifies the current clean HEAD, rebuilds `changedFiles`, records the
-new result and exact checks, deletes the temporary report, and returns the task
-to `awaiting-review`. If a turn is interrupted while status is `syncing`, run
-the same `/factory sync <task-id>` command again; prepare resumes validation of
-the existing rebased commit instead of rebasing it a second time.
+Finalize verifies the current clean HEAD and recorded worker branch, including
+a manually resolved HEAD after an aborted conflict, rebuilds `changedFiles`,
+records the new result and exact checks, deletes the temporary report, and
+returns the task to `awaiting-review`. If a turn is interrupted while status is
+`syncing`, run the same `/factory sync <task-id>` command again; prepare resumes
+validation of the existing rebased commit instead of rebasing it a second time.
 
 ### `review <task-id>`
 
@@ -581,11 +591,31 @@ Run the appropriate action through:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action ACTION -TaskId TASK_ID
 ```
 
-For `rework`, pass the optional text with `-Instructions`. Because a top-level
-background session is independent, the command cannot inject that text into
-its live TUI. Print the attach command and the exact text for the user to paste.
+For `rework`, pass the findings with `-Instructions`; when omitted, the script
+uses the recorded review summary and risk notes. The action stops and removes
+the previous worker session, preserves its branch, worktree, commit, and result,
+clears review and approval, and queues a new attempt. The launcher writes the
+findings verbatim into the durable worker prompt, tells the worker to amend the
+existing one task commit, and clears `pendingInstructions` only after that
+prompt exists. Resume the native scheduler after the action succeeds. Do not
+ask the operator to attach and paste the findings manually.
 
 `hold` preserves the worktree, commit, transcript, and session.
+
+### `release <task-id>`
+
+Use this only to recover a stale saved session identity after reconciliation
+cannot find that session in the runtime listing:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action release -TaskId TASK_ID
+```
+
+`release` refuses a session that the runtime still reports as live and refuses
+operator-controlled publication or sync states. It clears only the stale
+session identity, then restores `awaiting-review` for a matching validated
+commit/result, `queued` for pending rework delivery, `awaiting-input` for a
+saved plan, or a safe machine hold otherwise. It never changes Git history.
 
 ### `reject <task-id> [reason] [--yes|--keep]`
 
@@ -630,6 +660,8 @@ worktree, replaces one brief pointer, stops the prior background row, and queues
 exactly one new attempt. It also removes superseded Agent View rows; their JSONL
 transcripts remain on disk. Repeating the same answer is idempotent. Run
 `factory-scheduler.ps1 -Action resume` after the script succeeds.
+An answer is also accepted for a post-commit task while an explicit rework
+request is active; stray answers for otherwise finished tasks remain rejected.
 
 ### `cleanup <task-id>`
 
@@ -698,3 +730,10 @@ Use `factory scheduler status` for process identity and heartbeat. New tasks,
 native scheduler. AI remains responsible for planning, implementation,
 conflict-aware sync, and formal code review; the approved plan's execution is
 deterministic.
+
+Long scheduler children refresh `activityHeartbeatAt`; status identifies their
+activity, task ID/title, and start time. Start/resume must accept the native
+mutex/PID refusal and must not attempt a second tick while work is in flight.
+The scheduler writes JSONL tick/process records to `scheduler.stdout.log` and
+failure/process-loss records to `scheduler.stderr.log`; use the printed paths
+and `factory doctor` when runnable work is not moving.
