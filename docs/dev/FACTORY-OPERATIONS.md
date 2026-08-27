@@ -526,6 +526,15 @@ moved since review, the worker HEAD changed, a check failed, or a conflict
 occurred, publication stops with an exact saved reason instead of asking AI to
 repair it implicitly.
 
+Both generated merge commits are recognizable in normal Git history. The
+subject is `Merge task <task-id> into <develop|production branch>`, never an
+internal integrator/release ref. The body records the title, the originally
+supplied connector URL or local source identity, the short approved task SHA,
+and whether production promotes development or only the task commit. The
+message travels through a temporary UTF-8 without BOM file rather than native
+argv, preserving non-ASCII titles and punctuation under Windows PowerShell 5.1.
+Local `factory://` identity URIs are excluded from commit messages.
+
 The scheduler invokes the publication pipeline as a fresh child process for
 each approved task. Plugin updates to that pipeline are therefore hot-loaded by
 an already-running factory; the scheduler and its active task queue do not need

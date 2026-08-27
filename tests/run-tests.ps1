@@ -3,6 +3,17 @@ param(
     [switch]$KeepTemp
 )
 
+if ([string]$PSVersionTable.PSEdition -eq "Core") {
+    $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+        throw "The factory runtime harness requires Windows PowerShell 5.1, but '$windowsPowerShell' was not found."
+    }
+    $desktopArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+    if ($KeepTemp) { $desktopArguments += "-KeepTemp" }
+    & $windowsPowerShell @desktopArguments
+    exit $LASTEXITCODE
+}
+
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
@@ -217,7 +228,9 @@ try {
     $nativeCliSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\factory-cli.ps1") -Raw
     Assert-True ($nativeCliSource.Contains("Publication runs asynchronously; monitor: factory inspect")) "Native go does not explain how to monitor asynchronous publication."
     $integrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Raw
-    Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", $Commit')) "Native integration does not merge the immutable approved SHA."
+    Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", "-F", $messagePath, $Commit')) "Native integration does not merge the immutable approved SHA with a file-backed message."
+    Assert-True ($integrationSource.Contains('New-Object Text.UTF8Encoding($false)')) "Pipeline merge messages are not written as UTF-8 without a BOM."
+    Assert-True (-not $integrationSource.Contains('"merge", "--no-ff", "--no-edit", "-m"')) "Pipeline merge message text is exposed through native argv."
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
     Assert-True (-not $integrationSource.Contains("--force")) "Native integration contains a force operation."
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
@@ -398,7 +411,7 @@ try {
     $pausedRestartTaskState = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "paused-restart-task"
     Assert-Equal "queued" ([string]$pausedRestartTaskState.status) "Paused scheduler launched queued work."
     $pausedSchedulerCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath scheduler status -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
-    Assert-True ($pausedSchedulerCli.Contains("Problem:") -and $pausedSchedulerCli.Contains("factory resume")) "Factory scheduler output rendered paused runnable work as healthy."
+    Assert-True ($pausedSchedulerCli.Contains("Problem:") -and $pausedSchedulerCli.Contains("factory resume")) "Factory scheduler output rendered paused runnable work as healthy. Output: $pausedSchedulerCli"
     $pausedFactoryCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($pausedFactoryCli.Contains("NEEDS YOUR ACTION") -and $pausedFactoryCli.Contains("SCHEDULER") -and $pausedFactoryCli.Contains("paused") -and $pausedFactoryCli.Contains("factory resume")) "Factory status did not surface paused runnable work as actionable."
     $pausedRestartFinalStop = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
@@ -1701,7 +1714,15 @@ try {
     & git -C $pipelineWorktree add PIPELINE.md
     & git -C $pipelineWorktree commit -m "test: native integration pipeline" 1> $null
     $pipelineCommit = (& git -C $pipelineWorktree rev-parse HEAD).Trim()
-    $pipelineTask = New-FactoryTestTask -Id "pipeline-task" -Title "Native integration pipeline" -Now (Get-FactoryUtcTimestamp)
+    $pipelineMergeTitle = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JrQvtC80LDQvdC00LAgwqvQntGC0YfRkdGC0YvCuzog0L/RgNC+0LLQtdGA0LrQsCBPJ0JyaWVu"))
+    $pipelineSuppliedUrl = "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1217866656111884"
+    $pipelineTask = New-FactoryTestTask -Id "pipeline-task" -Title $pipelineMergeTitle -Now (Get-FactoryUtcTimestamp)
+    $pipelineTask.url = "https://app.asana.com/0/0/1217866656111884"
+    $pipelineTask.source = [pscustomobject][ordered]@{
+        adapter = "asana"
+        id = "1217866656111884"
+        suppliedUrl = $pipelineSuppliedUrl
+    }
     $pipelineTask.status = "awaiting-review"
     $pipelineTask.branch = $pipelineBranch
     $pipelineTask.commit = $pipelineCommit
@@ -1828,6 +1849,34 @@ try {
     Assert-Equal "published" ([string]$pipelineFinalTask.integration.status) "Native pipeline did not audit development publication."
     Assert-Equal "published" ([string]$pipelineFinalTask.production.status) "Native pipeline did not audit production publication."
     Assert-Equal "completed" ([string]$pipelineFinalTask.cleanup.status) "Cleanup retry did not replace the failed cleanup audit."
+    $pipelineShortCommit = $pipelineCommit.Substring(0, [Math]::Min(7, $pipelineCommit.Length))
+    $pipelineDevelopmentMessage = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @(
+        "-C", $repository, "log", "-1", "--format=%B", [string]$pipelineFinalTask.integration.mergeCommit
+    )).stdout
+    $pipelineProductionMessage = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @(
+        "-C", $repository, "log", "-1", "--format=%B", [string]$pipelineFinalTask.production.mergeCommit
+    )).stdout
+    $expectedPipelineDevelopmentMessage = @(
+        "Merge task pipeline-task into develop",
+        "",
+        $pipelineMergeTitle,
+        "",
+        "Task:    $pipelineSuppliedUrl",
+        "Commit:  $pipelineShortCommit"
+    ) -join "`n"
+    $expectedPipelineProductionMessage = @(
+        "Merge task pipeline-task into master",
+        "",
+        $pipelineMergeTitle,
+        "",
+        "Promoting: develop (may include commits from other tasks)",
+        "Task:      $pipelineSuppliedUrl",
+        "Commit:    $pipelineShortCommit"
+    ) -join "`n"
+    Assert-Equal $expectedPipelineDevelopmentMessage ($pipelineDevelopmentMessage.Replace("`r`n", "`n")) "Development merge message lost task identity, title, supplied URL, or UTF-8 text."
+    Assert-Equal $expectedPipelineProductionMessage ($pipelineProductionMessage.Replace("`r`n", "`n")) "Merge-develop production message did not describe the promoted development branch."
+    Assert-Equal ([string]$pipelineFinalTask.integration.mergeCommit) ((& git -C $repository rev-parse ([string]$pipelineFinalTask.integration.mergeCommit)).Trim()) "Development merge SHA did not remain resolvable from its audit."
+    Assert-Equal ([string]$pipelineFinalTask.production.mergeCommit) ((& git -C $repository rev-parse ([string]$pipelineFinalTask.production.mergeCommit)).Trim()) "Production merge SHA did not remain resolvable from its audit."
     foreach ($pipelineTestRow in @($pipelineFinalTask.integration.tests) + @($pipelineFinalTask.production.tests)) {
         Assert-True ($null -ne $pipelineTestRow.PSObject.Properties["exitCode"]) "Persisted pipeline test row omitted its exit code."
         Assert-True ([string]$pipelineTestRow.outputPath -and (Test-Path -LiteralPath ([string]$pipelineTestRow.outputPath))) "Persisted pipeline test row omitted its full-output artifact path."
@@ -1840,6 +1889,84 @@ try {
     Assert-Equal 0 $LASTEXITCODE "Native pipeline commit is absent from remote development."
     & git -C $repository merge-base --is-ancestor $pipelineCommit origin/master
     Assert-Equal 0 $LASTEXITCODE "Native pipeline commit is absent from remote production."
+
+    $taskOnlyConfig = Read-FactoryJson -Path $context.configPath
+    $taskOnlyConfig.productionMode = "task-only"
+    $taskOnlyConfig.allowUnrelatedDevelopCommitsToProduction = $false
+    $taskOnlyConfig.integrationTestCommands = @("git diff --check")
+    $taskOnlyConfig.releaseTestCommands = @("git diff --check")
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $taskOnlyConfig
+    $localMergeSourceId = "20260827-142830-0f64896c"
+    $localMergeTaskId = "local:$localMergeSourceId"
+    $localMergeBranch = "factory-worker/local-merge-message-task"
+    $localMergeWorktree = Join-Path ([string]$context.worktreeRoot) "worker-local-merge-message-task"
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository worktree add -b $localMergeBranch $localMergeWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create local task-only merge-message fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $localMergeWorktree "LOCAL-MERGE.md"), "local task-only merge`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $localMergeWorktree add LOCAL-MERGE.md
+    & git -C $localMergeWorktree commit -m "test: local task-only merge message" 1> $null
+    $localMergeCommit = (& git -C $localMergeWorktree rev-parse HEAD).Trim()
+    $localMergeState = Read-FactoryJson -Path $context.statePath
+    $localMergeTask = New-FactoryTestTask -Id $localMergeTaskId -Title "" -Now (Get-FactoryUtcTimestamp)
+    $localMergeTask.status = "awaiting-review"
+    $localMergeTask.url = "factory://local/$localMergeSourceId"
+    $localMergeTask.source = [pscustomobject][ordered]@{
+        adapter = "local"
+        id = $localMergeSourceId
+        suppliedUrl = $null
+    }
+    $localMergeTask.branch = $localMergeBranch
+    $localMergeTask.commit = $localMergeCommit
+    $localMergeTask.worktree = $localMergeWorktree
+    $localMergeTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = $localMergeTaskId; branch = $localMergeBranch; commit = $localMergeCommit
+        worktree = $localMergeWorktree; changedFiles = @("LOCAL-MERGE.md")
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        notes = "Ready for task-only publication."; blockingReason = ""
+    }
+    $localMergeTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-local-merge-message-task" }
+    $localMergeState.tasks = @($localMergeState.tasks) + @($localMergeTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $localMergeState
+    $localMergeApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId $localMergeTaskId) | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$localMergeApproval.status) "Local task-only merge-message fixture could not be approved."
+    $localMergeTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal 0 (@($localMergeTick.errors).Count) "Local task-only merge-message publication failed: $(@($localMergeTick.errors) -join ' | ')"
+    Assert-Equal 1 ([int]$localMergeTick.integratedCount) "Local task-only merge-message fixture was not published."
+    $localMergeFinalTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId $localMergeTaskId
+    Assert-Equal "done" ([string]$localMergeFinalTask.status) "Local task-only merge-message fixture did not finish."
+    $localMergeShortCommit = $localMergeCommit.Substring(0, [Math]::Min(7, $localMergeCommit.Length))
+    $localDevelopmentMessage = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @(
+        "-C", $repository, "log", "-1", "--format=%B", [string]$localMergeFinalTask.integration.mergeCommit
+    )).stdout
+    $localProductionMessage = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @(
+        "-C", $repository, "log", "-1", "--format=%B", [string]$localMergeFinalTask.production.mergeCommit
+    )).stdout
+    $expectedLocalDevelopmentMessage = @(
+        "Merge task $localMergeTaskId into develop",
+        "",
+        "Source:  local / $localMergeSourceId",
+        "Commit:  $localMergeShortCommit"
+    ) -join "`n"
+    $expectedLocalProductionMessage = @(
+        "Merge task $localMergeTaskId into master",
+        "",
+        "Promoting: this task's commit only",
+        "Source:  local / $localMergeSourceId",
+        "Commit:    $localMergeShortCommit"
+    ) -join "`n"
+    Assert-Equal $expectedLocalDevelopmentMessage ($localDevelopmentMessage.Replace("`r`n", "`n")) "Empty-title local development merge contains a stray paragraph or wrong source identity."
+    Assert-Equal $expectedLocalProductionMessage ($localProductionMessage.Replace("`r`n", "`n")) "Task-only production merge did not describe the promoted task commit."
+    Assert-True (-not $localDevelopmentMessage.Contains("factory://") -and -not $localProductionMessage.Contains("factory://")) "Local merge message exposed an internal factory URI."
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository merge-base --is-ancestor $localMergeCommit origin/develop
+    Assert-Equal 0 $LASTEXITCODE "Local task-only commit is absent from remote development."
+    & git -C $repository merge-base --is-ancestor $localMergeCommit origin/master
+    Assert-Equal 0 $LASTEXITCODE "Local task-only commit is absent from remote production."
+    $restoredPipelineConfig = Read-FactoryJson -Path $context.configPath
+    $restoredPipelineConfig.productionMode = "merge-develop"
+    $restoredPipelineConfig.allowUnrelatedDevelopCommitsToProduction = $true
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $restoredPipelineConfig
     $previousDoneIntegrationErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"

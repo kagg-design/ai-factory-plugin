@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Replaced opaque pipeline merge subjects containing transient worktree refs and
+  raw SHAs with task-aware development/production messages. Connector merges
+  retain the originally supplied URL, local merges use source identity without
+  exposing `factory://`, production names what it promotes, and UTF-8 message
+  files preserve non-ASCII titles under Windows PowerShell 5.1.
 - Separated scheduler process control from factory permission: `stop`/`start`
   now preserve `active` and `paused`, while `pause`/`resume` own suspension.
   Starting into an explicit pause returns a warning, and scheduler/status views

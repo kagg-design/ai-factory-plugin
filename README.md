@@ -481,6 +481,15 @@ then the exact tested production candidate, sequentially and without force. It
 verifies reachability and cleans the worker; it never asks AI to resolve a merge
 conflict implicitly.
 
+Pipeline merge commits use operator-facing messages instead of Git's internal
+worktree names. Their subject is `Merge task <task-id> into <target-branch>`;
+the body carries the full title, the connector's originally supplied URL (or
+`Source: local / <source-id>`), the short approved task commit, and what the
+production merge promotes. Messages are written through a temporary UTF-8
+without BOM file, so non-ASCII titles and punctuation never cross the Windows
+PowerShell 5.1 native argument boundary. Internal `factory://` URIs are never
+written to Git history.
+
 ## Dynamic concurrency
 
 The default limit is three active workers:

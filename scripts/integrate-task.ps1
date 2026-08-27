@@ -82,18 +82,65 @@ function Reset-PipelineWorktree {
     return $path
 }
 
-function Invoke-PipelineMerge {
-    param([string]$Worktree, [string]$Commit, [string]$Label)
-
-    $merge = Invoke-FactoryNativeProcess -Command "git" -Arguments @(
-        "-c", "commit.gpgsign=false", "-C", $Worktree,
-        "merge", "--no-ff", "--no-edit", $Commit
+function New-PipelineMergeMessage {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$TaskCommit,
+        [Parameter(Mandatory = $true)][string]$TargetBranch,
+        [string]$Promoting = ""
     )
-    if ([int]$merge.exitCode -ne 0) {
-        $conflicts = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @("-C", $Worktree, "diff", "--name-only", "--diff-filter=U")).stdout
-        $null = Invoke-FactoryNativeProcess -Command "git" -Arguments @("-C", $Worktree, "merge", "--abort")
-        $detail = if ($conflicts) { " Conflicts: $($conflicts -replace '[\r\n]+', ', ')." } else { " $([string]$merge.output)" }
-        throw "$Label merge failed.$detail"
+
+    $taskId = [string](Get-FactoryNestedValue -Target $Task -Name "id" -Default "")
+    if (-not $taskId) { throw "Cannot build a pipeline merge message without a task id." }
+    $title = @(
+        [regex]::Split([string](Get-FactoryNestedValue -Target $Task -Name "title" -Default ""), '\r?\n') |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_ }
+    ) | Select-Object -First 1
+    $source = Get-FactoryNestedValue -Target $Task -Name "source"
+    $adapter = [string](Get-FactoryNestedValue -Target $source -Name "adapter" -Default "")
+    $sourceId = [string](Get-FactoryNestedValue -Target $source -Name "id" -Default $taskId)
+    $taskUrl = [string](Get-FactoryNestedValue -Target $source -Name "suppliedUrl" -Default "")
+    if (-not $taskUrl) { $taskUrl = [string](Get-FactoryNestedValue -Target $Task -Name "url" -Default "") }
+    $shortCommit = $TaskCommit.Substring(0, [Math]::Min(7, $TaskCommit.Length))
+
+    $lines = New-Object Collections.Generic.List[string]
+    $lines.Add("Merge task $taskId into $TargetBranch")
+    $lines.Add("")
+    if ($title) {
+        $lines.Add([string]$title)
+        $lines.Add("")
+    }
+    if ($Promoting) { $lines.Add("Promoting: $Promoting") }
+    if ($adapter -eq "local") {
+        $lines.Add("Source:  local / $sourceId")
+    } elseif ($taskUrl -and -not $taskUrl.StartsWith("factory://", [StringComparison]::OrdinalIgnoreCase)) {
+        $taskLabel = if ($Promoting) { "Task:      " } else { "Task:    " }
+        $lines.Add("$taskLabel$taskUrl")
+    }
+    $commitLabel = if ($Promoting) { "Commit:    " } else { "Commit:  " }
+    $lines.Add("$commitLabel$shortCommit")
+    return $lines -join [Environment]::NewLine
+}
+
+function Invoke-PipelineMerge {
+    param([string]$Worktree, [string]$Commit, [string]$Label, [string]$Message)
+
+    $messagePath = Join-Path ([IO.Path]::GetTempPath()) "factory-merge-message-$([Guid]::NewGuid().ToString('N')).txt"
+    try {
+        [IO.File]::WriteAllText($messagePath, $Message + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        $merge = Invoke-FactoryNativeProcess -Command "git" -Arguments @(
+            "-c", "commit.gpgsign=false", "-C", $Worktree,
+            "merge", "--no-ff", "--no-edit", "-F", $messagePath, $Commit
+        )
+        if ([int]$merge.exitCode -ne 0) {
+            $conflicts = [string](Invoke-FactoryNativeProcess -Command "git" -Arguments @("-C", $Worktree, "diff", "--name-only", "--diff-filter=U")).stdout
+            $null = Invoke-FactoryNativeProcess -Command "git" -Arguments @("-C", $Worktree, "merge", "--abort")
+            $detail = if ($conflicts) { " Conflicts: $($conflicts -replace '[\r\n]+', ', ')." } else { " $([string]$merge.output)" }
+            throw "$Label merge failed.$detail"
+        }
+    } finally {
+        Remove-Item -LiteralPath $messagePath -Force -ErrorAction SilentlyContinue
     }
     return Invoke-PipelineGit -WorkingDirectory $Worktree -Arguments @("rev-parse", "HEAD") -Failure "Cannot resolve $Label merge commit"
 }
@@ -299,12 +346,19 @@ try {
     }
 
     $integrator = Reset-PipelineWorktree -RepositoryRoot $repositoryRoot -WorktreeRoot ([string]$context.worktreeRoot) -Scope integrator -BaseCommit $remoteDevelopment -Config $config
-    $integrationMerge = Invoke-PipelineMerge -Worktree $integrator -Commit $taskCommit -Label "Development"
+    $integrationMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $developmentBranch
+    $integrationMerge = Invoke-PipelineMerge -Worktree $integrator -Commit $taskCommit -Label "Development" -Message $integrationMessage
     $productionSource = if ([string]$plan.productionMode -eq "task-only") { $taskCommit } else { $integrationMerge }
 
     $currentStage = "production"
     $release = Reset-PipelineWorktree -RepositoryRoot $repositoryRoot -WorktreeRoot ([string]$context.worktreeRoot) -Scope release -BaseCommit $remoteProduction -Config $config
-    $releaseMerge = Invoke-PipelineMerge -Worktree $release -Commit $productionSource -Label "Production"
+    $promoting = if ([string]$plan.productionMode -eq "task-only") {
+        "this task's commit only"
+    } else {
+        "$developmentBranch (may include commits from other tasks)"
+    }
+    $productionMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $productionBranch -Promoting $promoting
+    $releaseMerge = Invoke-PipelineMerge -Worktree $release -Commit $productionSource -Label "Production" -Message $productionMessage
 
     $integrationCheckHandle = $null
     $releaseCheckHandle = $null
