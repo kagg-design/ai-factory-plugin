@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Added `factory rotate` for safe orchestrator context rollover. It creates a
+  deterministic private handoff, preserves all durable Factory work and the
+  previous resumable session, and makes the next normal Claude or Codex start
+  activate a fresh conversation; `status` and `cancel` manage pending rotation.
 - Replaced opaque pipeline merge subjects containing transient worktree refs and
   raw SHAs with task-aware development/production messages. Connector merges
   retain the originally supplied URL, local merges use source identity without

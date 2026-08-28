@@ -63,6 +63,7 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory reject <id>     preview; add -Yes or -Keep
   !factory cleanup <id>    remove published artifacts
   !factory concurrency [N] show or change worker limit
+  !factory rotate          prepare a fresh orchestrator with a durable handoff
   !factory doctor          deterministic diagnostics
 
 PowerShell entry point (outside Claude)
@@ -96,6 +97,7 @@ Prepare and decide
 Control
   retry <id>               retry blocked/failed/machine-held task
   concurrency [N]          show or change worker limit
+  rotate                   hand off to a fresh orchestrator conversation
   pause|resume|stop        control orchestration
   doctor                   diagnose factory setup
 
@@ -117,6 +119,28 @@ this skill. Include:
 Accept aliases such as `add` for `start` and explain the canonical form. If the
 name is unknown, say so and show the compact grouped summary. Never execute the
 command while explaining it.
+
+### `rotate`
+
+Orchestrator rotation is a deterministic native command. Run:
+
+```text
+!factory rotate
+```
+
+It writes a private point-in-time handoff containing operational config, task
+counts, and unfinished task identity; it does not ask AI to summarize itself.
+It then marks the selected Claude or Codex runtime so its next normal
+`factory start` creates a fresh conversation instead of resuming the stored
+one. It does not stop the current TUI, mutate task state, stop the scheduler,
+or remove workers, worktrees, commits, or the previous resumable conversation.
+
+After the native command succeeds, tell the operator to exit the current
+orchestrator and run the exact start command printed by the CLI. The new
+orchestrator must treat the handoff as a navigation aid, load this canonical
+skill, and read native status before its first mutation. Use
+`!factory rotate status` to inspect a pending request and
+`!factory rotate cancel` to cancel it.
 
 ### `new [--auto] [text]`
 

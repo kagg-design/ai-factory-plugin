@@ -100,6 +100,7 @@ function Start-FactoryCodexOrchestrator {
         [switch]$Resume,
         [switch]$Continue,
         [string]$Model = "",
+        $Rotation = $null,
         [Parameter(Mandatory = $true)][string]$ExitCodeVariableName
     )
 
@@ -112,8 +113,9 @@ function Start-FactoryCodexOrchestrator {
     $identity = if (Test-Path -LiteralPath $identityPath) {
         try { Read-FactoryJson -Path $identityPath } catch { $null }
     } else { $null }
+    $startNewConversation = [bool]($New -or $null -ne $Rotation)
     $storedSessionId = if (
-        -not $New -and $null -ne $identity -and
+        -not $startNewConversation -and $null -ne $identity -and
         [string]$identity.sessionId -and [string]$identity.repositoryRoot -and
         (Test-FactorySamePath -Left ([string]$identity.repositoryRoot) -Right ([string]$Context.repositoryRoot))
     ) { [string]$identity.sessionId } else { "" }
@@ -136,9 +138,13 @@ function Start-FactoryCodexOrchestrator {
     if (-not $storedSessionId) {
         $bootstrapJsonlPath = Join-Path ([string]$Context.projectData) "codex-orchestrator-bootstrap.jsonl"
         $lastMessagePath = Join-Path ([string]$Context.projectData) "codex-orchestrator-bootstrap.last-message.txt"
+        $rotationPrompt = if ($null -ne $Rotation) {
+            " " + (Get-FactoryOrchestratorRotationPrompt -Rotation $Rotation)
+        } else { "" }
         $prompt = @"
 You are the Factory Orchestrator for this repository. Load the factory skill explicitly with `$factory before acting. The skill's canonical protocol is authoritative. You coordinate native factory state and isolated workers; never implement application changes directly in the main repository. Accept natural commands such as "factory status", "factory new", "review <task-id>", "go <task-id>", and "reject <task-id>" without requiring a slash or a dollar prefix. For this bootstrap turn, do not change files or task state; reply only that the Factory Orchestrator is ready.
 "@.Trim()
+        $prompt += $rotationPrompt
         $bootstrapArguments = @("exec", "--json") + $sharedArguments + @(
             "--output-last-message", $lastMessagePath,
             $prompt
@@ -161,6 +167,9 @@ You are the Factory Orchestrator for this repository. Load the factory skill exp
             -Path $identityPath `
             -RepositoryRoot ([string]$Context.repositoryRoot) `
             -SessionId $storedSessionId
+        if ($null -ne $Rotation) {
+            $null = Complete-FactoryOrchestratorRotation -Context $Context -Rotation $Rotation -NewSessionId $storedSessionId
+        }
     } else {
         Write-Host "Resuming Codex factory conversation: $storedSessionId" -ForegroundColor Green
     }

@@ -3,7 +3,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet(
         "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
-        "cleanup", "concurrency", "completion", "start", "paths", "config",
+        "cleanup", "concurrency", "completion", "start", "rotate", "paths", "config",
         "scheduler", "tick", "pause", "resume", "stop", "purge"
     )]
     [string]$Command = "help",
@@ -26,7 +26,7 @@ param(
                 @(
                     "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
                     "cleanup", "concurrency", "completion", "start", "paths",
-                    "config", "scheduler", "tick", "pause", "resume", "stop",
+                    "rotate", "config", "scheduler", "tick", "pause", "resume", "stop",
                     "purge", "help"
                 )
             }
@@ -41,6 +41,7 @@ param(
             "completion" { "status", "enable" }
             "config" { "path", "edit" }
             "scheduler" { "status", "start", "stop", "tick" }
+            "rotate" { "status", "cancel" }
             "preview" { "status", "stop" }
         })
 

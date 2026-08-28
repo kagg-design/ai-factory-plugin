@@ -24,6 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "orchestrator-session.ps1")
 
 $script:Tree = @{
     Top = [char]0x256D
@@ -1179,6 +1180,52 @@ function Start-CliFactory {
     $script:CliExitCode = $LASTEXITCODE
 }
 
+function Write-CliRotate {
+    param($Context, [string]$Action)
+
+    $config = Read-FactoryJson -Path ([string]$Context.configPath)
+    $runtime = [string](Get-CliProperty -InputObject $config -Name "workerAgent" -Default "claude")
+    if ($runtime -notin @("claude", "codex")) { throw "Unsupported orchestrator runtime '$runtime'." }
+    $rotationAction = if ($Action) { $Action.ToLowerInvariant() } else { "request" }
+    if ($rotationAction -notin @("request", "status", "cancel")) {
+        throw "Unknown rotate action '$Action'. Use: factory rotate [status|cancel]"
+    }
+
+    if ($rotationAction -eq "status") {
+        $pending = Get-FactoryPendingOrchestratorRotation -Context $Context -Runtime $runtime
+        if ($null -eq $pending) {
+            Write-Output "No $runtime orchestrator rotation is pending."
+            return
+        }
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Orchestrator rotation pending $($script:Tree.Horizontal) $runtime"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Requested: $([string]$pending.requestedAt)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Previous session: $(ConvertTo-CliLine -Value $pending.previousSessionId -Fallback 'none')"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Handoff: $([string]$pending.handoffPath)"
+        Write-Output "$($script:Tree.Last)$($script:Tree.Horizontal) Next: $(if ($runtime -eq 'codex') { 'factory start -Agent codex' } else { 'factory start' })"
+        return
+    }
+
+    if ($rotationAction -eq "cancel") {
+        $cancelled = Cancel-FactoryOrchestratorRotation -Context $Context -Runtime $runtime
+        if ($null -eq $cancelled) {
+            Write-Output "No $runtime orchestrator rotation was pending."
+        } else {
+            Write-Output "Cancelled $runtime orchestrator rotation '$([string]$cancelled.rotationId)'. The saved handoff and old session were retained."
+        }
+        return
+    }
+
+    $state = Read-FactoryJson -Path ([string]$Context.statePath)
+    $rotation = Request-FactoryOrchestratorRotation -Context $Context -Config $config -State $state
+    $nextCommand = if ($runtime -eq "codex") { "factory start -Agent codex" } else { "factory start" }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Orchestrator rotation prepared $($script:Tree.Horizontal) $runtime"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Previous session: $(ConvertTo-CliLine -Value $rotation.previousSessionId -Fallback 'none')"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Handoff: $([string]$rotation.handoffPath)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Saved tasks: $([int]$rotation.savedTaskCount); unfinished: $([int]$rotation.unfinishedTaskCount)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Exit the current orchestrator if it is open. Tasks, workers, worktrees, and the scheduler stay intact."
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Next: $nextCommand"
+}
+
 function Write-CliPurge {
     param($Context, [bool]$Confirm, [bool]$ForceRemoval)
 
@@ -1218,6 +1265,7 @@ function Write-CliHelp {
             "",
             "PowerShell:",
             "  factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
+            "  factory rotate [status|cancel]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory preview [<task-id>|stop] [-NoOpen]",
@@ -1352,6 +1400,15 @@ function Write-CliHelp {
                 "Run this from PowerShell, not from inside an already open orchestrator."
             ) | Write-Output
         }
+        "rotate" {
+            @(
+                "factory rotate [status|cancel]",
+                "Prepares a deterministic handoff and makes the next normal start create a fresh orchestrator conversation.",
+                "Run it inside the current orchestrator, exit that TUI, then run the exact printed factory start command.",
+                "Tasks, workers, worktrees, scheduler state, and the previous resumable conversation are retained.",
+                "Use 'status' to inspect a pending rotation or 'cancel' to keep using the stored conversation."
+            ) | Write-Output
+        }
         "paths" {
             @(
                 "factory paths",
@@ -1454,6 +1511,12 @@ if ($normalizedCommand -eq "start") {
     if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
     Start-CliFactory -Context $context
     exit $script:CliExitCode
+}
+
+if ($normalizedCommand -eq "rotate") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "rotate accepts only status, cancel, or no argument." }
+    Write-CliRotate -Context $context -Action $Target
+    exit 0
 }
 
 if ($normalizedCommand -eq "paths") {

@@ -109,6 +109,21 @@ Use `factory start -New` only to deliberately replace the stored
 conversation. The launcher still refuses to create a new one while a matching
 interactive or background orchestrator is live.
 
+For a routine context-window rollover, prefer the guarded handoff command:
+
+```text
+!factory rotate
+```
+
+It creates a deterministic handoff in private project runtime and marks the
+currently selected Claude or Codex orchestrator for replacement. Exit the
+current TUI, then run the exact start command printed by `rotate`. The next
+normal start creates a fresh conversation, supplies the handoff during
+bootstrap, and clears the pending marker. It never changes task state, stops
+the scheduler, removes a worker/worktree, or deletes the old resumable
+conversation. `factory rotate status` inspects a pending handoff and `factory
+rotate cancel` cancels it.
+
 ## 3. Where commands belong
 
 Run `/factory ...` commands inside Claude. Inside Codex, use `factory ...` or a
@@ -129,6 +144,7 @@ Deterministic operations also have a native fast path:
 !factory reject <task-id> [-Yes|-Keep] [reason]
 !factory cleanup <task-id>
 !factory concurrency [number]
+!factory rotate [status|cancel]
 !factory doctor
 !factory completion [status|enable]
 ```

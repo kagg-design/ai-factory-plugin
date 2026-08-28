@@ -92,6 +92,11 @@ try {
     # Runtime selection changes only after this launcher owns the project's lead
     # session. A failed attempt to switch a live factory must not retarget workers.
     Write-FactoryJsonAtomic -Path ([string]$context.configPath) -Value $factoryConfig
+    $pendingRotation = Get-FactoryPendingOrchestratorRotation -Context $context -Runtime $selectedAgent
+    if ($null -ne $pendingRotation -and ($Resume -or $Continue)) {
+        throw "A $selectedAgent orchestrator rotation is pending. Start normally to activate it, or run 'factory rotate cancel' before using -Resume/-Continue."
+    }
+    $startNewConversation = [bool]($New -or $null -ne $pendingRotation)
 
     Write-Host "Repository: $($context.repositoryRoot)" -ForegroundColor Cyan
     Write-Host "Project config: $($context.configPath)" -ForegroundColor Cyan
@@ -105,6 +110,10 @@ try {
     }
     Write-Host "Worker runtime: $workerAgent" -ForegroundColor Cyan
     Write-Host "Command: $(if ($selectedAgent -eq 'claude') { '/factory' } else { 'factory' })" -ForegroundColor Cyan
+    if ($null -ne $pendingRotation) {
+        Write-Host "Orchestrator rotation: $([string]$pendingRotation.rotationId)" -ForegroundColor Green
+        Write-Host "Handoff: $([string]$pendingRotation.handoffPath)" -ForegroundColor Green
+    }
     Write-Host ""
 
     if ($selectedAgent -eq "codex") {
@@ -114,10 +123,11 @@ try {
             -CodexCommand $resolvedCodexCommand `
             -PluginRoot $pluginRoot `
             -Context $context `
-            -New:$New `
+            -New:$startNewConversation `
             -Resume:$Resume `
             -Continue:$Continue `
             -Model $Model `
+            -Rotation $pendingRotation `
             -ExitCodeVariableName "factoryCodexExitCode"
         exit $factoryCodexExitCode
     }
@@ -127,7 +137,7 @@ try {
         try { Read-FactoryJson -Path $identityPath } catch { $null }
     } else { $null }
     $storedSessionId = if (
-        -not $New -and $null -ne $identity -and
+        -not $startNewConversation -and $null -ne $identity -and
         [string]$identity.repositoryRoot -and [string]$identity.sessionId -and
         [string]$identity.name -ceq $Name -and
         (Test-FactorySamePath -Left ([string]$identity.repositoryRoot) -Right ([string]$context.repositoryRoot))
@@ -151,9 +161,9 @@ try {
     $background = Select-FactoryBackgroundOrchestrator `
         -Rows $matchingRows `
         -PreferredSessionId $storedSessionId
-    if ($null -ne $background -and $New) {
+    if ($null -ne $background -and $startNewConversation) {
         $backgroundId = [string]$background.id
-        throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Attach to it or stop/remove it first."
+        throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Exit or stop/remove it first, then run factory start again."
     }
 
     Start-FactoryLauncherScheduler -Context $context -PluginRoot $pluginRoot -ClaudeCommand $ClaudeCommand
@@ -198,6 +208,12 @@ try {
     if ($Model) {
         $claudeArguments += @("--model", $Model)
     }
+    if ($null -ne $pendingRotation) {
+        $claudeArguments += @(
+            "--add-dir", [string]$context.projectData,
+            "--append-system-prompt", (Get-FactoryOrchestratorRotationPrompt -Rotation $pendingRotation)
+        )
+    }
     if ($Resume) {
         $claudeArguments += "--resume"
     } elseif ($Continue) {
@@ -212,6 +228,9 @@ try {
             -RepositoryRoot ([string]$context.repositoryRoot) `
             -Name $Name `
             -SessionId $newSessionId
+        if ($null -ne $pendingRotation) {
+            $null = Complete-FactoryOrchestratorRotation -Context $context -Rotation $pendingRotation -NewSessionId $newSessionId
+        }
         $claudeArguments += @("--session-id", $newSessionId)
     }
 

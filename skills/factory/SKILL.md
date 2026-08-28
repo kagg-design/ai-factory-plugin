@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, rework, release, reject, cleanup, sync, preview, chat, scheduler, or asks to manage factory tasks and workers.
+description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, rework, release, reject, cleanup, sync, preview, chat, rotate, scheduler, or asks to manage factory tasks and workers.
 ---
 
 # Factory orchestrator for Codex

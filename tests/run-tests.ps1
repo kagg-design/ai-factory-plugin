@@ -149,6 +149,8 @@ try {
     Assert-True ($publicSkill.Contains('!factory concurrency [N]')) "Factory help does not advertise native concurrency control."
     Assert-True ($publicSkill.Contains('!factory go <id> [--direct]')) "Factory help does not advertise direct approval."
     Assert-True ($publicSkill.Contains('!factory preview <id>')) "Factory help does not advertise native browser preview."
+    Assert-True ($publicSkill.Contains('!factory rotate')) "Factory help does not advertise safe orchestrator rotation."
+    Assert-True ($publicSkill.Contains('### `rotate`')) "The public skill does not define orchestrator rotation semantics."
     Assert-True ($publicSkill.Contains('### `go <task-id> [--direct]`')) "The public skill does not document direct approval safeguards."
     Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
     Assert-True ($publicSkill.Contains('one continuous Unicode tree')) "Factory status is not rendered as one tree."
@@ -180,6 +182,8 @@ try {
     Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
     Assert-True ($launcherSource.Contains('Start-FactoryCodexOrchestrator')) "Launcher cannot start a Codex orchestrator."
     Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
+    Assert-True ($launcherSource.Contains('Get-FactoryPendingOrchestratorRotation')) "Launcher does not consume pending orchestrator rotation."
+    Assert-True ($launcherSource.Contains('Complete-FactoryOrchestratorRotation')) "Launcher does not finalize orchestrator rotation after assigning a new session."
 
     $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export"
     Assert-Equal "factory-local-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
@@ -824,6 +828,7 @@ try {
     Assert-True ($cliSource.Contains('"new"') -and $cliSource.Contains('[switch]$Auto')) "Factory CLI does not expose native local task intake."
     Assert-True ($cliSource.Contains('[switch]$Direct')) "Factory CLI does not expose direct approval."
     Assert-True ($cliSource.Contains('"preview"') -and $cliSource.Contains('[switch]$NoOpen')) "Factory CLI does not expose native browser preview."
+    Assert-True ($cliSource.Contains('"rotate"')) "Factory CLI does not expose native orchestrator rotation."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -862,8 +867,56 @@ try {
     Assert-True ($cliHelp.Contains("!factory status")) "Factory CLI help does not explain direct orchestrator shell mode."
     Assert-True ($cliHelp.Contains("no AI interpretation")) "Factory CLI help hides its deterministic execution model."
     Assert-True ($cliHelp.Contains("factory go <task-id> [--direct]")) "Factory CLI help omits direct approval."
+    Assert-True ($cliHelp.Contains("factory rotate [status|cancel]")) "Factory CLI help omits orchestrator rotation."
     $cliGoHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help go | Out-String)
     Assert-True ($cliGoHelp.Contains("skips independent AI code review")) "Factory go help hides direct approval semantics."
+    $cliRotateHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help rotate | Out-String)
+    Assert-True ($cliRotateHelp.Contains("fresh orchestrator conversation") -and $cliRotateHelp.Contains("previous resumable conversation")) "Factory rotate help hides its rollover or retention semantics."
+
+    $claudeIdentityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
+    $preRotationIdentity = Read-FactoryJson -Path $claudeIdentityPath
+    $preRotationTaskCount = @((Read-FactoryJson -Path $context.statePath).tasks).Count
+    $cliRotate = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath rotate -Repository $repository | Out-String)
+    Assert-True ($cliRotate.Contains("Orchestrator rotation prepared") -and $cliRotate.Contains("factory start")) "Factory rotate did not prepare the handoff or print the next command."
+    $claudePendingPath = Get-FactoryOrchestratorRotationPendingPath -Context $context -Runtime "claude"
+    Assert-True (Test-Path -LiteralPath $claudePendingPath -PathType Leaf) "Factory rotate did not write a private pending marker."
+    $claudePendingRotation = Read-FactoryJson -Path $claudePendingPath
+    Assert-Equal ([string]$preRotationIdentity.sessionId) ([string]$claudePendingRotation.previousSessionId) "Factory rotate lost the previous Claude session UUID."
+    Assert-True (Test-Path -LiteralPath ([string]$claudePendingRotation.handoffPath) -PathType Leaf) "Factory rotate did not write its deterministic handoff."
+    $claudeHandoff = Get-Content -LiteralPath ([string]$claudePendingRotation.handoffPath) -Raw
+    Assert-True ($claudeHandoff.Contains("Held CLI task with a complete readable title") -and $claudeHandoff.Contains("held-cli-task | held")) "Factory handoff omitted unfinished task identity."
+    Assert-True ($claudeHandoff.Contains("Native config and state are authoritative")) "Factory handoff did not define native state as authoritative."
+    Assert-Equal $preRotationTaskCount @((Read-FactoryJson -Path $context.statePath).tasks).Count "Preparing orchestrator rotation mutated the task queue."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath rotate -Repository $repository | Out-String)
+    Assert-Equal ([string]$claudePendingRotation.rotationId) ([string](Read-FactoryJson -Path $claudePendingPath).rotationId) "Repeating factory rotate replaced an already-pending handoff."
+    $cliRotateStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath rotate status -Repository $repository | Out-String)
+    Assert-True ($cliRotateStatus.Contains([string]$claudePendingRotation.rotationId)) "Factory rotate status did not show the pending request."
+
+    $rotationArgv = Join-Path $testRoot "rotation-orchestrator-argv.txt"
+    $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $rotationArgv
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Pending Claude orchestrator rotation could not be activated."
+    $rotatedClaudeArgs = @([IO.File]::ReadAllLines($rotationArgv, [Text.Encoding]::UTF8))
+    $rotatedSessionIndex = [Array]::IndexOf($rotatedClaudeArgs, "--session-id")
+    Assert-True ($rotatedSessionIndex -ge 0 -and $rotatedSessionIndex + 1 -lt $rotatedClaudeArgs.Count) "Claude rotation did not create a new session UUID."
+    $rotatedClaudeSessionId = $rotatedClaudeArgs[$rotatedSessionIndex + 1]
+    Assert-True ($rotatedClaudeSessionId -ne [string]$preRotationIdentity.sessionId) "Claude rotation resumed the context-heavy session."
+    Assert-True ([Array]::IndexOf($rotatedClaudeArgs, "--append-system-prompt") -ge 0) "Claude rotation did not inject its private handoff into bootstrap."
+    Assert-True ($rotatedClaudeArgs -contains [string]$context.projectData) "Claude rotation did not grant the new session access to private handoff state."
+    Assert-True (-not (Test-Path -LiteralPath $claudePendingPath)) "Claude rotation left a pending marker that would rotate every subsequent start."
+    $activatedClaudeRotation = Read-FactoryJson -Path ([string]$claudePendingRotation.recordPath)
+    Assert-Equal "activated" ([string]$activatedClaudeRotation.status) "Claude rotation audit was not finalized."
+    Assert-Equal $rotatedClaudeSessionId ([string]$activatedClaudeRotation.newSessionId) "Claude rotation audit recorded the wrong replacement UUID."
+    Assert-Equal $preRotationTaskCount @((Read-FactoryJson -Path $context.statePath).tasks).Count "Activating orchestrator rotation mutated the task queue."
+
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath rotate -Repository $repository | Out-String)
+    Assert-True (Test-Path -LiteralPath $claudePendingPath -PathType Leaf) "Second rotation request was not prepared for cancellation testing."
+    $cancelledRotationRecordPath = [string](Read-FactoryJson -Path $claudePendingPath).recordPath
+    $cliRotateCancel = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath rotate cancel -Repository $repository | Out-String)
+    Assert-True ($cliRotateCancel.Contains("Cancelled claude orchestrator rotation")) "Factory rotate cancel did not report cancellation."
+    Assert-True (-not (Test-Path -LiteralPath $claudePendingPath)) "Factory rotate cancel left the pending marker behind."
+    Assert-Equal "cancelled" ([string](Read-FactoryJson -Path $cancelledRotationRecordPath).status) "Factory rotate cancel did not preserve a cancelled audit."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
 
     $cliStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cliStatus.Contains(([char]0x256D).ToString() + ([char]0x2500).ToString() + " Factory")) "Factory CLI status does not use the continuous Unicode tree."
@@ -948,7 +1001,7 @@ try {
         try {
             $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
-            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview") "PowerShell did not complete the unified native commands."
+            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "rotate" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview") "PowerShell did not complete the unified native commands."
             Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
@@ -2301,6 +2354,23 @@ try {
     Assert-Equal 0 $LASTEXITCODE "Stored Codex orchestrator resume failed."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 1) "Repeated Codex startup created a duplicate orchestrator thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 2) "Repeated Codex startup did not resume the stored thread."
+    $codexRotate = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") rotate -Repository $repository | Out-String)
+    Assert-True ($codexRotate.Contains("Orchestrator rotation prepared") -and $codexRotate.Contains("factory start -Agent codex")) "Codex rotation did not print its runtime-specific restart command."
+    $codexPendingPath = Get-FactoryOrchestratorRotationPendingPath -Context $context -Runtime "codex"
+    $codexPendingRotation = Read-FactoryJson -Path $codexPendingPath
+    Assert-Equal "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" ([string]$codexPendingRotation.previousSessionId) "Codex rotation lost the previous thread UUID."
+    $env:CLAUDE_FACTORY_TEST_CODEX_THREAD_ID = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Pending Codex orchestrator rotation could not be activated."
+    $rotatedCodexIdentity = Read-FactoryJson -Path (Join-Path ([string]$context.projectData) "codex-orchestrator-session.json")
+    Assert-Equal "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" ([string]$rotatedCodexIdentity.sessionId) "Codex rotation resumed the context-heavy thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 2) "Codex rotation did not bootstrap exactly one replacement thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match 'freshly rotated Factory Orchestrator' }).Count -ge 1) "Codex replacement bootstrap did not receive the deterministic handoff directive."
+    Assert-True (-not (Test-Path -LiteralPath $codexPendingPath)) "Codex rotation left a pending marker that would rotate every subsequent start."
+    $activatedCodexRotation = Read-FactoryJson -Path ([string]$codexPendingRotation.recordPath)
+    Assert-Equal "activated" ([string]$activatedCodexRotation.status) "Codex rotation audit was not finalized."
+    Assert-Equal "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" ([string]$activatedCodexRotation.newSessionId) "Codex rotation audit recorded the wrong replacement UUID."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_THREAD_ID -ErrorAction SilentlyContinue
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Default Claude orchestrator startup failed after Codex selection."
     $defaultRuntimeConfig = Read-FactoryJson -Path $context.configPath

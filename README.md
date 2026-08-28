@@ -104,6 +104,7 @@ factory completion status
 factory paths
 factory config edit
 factory scheduler status
+factory rotate
 factory help
 ```
 
@@ -190,6 +191,29 @@ factory start -Model sonnet
 ```
 
 `-Resume` and `-Continue` are mutually exclusive.
+
+### Rotate a long-running orchestrator
+
+Prepare a fresh orchestrator conversation without changing durable Factory
+work:
+
+```powershell
+factory rotate
+```
+
+From inside Claude or Codex, use `!factory rotate`. The command writes a
+deterministic private handoff with operational settings, task counts, and every
+unfinished task, then marks the selected runtime for replacement. Exit the
+current TUI and run the exact command it prints (`factory start` for Claude or
+`factory start -Agent codex` for Codex). That normal start creates a new
+conversation instead of resuming the old UUID and injects the handoff into its
+bootstrap context. Task state, workers, worktrees, commits, scheduler state,
+and the previous resumable conversation are retained.
+
+Use `factory rotate status` to inspect a pending request and `factory rotate
+cancel` to cancel it. Rotation is explicit rather than token-count driven:
+Claude/Codex own context compaction, while Factory owns only durable native
+state and session identity.
 
 ### Full runtime selection
 
@@ -542,6 +566,7 @@ running; the scheduler simply waits before starting more.
 /factory reject <task-id> [reason] [--yes|--keep]
 /factory cleanup <task-id>
 /factory retry <task-id>
+/factory rotate
 /factory pause
 /factory resume
 /factory stop
