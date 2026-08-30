@@ -769,3 +769,14 @@ mutex/PID refusal and must not attempt a second tick while work is in flight.
 The scheduler writes JSONL tick/process records to `scheduler.stdout.log` and
 failure/process-loss records to `scheduler.stderr.log`; use the printed paths
 and `factory doctor` when runnable work is not moving.
+
+### Troubleshooting worker result capture
+
+`claude stop <background-id>` terminates a background session without running
+its Stop hook. Before stopping a worker that appears stuck in `working`, inspect
+`runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
+factory's private runtime. It preserves the complete `lastAssistantMessage`,
+the parsed `payload`, and the classification: `result`, `plan`, `message`, or
+`invalid-marker`. An `invalid-marker` event includes the exact parse failure.
+Read this file before stopping the session; `claude stop` cannot retroactively
+capture an already printed result.

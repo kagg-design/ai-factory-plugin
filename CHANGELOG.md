@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Made worker envelope capture deterministic: the first standalone result or
+  plan marker wins, nested JSON braces are parsed correctly, and malformed
+  marker JSON reaches the task error. Completed tasks now derive authoritative
+  changed paths from the validated commit; worker-reported differences are
+  retained as bounded missing/extra diagnostics instead of rejecting clean
+  commits, including rename commits.
 - Added `factory rotate` for safe orchestrator context rollover. It creates a
   deterministic private handoff, preserves all durable Factory work and the
   previous resumable session, and makes the next normal Claude or Codex start

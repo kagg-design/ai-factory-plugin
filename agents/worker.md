@@ -93,8 +93,8 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 - Require clean `git status --porcelain` after the commit.
 - If the user requests rework before integration, amend the task commit so the
   branch still contains one final task commit.
-- Capture the branch, full SHA, absolute worktree path, changed files, and exact
-  test outcomes.
+- Capture the branch, full SHA, absolute worktree path, and exact test outcomes.
+  Factory derives the authoritative changed-file list from that commit.
 
 ## Completion protocol
 
@@ -108,7 +108,6 @@ FACTORY_RESULT
   "branch": "...",
   "commit": "...",
   "worktree": "...",
-  "changedFiles": ["..."],
   "tests": [
     {"command": "...", "status": "passed", "summary": "..."}
   ],

@@ -2,6 +2,116 @@ if ($null -eq (Get-Command Write-FactoryJsonAtomic -ErrorAction SilentlyContinue
     . (Join-Path $PSScriptRoot "factory-common.ps1")
 }
 
+function Get-FactoryJsonObjectEndIndex {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][int]$StartIndex
+    )
+
+    $depth = 0
+    $inString = $false
+    $escaped = $false
+    for ($index = $StartIndex; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($inString) {
+            if ($escaped) {
+                $escaped = $false
+            } elseif ($character -eq [char]0x5c) {
+                $escaped = $true
+            } elseif ($character -eq [char]0x22) {
+                $inString = $false
+            }
+            continue
+        }
+        if ($character -eq [char]0x22) {
+            $inString = $true
+        } elseif ($character -eq [char]0x7b) {
+            $depth++
+        } elseif ($character -eq [char]0x7d) {
+            $depth--
+            if ($depth -eq 0) { return $index }
+        }
+    }
+    return -1
+}
+
+function ConvertFrom-FactoryWorkerMarkerMessage {
+    param([AllowEmptyString()][string]$Message)
+
+    $candidates = @(
+        [pscustomobject]@{ Marker = "FACTORY_RESULT"; Kind = "result" },
+        [pscustomobject]@{ Marker = "FACTORY_PLAN"; Kind = "plan" }
+    )
+    $located = New-Object Collections.Generic.List[object]
+    foreach ($candidate in $candidates) {
+        $pattern = "^[ \t]*$([regex]::Escape([string]$candidate.Marker))[ \t]*\r?$"
+        $match = [regex]::Match($Message, $pattern, [Text.RegularExpressions.RegexOptions]::Multiline)
+        if ($match.Success) {
+            $located.Add([pscustomobject]@{
+                Marker = [string]$candidate.Marker
+                Kind = [string]$candidate.Kind
+                Index = $match.Index
+                JsonSearchIndex = $match.Index + $match.Length
+                Standalone = $true
+            })
+        }
+    }
+    if ($located.Count -eq 0) {
+        foreach ($candidate in $candidates) {
+            $markerIndex = $Message.IndexOf([string]$candidate.Marker, [StringComparison]::Ordinal)
+            if ($markerIndex -ge 0) {
+                $located.Add([pscustomobject]@{
+                    Marker = [string]$candidate.Marker
+                    Kind = [string]$candidate.Kind
+                    Index = $markerIndex
+                    JsonSearchIndex = $markerIndex + ([string]$candidate.Marker).Length
+                    Standalone = $false
+                })
+            }
+        }
+    }
+    if ($located.Count -eq 0) {
+        return [pscustomobject]@{ kind = "message"; payload = $null; marker = $null }
+    }
+
+    $chosen = @($located | Sort-Object Index | Select-Object -First 1)[0]
+    $firstBrace = $Message.IndexOf('{', [int]$chosen.JsonSearchIndex)
+    if ($firstBrace -lt 0) {
+        $reason = "Marker $([string]$chosen.Marker) was found, but no JSON object starts after it."
+        return [pscustomobject]@{
+            kind = "invalid-marker"
+            marker = [string]$chosen.Marker
+            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = $reason }
+        }
+    }
+    $lastBrace = Get-FactoryJsonObjectEndIndex -Text $Message -StartIndex $firstBrace
+    if ($lastBrace -lt $firstBrace) {
+        $reason = "Marker $([string]$chosen.Marker) was found, but its JSON object has no matching closing brace."
+        return [pscustomobject]@{
+            kind = "invalid-marker"
+            marker = [string]$chosen.Marker
+            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = $reason }
+        }
+    }
+    try {
+        $payload = $Message.Substring($firstBrace, $lastBrace - $firstBrace + 1) | ConvertFrom-Json
+        return [pscustomobject]@{
+            kind = [string]$chosen.Kind
+            marker = [string]$chosen.Marker
+            payload = $payload
+        }
+    } catch {
+        return [pscustomobject]@{
+            kind = "invalid-marker"
+            marker = [string]$chosen.Marker
+            payload = [pscustomobject]@{
+                marker = [string]$chosen.Marker
+                error = "Marker $([string]$chosen.Marker) contains invalid JSON: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 function Publish-FactoryWorkerEvent {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -19,32 +129,9 @@ function Publish-FactoryWorkerEvent {
     $historyDirectory = Join-Path $eventDirectory "history"
     New-Item -ItemType Directory -Path $historyDirectory -Force | Out-Null
 
-    $kind = "message"
-    $payload = $null
-    foreach ($candidate in @(
-        [pscustomobject]@{ Marker = "FACTORY_RESULT"; Kind = "result" },
-        [pscustomobject]@{ Marker = "FACTORY_PLAN"; Kind = "plan" }
-    )) {
-        $markerIndex = $Message.LastIndexOf([string]$candidate.Marker, [StringComparison]::Ordinal)
-        if ($markerIndex -lt 0) { continue }
-        $jsonText = $Message.Substring($markerIndex + ([string]$candidate.Marker).Length).Trim()
-        if ($jsonText.StartsWith('```')) {
-            $jsonText = $jsonText -replace '^```(?:json)?\s*', ''
-            $jsonText = $jsonText -replace '\s*```\s*$', ''
-        }
-        $firstBrace = $jsonText.IndexOf('{')
-        $lastBrace = $jsonText.LastIndexOf('}')
-        if ($firstBrace -lt 0 -or $lastBrace -lt $firstBrace) { continue }
-        try {
-            $payload = $jsonText.Substring($firstBrace, $lastBrace - $firstBrace + 1) | ConvertFrom-Json
-            $kind = [string]$candidate.Kind
-            break
-        } catch {
-            $kind = "invalid-marker"
-            $payload = [pscustomobject]@{ marker = [string]$candidate.Marker; error = $_.Exception.Message }
-            break
-        }
-    }
+    $classification = ConvertFrom-FactoryWorkerMarkerMessage -Message $Message
+    $kind = [string]$classification.kind
+    $payload = $classification.payload
 
     $branch = (& git -C $Worktree branch --show-current 2>$null | Out-String).Trim()
     $capturedAt = Get-FactoryUtcTimestamp

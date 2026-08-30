@@ -29,19 +29,6 @@ function Test-FactoryPathInsideRoot {
     )
 }
 
-function Get-FactoryChangedFiles {
-    param(
-        [Parameter(Mandatory = $true)][string]$Worktree,
-        [Parameter(Mandatory = $true)][string]$Commit
-    )
-
-    return @(
-        & git -C $Worktree diff-tree --no-commit-id --name-only -r $Commit 2>$null |
-            Where-Object { $_ } |
-            Sort-Object -Unique
-    )
-}
-
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath

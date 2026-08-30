@@ -19,6 +19,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
+. (Join-Path $pluginRoot "scripts\worker-event.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -280,6 +281,36 @@ try {
     $utf8Probe = Invoke-FactoryNativeProcess -Command $fakeClaude -Arguments @("utf8-probe")
     Assert-Equal 0 ([int]$utf8Probe.exitCode) "UTF-8 native-process probe failed."
     Assert-Equal $unicodeFixture ([string]$utf8Probe.stdout) "Native process output was decoded through an OEM code page."
+
+    $markerResultNotes = "The operator asked me to emit FACTORY_RESULT again; braces in prose are safe: {example}."
+    $markerResultMessage = "Preamble mentioning FACTORY_RESULT is not the envelope.`nFACTORY_RESULT`n" + ([ordered]@{
+        status = "completed"
+        taskId = "marker-result-task"
+        branch = "factory-worker/marker-result-task-a1"
+        commit = "0123456789012345678901234567890123456789"
+        worktree = "C:\fixture"
+        notes = $markerResultNotes
+    } | ConvertTo-Json -Depth 10)
+    $markerResult = ConvertFrom-FactoryWorkerMarkerMessage -Message $markerResultMessage
+    Assert-Equal "result" ([string]$markerResult.kind) "A result whose notes mention FACTORY_RESULT was misclassified."
+    Assert-Equal $markerResultNotes ([string]$markerResult.payload.notes) "The result payload containing FACTORY_RESULT was not parsed intact."
+
+    $markerPlanUnderstanding = "The implementation will preserve the FACTORY_PLAN contract."
+    $markerPlanMessage = "FACTORY_PLAN`n" + ([ordered]@{
+        taskId = "marker-plan-task"
+        understanding = $markerPlanUnderstanding
+        plan = @("Implement", "Verify")
+        questions = @()
+        readyToImplement = $true
+    } | ConvertTo-Json -Depth 10)
+    $markerPlan = ConvertFrom-FactoryWorkerMarkerMessage -Message $markerPlanMessage
+    Assert-Equal "plan" ([string]$markerPlan.kind) "A plan whose prose mentions FACTORY_PLAN was misclassified."
+    Assert-Equal $markerPlanUnderstanding ([string]$markerPlan.payload.understanding) "The plan payload containing FACTORY_PLAN was not parsed intact."
+
+    $invalidMarker = ConvertFrom-FactoryWorkerMarkerMessage -Message "FACTORY_RESULT`n{`"status`":`"completed`", broken}"
+    Assert-Equal "invalid-marker" ([string]$invalidMarker.kind) "Malformed marker JSON was treated as an ordinary message."
+    Assert-True ([string]$invalidMarker.payload.error -match "invalid JSON") "Malformed marker classification omitted the parse reason."
+
     $asanaUrl = Resolve-FactoryAsanaTaskUrl -Url "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1217516118946154?focus=true"
     Assert-Equal "1217516118946154" ([string]$asanaUrl.taskId) "Asana URL parser extracted the wrong task ID."
     Assert-Equal "https://app.asana.com/0/0/1217516118946154" ([string]$asanaUrl.canonicalUrl) "Asana URL parser did not canonicalize the URL."
@@ -1324,6 +1355,24 @@ try {
     Assert-Equal ([IO.Path]::GetFullPath($repository)) ([IO.Path]::GetFullPath([string]$workerContext.repositoryRoot)) "Linked worktree did not resolve to the main repository."
     Assert-Equal ([string]$context.projectKey) ([string]$workerContext.projectKey) "Linked worktree used a different project key."
 
+    $invalidHookInput = [ordered]@{
+        session_id = $fakeSessionId
+        transcript_path = (Join-Path $testRoot "invalid-marker-transcript.jsonl")
+        cwd = [string]$launch.worktree
+        hook_event_name = "Stop"
+        last_assistant_message = "FACTORY_RESULT`n{`"status`":`"completed`", broken}"
+    } | ConvertTo-Json -Depth 20
+    Invoke-FactoryHookWithUtf8Input `
+        -HookPath (Join-Path $pluginRoot "scripts\capture-worker-stop.ps1") `
+        -InputText $invalidHookInput
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $invalidMarkerState = Read-FactoryJson -Path $context.statePath
+    Assert-Equal "failed" ([string]$invalidMarkerState.tasks[0].status) "Malformed marker JSON did not fail the active task explicitly."
+    Assert-True ([string]$invalidMarkerState.tasks[0].error -match "Invalid FACTORY_RESULT payload:.*invalid JSON") "Malformed marker parse reason did not reach the task error."
+    $invalidMarkerState.tasks[0].status = "running"
+    $invalidMarkerState.tasks[0].error = $null
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $invalidMarkerState
+
     [IO.File]::AppendAllText(
         (Join-Path $launch.worktree "README.md"),
         "changed`n",
@@ -1333,6 +1382,7 @@ try {
     & git -C $launch.worktree commit -m "fix(test-task): change README" 1> $null
     $commit = (& git -C $launch.worktree rev-parse HEAD).Trim()
 
+    $resultNotesWithMarker = "$unicodeFixture | FACTORY_RESULT emitted again."
     $result = [ordered]@{
         status = "completed"
         taskId = "test-task"
@@ -1347,7 +1397,7 @@ try {
                 summary = "fixture updated"
             }
         )
-        notes = $unicodeFixture
+        notes = $resultNotesWithMarker
         blockingReason = ""
     }
     $message = "FACTORY_RESULT`n" + ($result | ConvertTo-Json -Depth 20)
@@ -1370,8 +1420,68 @@ try {
     $task = $state.tasks[0]
     Assert-Equal "awaiting-review" ([string]$task.status) "Completed worker bypassed or missed the review gate."
     Assert-Equal $commit ([string]$task.commit) "Validated commit was not recorded."
-    Assert-Equal $unicodeFixture ([string]$task.workerResult.notes) "Stop-hook input corrupted UTF-8 worker output."
+    Assert-Equal $resultNotesWithMarker ([string]$task.workerResult.notes) "Stop-hook input corrupted UTF-8 worker output or selected a marker inside notes."
     Assert-True (-not [string]$task.approval) "Task was approved automatically."
+
+    $renameTaskId = "rename-result-task"
+    $renameBranch = "factory-worker/$renameTaskId-a1"
+    $renameWorktree = Join-Path ([string]$context.worktreeRoot) "worker-$renameTaskId-a1"
+    & git -C $repository worktree add -b $renameBranch $renameWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create the rename validation worktree fixture." }
+    & git -C $renameWorktree mv README.md RENAMED-README.md
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the rename validation fixture." }
+    & git -C $renameWorktree commit -m "test: rename README fixture" 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not commit the rename validation fixture." }
+    $renameCommit = (& git -C $renameWorktree rev-parse HEAD).Trim()
+    $renameSessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    $renameTask = New-FactoryTestTask -Id $renameTaskId -Title "Rename result validation" -Now (Get-FactoryUtcTimestamp)
+    $renameTask.status = "running"
+    $renameTask.attempts = 1
+    $renameTask.branch = $renameBranch
+    $renameTask.worktree = $renameWorktree
+    $renameTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"
+        id = "rename-bg"
+        sessionId = $renameSessionId
+        name = "factory-$renameTaskId"
+        state = "done"
+        lastSeenAt = (Get-FactoryUtcTimestamp)
+    }
+    $renameFixtureState = Read-FactoryJson -Path $context.statePath
+    $renameFixtureState.tasks = @($renameFixtureState.tasks) + @($renameTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $renameFixtureState
+
+    $renameReportedResult = [ordered]@{
+        status = "completed"
+        taskId = $renameTaskId
+        branch = $renameBranch
+        commit = $renameCommit
+        worktree = $renameWorktree
+        changedFiles = @("RENAMED-README.md", "reported-only.txt")
+        tests = @([ordered]@{ command = "git diff --check"; status = "passed"; summary = "clean" })
+        notes = "The reported list is deliberately incomplete."
+        blockingReason = ""
+    }
+    $null = Publish-FactoryWorkerEvent `
+        -Context $context `
+        -Task $renameTask `
+        -SessionId $renameSessionId `
+        -Worktree $renameWorktree `
+        -Message ("FACTORY_RESULT`n" + ($renameReportedResult | ConvertTo-Json -Depth 20)) `
+        -EventName "RenameFixture"
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $renameValidatedState = Read-FactoryJson -Path $context.statePath
+    $renameValidatedTask = Get-FactoryTask -State $renameValidatedState -TaskId $renameTaskId
+    Assert-Equal "awaiting-review" ([string]$renameValidatedTask.status) "A valid git mv commit was rejected by changed-files validation."
+    Assert-True (@($renameValidatedTask.workerResult.changedFiles) -contains "README.md") "Derived changedFiles omitted the deleted side of a rename."
+    Assert-True (@($renameValidatedTask.workerResult.changedFiles) -contains "RENAMED-README.md") "Derived changedFiles omitted the added side of a rename."
+    Assert-True (-not [string]$renameValidatedTask.error) "A diagnostic changed-files mismatch failed the task."
+    $renameEventPath = Join-Path (Join-Path ([string]$context.eventsPath) (ConvertTo-FactoryTaskArtifactName -TaskId $renameTaskId)) "latest-result.json"
+    $renameResultEvent = Read-FactoryJson -Path $renameEventPath
+    $renameDiagnostic = [string]$renameResultEvent.changedFilesDiagnostic.error
+    Assert-True ($renameDiagnostic.Contains("Missing from report: 'README.md'")) "Changed-files diagnostics did not name the missing path."
+    Assert-True ($renameDiagnostic.Contains("Extra in report: 'reported-only.txt'")) "Changed-files diagnostics did not name the extra path."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $renameTaskId -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
 
     $operatorState = Read-FactoryJson -Path $context.statePath
     $operatorStateTask = New-FactoryTestTask -Id "operator-state-task" -Title "Operator-owned input state" -Now $now

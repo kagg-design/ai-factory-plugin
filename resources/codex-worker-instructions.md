@@ -60,8 +60,8 @@ blocked result instead of guessing.
   already supplied in the worker environment.
 - Review the diff, create exactly one final task commit, and require a clean
   `git status --porcelain` afterward.
-- Record the branch, full SHA, absolute worktree, changed files, and exact test
-  outcomes.
+- Record the branch, full SHA, absolute worktree, and exact test outcomes.
+  Factory derives the authoritative changed-file list from that commit.
 
 ## Completion protocol
 
@@ -75,7 +75,6 @@ FACTORY_RESULT
   "branch": "...",
   "commit": "...",
   "worktree": "...",
-  "changedFiles": ["..."],
   "tests": [
     {"command": "...", "status": "passed", "summary": "..."}
   ],

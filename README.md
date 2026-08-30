@@ -667,6 +667,19 @@ ignored `FACTORY-DECISIONS.md` in the retained worktree, removes the superseded
 Agent View rows without deleting their transcripts, and queues one attempt.
 Manual holds remain distinct and are not automatically retryable.
 
+Worker result markers are parsed from the first standalone `FACTORY_RESULT` or
+`FACTORY_PLAN` line, with a first-occurrence compatibility fallback. A marker
+with malformed JSON is recorded as `invalid-marker` and surfaced as the task
+error. For completed work, Factory derives the authoritative `changedFiles`
+list from the validated commit; a worker-supplied list is optional diagnostics
+and a mismatch cannot reject an otherwise valid clean commit.
+
+Do not use `claude stop <background-id>` to investigate a worker that appears
+stuck in `working`: that command bypasses Claude's Stop hook. First inspect
+`runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
+private runtime. It preserves the complete assistant message, parsed payload,
+and its `result`, `plan`, `message`, or `invalid-marker` classification.
+
 ## Worktree isolation
 
 Factory worktrees are siblings of the repository:

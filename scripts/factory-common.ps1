@@ -415,6 +415,57 @@ function Test-FactoryTaskRequiresFreshReview {
     return $false
 }
 
+function Get-FactoryChangedFiles {
+    param(
+        [Parameter(Mandatory = $true)][string]$Worktree,
+        [Parameter(Mandatory = $true)][string]$Commit
+    )
+
+    return @(
+        & git -C $Worktree diff-tree --no-commit-id --name-only -r $Commit 2>$null |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+}
+
+function Format-FactoryPathDifference {
+    param(
+        [AllowEmptyCollection()][string[]]$Paths = @(),
+        [int]$MaximumPaths = 5
+    )
+
+    $items = @($Paths)
+    if ($items.Count -eq 0) { return "none" }
+    $shown = @($items | Select-Object -First $MaximumPaths | ForEach-Object { "'$_'" })
+    $tail = if ($items.Count -gt $MaximumPaths) { " (+$($items.Count - $MaximumPaths) more)" } else { "" }
+    return ($shown -join ", ") + $tail
+}
+
+function Get-FactoryChangedFilesDiagnostic {
+    param(
+        [AllowEmptyCollection()][string[]]$DerivedFiles = @(),
+        [AllowEmptyCollection()][string[]]$ReportedFiles = @()
+    )
+
+    $derived = @($DerivedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ } | Sort-Object -Unique)
+    $reported = @($ReportedFiles | ForEach-Object { [string]$_ } | Where-Object { $_ } | Sort-Object -Unique)
+    $missing = @($derived | Where-Object { $reported -cnotcontains $_ })
+    $extra = @($reported | Where-Object { $derived -cnotcontains $_ })
+    $matches = $missing.Count -eq 0 -and $extra.Count -eq 0
+    return [pscustomobject][ordered]@{
+        matches = $matches
+        reported = $reported
+        derived = $derived
+        missingFromReport = $missing
+        extraInReport = $extra
+        error = if ($matches) {
+            $null
+        } else {
+            "Reported changedFiles differ from the validated commit. Missing from report: $(Format-FactoryPathDifference -Paths $missing). Extra in report: $(Format-FactoryPathDifference -Paths $extra)."
+        }
+    }
+}
+
 function Get-FactoryDirectApprovalReadiness {
     param(
         [Parameter(Mandatory = $true)]$Config,

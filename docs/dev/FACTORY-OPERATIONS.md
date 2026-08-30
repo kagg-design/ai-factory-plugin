@@ -757,6 +757,19 @@ sets `held` with a machine `holdReason`. Continue the retained worktree with:
 A manual hold has a different reason and is not accepted by `retry`. Retry also
 refuses a missing worktree or a task that already has a validated commit/result.
 
+Before stopping a Claude worker that appears stuck in `working`, inspect
+`runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
+private runtime. It stores the complete `lastAssistantMessage`, parsed payload,
+and the `result`, `plan`, `message`, or `invalid-marker` classification.
+`claude stop <background-id>` bypasses the Stop hook, so stopping first can
+prevent an already printed result from being captured.
+
+For completed results, the commit is authoritative for `changedFiles`.
+Reconciliation derives and stores the list from that validated commit. A
+worker-reported list is optional diagnostics; missing and extra reported paths
+are recorded in the result event but do not fail the task. HEAD/commit equality,
+the expected branch, and a clean worktree remain blocking integrity checks.
+
 To make decisions durable before relaunching a worker:
 
 ```text

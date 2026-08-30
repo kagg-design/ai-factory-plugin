@@ -187,6 +187,10 @@ try {
             $null -ne $latestEvent.PSObject.Properties["sessionId"] -and
             [string]$latestEvent.sessionId -eq $expectedEventSessionId
         )
+        $invalidMarkerIsCurrent = (
+            $latestEventIsCurrent -and
+            [string](Get-FactoryNestedValue -Target $latestEvent -Name "kind" -Default "") -eq "invalid-marker"
+        )
         if ($latestEventIsCurrent) {
             Set-FactoryProperty -Target $task.backgroundSession -Name "transcriptPath" -Value ([string]$latestEvent.transcriptPath)
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastAssistantMessage" -Value ([string]$latestEvent.lastAssistantMessage)
@@ -248,6 +252,12 @@ try {
             $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
                 [DateTime]::Parse([string]$task.reworkRequestedAt).ToUniversalTime()
         }
+        if ($resultIsCurrent -and $invalidMarkerIsCurrent) {
+            # A malformed latest turn must not be hidden by an older, as-yet
+            # unrecorded result from the same worker session.
+            $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
+                [DateTime]::Parse([string]$latestEvent.capturedAt).ToUniversalTime()
+        }
 
         if ($resultIsCurrent) {
             $result = $resultEvent.payload
@@ -290,15 +300,31 @@ try {
                         } elseif ($dirty.Count -gt 0) {
                             $validationError = "Worker worktree is not clean."
                         } else {
-                            $actualFiles = @(& git -C $task.worktree diff-tree --no-commit-id --name-only -r $resolvedCommit 2>$null |
-                                Where-Object { $_ } |
-                                Sort-Object -Unique)
-                            $reportedFiles = @($result.changedFiles | ForEach-Object { [string]$_ } | Sort-Object -Unique)
-                            if (($actualFiles -join "`n") -ne ($reportedFiles -join "`n")) {
-                                $validationError = "Reported changedFiles do not match commit '$resolvedCommit'."
-                            } else {
-                                Set-FactoryProperty -Target $task -Name "commit" -Value $resolvedCommit
+                            $derivedFiles = @(Get-FactoryChangedFiles -Worktree ([string]$task.worktree) -Commit $resolvedCommit)
+                            $reportedFilesPresent = $null -ne $result.PSObject.Properties["changedFiles"]
+                            $reportedFiles = if ($reportedFilesPresent) {
+                                @(Get-FactoryNestedValue -Target $result -Name "changedFiles" -Default @() | ForEach-Object { [string]$_ })
+                            } else { @() }
+                            Set-FactoryProperty -Target $result -Name "changedFiles" -Value $derivedFiles
+                            if ($reportedFilesPresent) {
+                                $changedFilesDiagnostic = Get-FactoryChangedFilesDiagnostic `
+                                    -DerivedFiles $derivedFiles `
+                                    -ReportedFiles $reportedFiles
                             }
+                            if ($reportedFilesPresent -and -not [bool]$changedFilesDiagnostic.matches) {
+                                Set-FactoryProperty -Target $resultEvent -Name "changedFilesDiagnostic" -Value $changedFilesDiagnostic
+                                Write-FactoryJsonAtomic -Path $resultPath -Value $resultEvent
+                                if (
+                                    $latestEventIsCurrent -and
+                                    [string](Get-FactoryNestedValue -Target $latestEvent -Name "capturedAt" -Default "") -eq
+                                        [string](Get-FactoryNestedValue -Target $resultEvent -Name "capturedAt" -Default "")
+                                ) {
+                                    Set-FactoryProperty -Target $latestEvent -Name "changedFilesDiagnostic" -Value $changedFilesDiagnostic
+                                    Set-FactoryProperty -Target $latestEvent -Name "payload" -Value $result
+                                    Write-FactoryJsonAtomic -Path $latestPath -Value $latestEvent
+                                }
+                            }
+                            Set-FactoryProperty -Target $task -Name "commit" -Value $resolvedCommit
                         }
                     }
                 }
@@ -325,6 +351,15 @@ try {
                 Set-FactoryProperty -Target $task -Name "error" -Value ([string]$result.blockingReason)
             }
             Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value ([string]$resultEvent.capturedAt)
+        } elseif (
+            $invalidMarkerIsCurrent -and
+            [string]$task.status -in @("starting", "planning", "running", "awaiting-input")
+        ) {
+            $marker = [string](Get-FactoryNestedValue -Target $latestEvent.payload -Name "marker" -Default "FACTORY marker")
+            $markerError = [string](Get-FactoryNestedValue -Target $latestEvent.payload -Name "error" -Default "The marker JSON could not be parsed.")
+            Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+            Set-FactoryProperty -Target $task -Name "error" -Value "Invalid $marker payload: $markerError"
+            Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value ([string]$latestEvent.capturedAt)
         } elseif ($null -ne $sessionRow -or $sessionMarkedMissing) {
             $sessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
             $validatedArtifacts = (
