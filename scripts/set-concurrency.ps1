@@ -17,8 +17,8 @@ try {
         throw "Concurrency must be between 1 and $maximum; received $Value."
     }
 
-    $previous = [int]$config.concurrency
-    Set-FactoryProperty -Target $config -Name "concurrency" -Value $Value
+    $previous = Get-FactoryCodingConcurrency -Config $config
+    Set-FactoryProperty -Target $config -Name "codingConcurrency" -Value $Value
     Write-FactoryJsonAtomic -Path $context.configPath -Value $config
 
     [ordered]@{
@@ -30,7 +30,7 @@ try {
         note = if ($Value -lt $previous) {
             "Running workers are preserved. New launches wait until active workers are below the new limit."
         } else {
-            "The next factory tick may fill the newly available capacity."
+            "The limit changed without resuming the factory. If it is paused, run 'factory resume' explicitly."
         }
     } | ConvertTo-Json -Depth 10
 } finally {

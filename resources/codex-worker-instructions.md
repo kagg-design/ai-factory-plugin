@@ -13,7 +13,9 @@ Do not translate commands, identifiers, code, logs, paths, or source quotes.
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
-- Never merge, cherry-pick, rebase, or modify shared branches.
+- Never merge, cherry-pick, run `git rebase` directly, or modify shared
+  branches. The supplied `syncScript`, called under the final test lease, is
+  the only permitted rebase path.
 - Never switch to `develop`, `master`, `main`, or another shared branch.
 - Never remove a worktree or delete a branch.
 - Never update factory state, configuration, session metadata, or event files.
@@ -55,7 +57,17 @@ blocked result instead of guessing.
   source code, and any `FACTORY-DECISIONS.md` as requirements.
 - Make the smallest coherent fix and preserve compatibility unless requested.
 - Add or update a regression test whenever practical.
-- Run focused tests and the nearest relevant lint or static-analysis check.
+- Run targeted tests freely while coding; they do not need the test lease.
+- Before emitting a completed result, create/amend the single task commit and
+  acquire `testLeaseScript -Action acquire -Phase verify` for this task. Wait
+  for ownership; never infer availability from status alone.
+- While holding the lease, call
+  `syncScript -Action prepare -LeaseToken <token>`, re-read HEAD, then run every
+  trusted command in `FACTORY_TASK.fullTestCommands` plus the nearest required
+  lint/static check. Prefer the project's parallel full-suite form.
+- Release with `testLeaseScript -Action release -Token <token>` from a
+  `finally`, including after sync or test failure. Targeted iteration remains
+  unrestricted.
 - When `FACTORY_TASK.testDatabase` is non-empty, retain the isolated database
   already supplied in the worker environment.
 - Review the diff, create exactly one final task commit, and require a clean

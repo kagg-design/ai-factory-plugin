@@ -238,6 +238,45 @@ function Set-FactoryProperty {
     }
 }
 
+function Get-FactoryCodingConcurrency {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if ($null -ne $Config.PSObject.Properties["codingConcurrency"]) {
+        return [int]$Config.codingConcurrency
+    }
+    if ($null -ne $Config.PSObject.Properties["concurrency"]) {
+        return [int]$Config.concurrency
+    }
+    return 8
+}
+
+function Get-FactoryCodingConcurrencySource {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if ($null -ne $Config.PSObject.Properties["codingConcurrency"]) {
+        if ($null -ne $Config.PSObject.Properties["concurrency"]) {
+            return "codingConcurrency (deprecated concurrency is present but ignored)"
+        }
+        return "codingConcurrency"
+    }
+    if ($null -ne $Config.PSObject.Properties["concurrency"]) {
+        return "deprecated concurrency alias"
+    }
+    return "default"
+}
+
+function Get-FactoryLaunchedWorkerCount {
+    param([Parameter(Mandatory = $true)]$State)
+
+    # awaiting-input retains a live coding slot. It represents a launched
+    # worker/conversation, even while the operator is deciding what to answer.
+    return @(
+        $State.tasks | Where-Object {
+            [string]$_.status -in @("starting", "planning", "awaiting-input", "running")
+        }
+    ).Count
+}
+
 function Enter-FactoryMutex {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectKey,
@@ -330,8 +369,24 @@ function Resolve-FactoryAsanaTaskUrl {
     }
 }
 
+function Get-FactoryInferredReviewCommands {
+    param([string]$RepositoryRoot = "")
+
+    if (-not $RepositoryRoot -or -not (Test-Path -LiteralPath $RepositoryRoot -PathType Container)) {
+        return @()
+    }
+    $commands = New-Object Collections.Generic.List[string]
+    if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "vendor\bin\pint") -PathType Leaf) {
+        $commands.Add("vendor/bin/pint --test")
+    }
+    if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "artisan") -PathType Leaf) {
+        $commands.Add("php artisan test --parallel")
+    }
+    return @($commands.ToArray())
+}
+
 function Resolve-FactoryReviewCommands {
-    param($InputValue = @(), $ConfigValue = @(), $SavedValue = @())
+    param($InputValue = @(), $ConfigValue = @(), $SavedValue = @(), [string]$RepositoryRoot = "")
 
     $commands = @($InputValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     if ($commands.Count -eq 0) {
@@ -340,6 +395,17 @@ function Resolve-FactoryReviewCommands {
     if ($commands.Count -eq 0) {
         $commands = @($SavedValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     }
+    if ($commands.Count -eq 0) {
+        $commands = @(Get-FactoryInferredReviewCommands -RepositoryRoot $RepositoryRoot)
+    }
+    $commands = @($commands | ForEach-Object {
+        $command = ([string]$_).Trim()
+        if ($command -match '^(?i:php(?:\.exe)?\s+artisan\s+test)$') {
+            "$command --parallel"
+        } else {
+            $command
+        }
+    })
     foreach ($command in $commands) {
         if ($command.Length -gt 4096 -or $command -match '[\r\n]') {
             throw "Review test commands must be single-line strings no longer than 4096 characters."
@@ -351,7 +417,8 @@ function Resolve-FactoryReviewCommands {
 function Get-FactoryPublicationReadiness {
     param(
         [Parameter(Mandatory = $true)]$Config,
-        [Parameter(Mandatory = $true)]$State
+        [Parameter(Mandatory = $true)]$State,
+        [string]$RepositoryRoot = ""
     )
 
     $blockers = New-Object System.Collections.Generic.List[string]
@@ -381,13 +448,15 @@ function Get-FactoryPublicationReadiness {
     try {
         $integrationCommands = @(Resolve-FactoryReviewCommands `
             -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "integrationTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()))
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()) `
+            -RepositoryRoot $RepositoryRoot)
         if ($integrationCommands.Count -eq 0) {
             $blockers.Add("no trusted integration test commands are configured or saved")
         }
         $releaseCommands = @(Resolve-FactoryReviewCommands `
             -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "releaseTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()))
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
+            -RepositoryRoot $RepositoryRoot)
         if ($releaseCommands.Count -eq 0 -and $integrationCommands.Count -gt 0) {
             $releaseCommands = @($integrationCommands)
         }
@@ -470,10 +539,11 @@ function Get-FactoryDirectApprovalReadiness {
     param(
         [Parameter(Mandatory = $true)]$Config,
         [Parameter(Mandatory = $true)]$State,
-        [Parameter(Mandatory = $true)]$Task
+        [Parameter(Mandatory = $true)]$Task,
+        [string]$RepositoryRoot = ""
     )
 
-    $publication = Get-FactoryPublicationReadiness -Config $Config -State $State
+    $publication = Get-FactoryPublicationReadiness -Config $Config -State $State -RepositoryRoot $RepositoryRoot
     $blockers = New-Object System.Collections.Generic.List[string]
     foreach ($blocker in @($publication.blockers)) { $blockers.Add([string]$blocker) }
 

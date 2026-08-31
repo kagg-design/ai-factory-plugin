@@ -499,7 +499,8 @@ If the worktree HEAD or a reviewed remote base changes after review, integration
 stops and requires synchronization/review again. The native scheduler prepares
 the development and production candidates in the existing reusable integrator
 and release worktrees, then runs their recorded check sets concurrently in
-separate processes and isolated test databases. After both candidates pass, it
+separate processes and isolated test databases under one publication-priority
+test-lane lease. After both candidates pass, it
 re-fetches the remote tips and pushes the exact tested development candidate,
 then the exact tested production candidate, sequentially and without force. It
 verifies reachability and cleans the worker; it never asks AI to resolve a merge
@@ -514,16 +515,24 @@ without BOM file, so non-ASCII titles and punctuation never cross the Windows
 PowerShell 5.1 native argument boundary. Internal `factory://` URIs are never
 written to Git history.
 
-## Dynamic concurrency
+## Coding concurrency and the test lane
 
-The default limit is three active workers:
+The coding lane is wide: the default limit is eight launched workers. Full
+project suites use a separate exclusive lane whose width is fixed at one:
 
 ```json
 {
-  "concurrency": 3,
-  "maxConcurrency": 20
+  "codingConcurrency": 8,
+  "maxConcurrency": 20,
+  "testLease": {
+    "ttlMinutes": 30
+  }
 }
 ```
+
+`concurrency` is accepted as a deprecated alias when an older private config is
+migrated. New configs and all writes use `codingConcurrency`; `factory doctor`
+reports which source is in effect.
 
 Show the current limit:
 
@@ -537,12 +546,16 @@ Change it while the queue is running:
 /factory concurrency 5
 ```
 
-Increasing from three to five lets the next tick start up to two additional
-queued workers immediately. Decreasing the limit never kills workers already
-running; the scheduler simply waits before starting more.
+Increasing the limit lets a running, unpaused scheduler fill the newly
+available coding slots. It never resumes or starts a paused/stopped factory;
+run `factory resume` as a separate decision. Decreasing the limit never kills
+workers already running; the scheduler simply waits before starting more.
 
-`planning`, `starting`, and `running` tasks consume active capacity.
-`awaiting-input` and `awaiting-review` sessions are idle and do not.
+`starting`, `planning`, `awaiting-input`, and `running` tasks consume coding
+capacity because each represents a launched worker. `awaiting-review` does not.
+Targeted tests may run during coding without the test lease. A worker's final
+full suite, review full suites, and native publication checks serialize through
+the one test lane. Publication waiters outrank verification/review waiters.
 
 ## Commands
 
@@ -602,7 +615,8 @@ read-only: it reports commands but never launches or changes a task by itself.
 
 When the queue contains only tasks waiting for input or review, the native
 scheduler remains asleep and emits no AI messages. Adding a task, approving one,
-resuming, or increasing concurrency wakes it immediately.
+or explicitly resuming wakes it. Changing coding concurrency does not override
+an operator pause.
 
 During reconciliation, worker launch, or publication, scheduler status changes
 to `busy` and includes the operation, task ID/title, start time, and a heartbeat
@@ -750,15 +764,17 @@ signal process ownership and therefore does not stop it.
 Approved tasks are integrated one at a time in `factory-integrator`. The
 factory:
 
-1. fetches the current remote development branch;
-2. merges the approved SHA;
-3. runs integration tests;
-4. fetches again and stops before development push if its reviewed base moved;
-5. pushes without force;
-6. promotes in the separate `factory-release` worktree, rebuilding and
+1. acquires the publication-priority exclusive test lease;
+2. fetches the current remote development branch;
+3. merges the approved SHA;
+4. runs integration tests;
+5. fetches again and stops before development push if its reviewed base moved;
+6. pushes without force;
+7. promotes in the separate `factory-release` worktree, rebuilding and
    retesting when a release input races;
-7. runs release tests and verifies remote reachability;
-8. cleans the worker only after verification.
+8. runs release tests and verifies remote reachability;
+9. cleans the worker only after verification and releases the lease in a
+   `finally` path.
 
 Cleanup is audited as a separate stage after both remote pushes are verified.
 If it fails, development and production remain recorded as `published`, the
@@ -805,6 +821,32 @@ complete ANSI-free output is written under the task's private `events`
 directory, and the test row's `outputPath` points to that file. This keeps
 `state.json` bounded without losing diagnostics.
 
+### Serialized full-suite lane
+
+The lease lives in the selected repository's private runtime project as
+`test-lease.json`; it is not stored in the product repository. Inspect it with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
+  -Action status -Repository D:\Projects\MotiveHR
+```
+
+`factory status` shows the current task, phase, lease age, and queued phases.
+`factory doctor` warns about a stale lease and reports the most recent reclaim.
+A heartbeat older than `testLease.ttlMinutes` (30 minutes by default) may be
+reclaimed with `-Action reclaim`; every reclaim appends the abandoned task and
+phase to the private `test-lease.reclaims.jsonl` audit. Normal callers always
+release their ownership token from `finally`.
+
+The worker runs targeted tests freely while coding. Immediately before its
+final full suite it acquires phase `verify`, rebases through the guarded sync
+script while still holding the lease, runs the trusted full-suite commands, and
+releases. Review uses phase `review`. Native publication acquires one
+higher-priority lease for both its integrator and release check sets; those two
+sets may run in parallel with each other because they belong to the same
+publication. Laravel inference prefers `vendor/bin/pint --test` and
+`php artisan test --parallel`.
+
 ### Isolated PostgreSQL test databases
 
 Git worktrees isolate files, not external services. Enable per-worktree test
@@ -835,7 +877,8 @@ processes first, then drop the database with PostgreSQL `WITH (FORCE)` before
 removing Git artifacts. Integration and release checks run through
 `scripts/run-isolated-test-command.ps1` and use the persistent, separate
 `<prefix>_integrator` and `<prefix>_release` databases. PostgreSQL 13 or newer is
-required for forced cleanup.
+required for forced cleanup. Database isolation still matters because targeted
+worker tests may overlap while only full suites are serialized.
 
 The full object in `config.default.json` allows custom environment-variable
 names, connection file, maintenance database, and `psql` command. Keep this

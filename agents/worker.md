@@ -24,7 +24,9 @@ or task-source quotations merely to match this setting.
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
-- Never merge, rebase, or modify shared branches.
+- Never merge, run `git rebase` directly, or modify shared branches. Immediately
+  before final full-suite verification, use the supplied `syncScript` while
+  holding the test lease; that is the only permitted rebase path.
 - Cherry-pick and revert are allowed only inside the supplied worker worktree.
   Preserve the final one-task-commit invariant; prefer `--no-commit` followed
   by amending the task commit when the branch already has one.
@@ -83,7 +85,20 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 
 ## Verify and commit
 
-- Run focused tests and the nearest relevant lint or static-analysis check.
+- Run targeted tests freely while coding; they do not need the test lease.
+- Before emitting a completed result, create/amend the single task commit, then
+  acquire `testLeaseScript -Action acquire -Phase verify` for this task. Do not
+  inspect the lane and decide for yourself whether it is busy: call acquire and
+  wait for ownership.
+- While holding the lease, call `syncScript -Action prepare -LeaseToken <token>`.
+  This rebases the clean one-commit branch onto the latest configured
+  development tip. Re-read HEAD afterward because the commit may change.
+- Still under the same lease, run every trusted command in
+  `FACTORY_TASK.fullTestCommands` plus the nearest required lint/static check.
+  Prefer the project's parallel full-suite form. Always release with
+  `testLeaseScript -Action release -Token <token>` from a `finally`, including
+  after a sync or test failure. Targeted iteration outside this final sequence
+  remains unrestricted.
 - When `FACTORY_TASK.testDatabase` is non-empty, the worker process already
   carries that isolated database through its configured environment variable.
   Never replace it with the repository's shared test database.

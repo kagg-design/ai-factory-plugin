@@ -89,12 +89,14 @@ try {
             Set-FactoryProperty -Target $state -Name "paused" -Value $false
         }
         "hold" {
-            if ([string]$task.status -notin @("awaiting-review", "approved", "awaiting-input")) {
+            $heldFromStatus = [string]$task.status
+            if ($heldFromStatus -notin @("queued", "awaiting-review", "approved", "awaiting-input")) {
                 throw "Task '$TaskId' cannot be held from status '$($task.status)'."
             }
             Set-FactoryProperty -Target $task -Name "approval" -Value $null
             Set-FactoryProperty -Target $task -Name "status" -Value "held"
             Set-FactoryProperty -Target $task -Name "holdReason" -Value "held by operator"
+            Set-FactoryProperty -Target $task -Name "heldFromStatus" -Value $heldFromStatus
         }
         "reject" {
             throw "Use reject-task.ps1. State-only rejection now requires its explicit -Keep switch."
@@ -182,6 +184,19 @@ try {
             Set-FactoryProperty -Target $state -Name "paused" -Value $false
         }
         "release" {
+            if (
+                [string]$task.status -eq "held" -and
+                [string](Get-FactoryNestedValue -Target $task -Name "heldFromStatus" -Default "") -eq "queued" -and
+                $null -eq $task.backgroundSession -and
+                -not [string]$task.worktree -and
+                -not [string]$task.commit
+            ) {
+                Set-FactoryProperty -Target $task -Name "status" -Value "queued"
+                Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+                Set-FactoryProperty -Target $task -Name "heldFromStatus" -Value $null
+                Set-FactoryProperty -Target $state -Name "active" -Value $true
+                break
+            }
             if ([string]$task.status -in @("approved", "integrating", "production", "syncing", "done", "rejected")) {
                 throw "Task '$TaskId' is in operator-controlled state '$($task.status)' and cannot release its session."
             }
@@ -249,6 +264,7 @@ try {
         backgroundId = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "") } else { $null }
         attachCommand = if ($null -ne $task.backgroundSession) { [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "attachCommand" -Default "") } else { $null }
         instructions = $Instructions
+        heldFromStatus = Get-FactoryNestedValue -Target $task -Name "heldFromStatus"
         stoppedPreview = if ($null -ne $previewCleanup) { [bool](Get-FactoryNestedValue -Target $previewCleanup -Name "stopped" -Default $false) } else { $false }
     } | ConvertTo-Json -Depth 20
 } finally {

@@ -294,6 +294,7 @@ $script:LastCheckResults = @()
 $mayUpdateState = [string]$task.status -eq "approved"
 $claimAttempted = $false
 $pipelineClaimed = $false
+$testLeaseToken = ""
 
 try {
     if ([string]$task.status -ne "approved") { throw "Task '$TaskId' is '$($task.status)', not approved." }
@@ -320,6 +321,22 @@ try {
     if ($workerHead -ne $taskCommit -or $workerBranch -ne [string]$task.branch -or $workerDirty) {
         throw "Worker checkout no longer matches the approved commit and branch."
     }
+
+    $leaseRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "test-lease.ps1"),
+        "-Action", "acquire", "-Repository", [string]$context.repositoryRoot,
+        "-TaskId", $TaskId, "-Phase", "integration", "-OwnerPid", [string]$PID
+    )
+    if ([int]$leaseRun.exitCode -ne 0) {
+        throw "Could not acquire the publication test lease: $([string]$leaseRun.output)"
+    }
+    try {
+        $lease = ([string]$leaseRun.stdout).Trim() | ConvertFrom-Json
+        $testLeaseToken = [string]$lease.token
+    } catch {
+        throw "Test lease acquire returned invalid JSON."
+    }
+    if (-not $testLeaseToken) { throw "Test lease acquire returned no ownership token." }
 
     $currentStage = "integration"
     $claimAttempted = $true
@@ -517,4 +534,15 @@ try {
         $failure = "$failure State update also failed: $($_.Exception.Message)"
     }
     throw $failure
+} finally {
+    if ($testLeaseToken) {
+        $releaseRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "test-lease.ps1"),
+            "-Action", "release", "-Repository", [string]$context.repositoryRoot,
+            "-Token", $testLeaseToken
+        )
+        if ([int]$releaseRun.exitCode -ne 0) {
+            [Console]::Error.WriteLine("Test lease release failed for task '$TaskId': $([string]$releaseRun.output)")
+        }
+    }
 }

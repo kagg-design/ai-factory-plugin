@@ -535,7 +535,8 @@ is also available directly as `factory go <id>` or `!factory go <id>`; those
 forms do not invoke AI. The native scheduler prepares development and production
 candidates in its existing isolated integrator/release worktrees and runs both
 recorded check sets concurrently in separate processes and isolated test
-databases. Only after both pass does it re-fetch the reviewed bases and push the
+databases under one publication-priority test-lane lease. Only after both pass
+does it re-fetch the reviewed bases and push the
 exact tested development and production candidates sequentially, without force.
 It then verifies both remotes and performs guarded cleanup. If either remote
 moved since review, the worker HEAD changed, a check failed, or a conflict
@@ -796,7 +797,8 @@ factory scheduler status
 - `transcript` summarizes the worker conversation.
 - `doctor` checks the selected worker CLI, PowerShell runtime and required
   cmdlets, parsed worker definition, agent-resolution cache, publication
-  readiness, runtime files, locks, worktrees, and scheduler. Publication
+  readiness, runtime files, locks, worktrees, scheduler, and the exclusive
+  full-suite lease. Publication
   settings that intentionally disable direct release are a warning, not a
   required factory-health failure.
 - `factory scheduler status` validates the recorded PID/start time and named
@@ -854,11 +856,11 @@ bundled wrapper. Their databases are `<prefix>_integrator` and
 `<prefix>_release`, so they cannot collide with running workers. PostgreSQL 13+
 is required for `DROP DATABASE ... WITH (FORCE)`.
 
-If isolation is disabled, the wrapper runs commands normally. Until isolation
-is enabled, concurrent database-backed test runs are unsafe; lower factory
-concurrency or serialize those checks externally.
+If isolation is disabled, the wrapper runs commands normally. Full suites are
+still protected by the factory's one-wide test lane, but targeted tests may run
+in parallel during coding, so database isolation remains strongly recommended.
 
-## 14. Concurrency
+## 14. Coding concurrency and the serialized test lane
 
 Show or change the current worker limit:
 
@@ -867,11 +869,38 @@ Show or change the current worker limit:
 /factory concurrency 5
 ```
 
-Increasing the limit starts additional queued tasks. Decreasing it never kills
-workers that are already running.
+The fresh-config default is `codingConcurrency: 8`. The old `concurrency` key is
+a one-version migration alias only. Increasing the limit lets an already
+running and unpaused scheduler start additional queued tasks. It never clears
+an operator pause; use `/factory resume` separately. Decreasing the limit never
+kills workers that are already running.
 
-`planning`, `starting`, and `running` consume capacity. `awaiting-input` and
-`awaiting-review` do not.
+`starting`, `planning`, `awaiting-input`, and `running` consume coding capacity.
+`awaiting-review` does not. Use `/factory hold <task-id>` on a queued task to
+exclude it before any session or worktree exists; `/factory release <task-id>`
+returns that cheap hold to `queued` without unpausing the factory.
+
+The test lane is fixed at one and cannot be raised with the concurrency
+command. Targeted coding tests do not need it. Worker final verification,
+review full suites, and native publication do. Publication phases
+(`integration`/`release`) outrank queued `verify`/`review` requests; ties are
+FIFO. `factory status` shows the holder, phase, age, and queue.
+
+The lease file and reclaim audit are private runtime data. For direct
+diagnostics:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
+  -Action status -Repository D:\Projects\MotiveHR
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
+  -Action reclaim -Repository D:\Projects\MotiveHR
+```
+
+Every holder heartbeats. A heartbeat older than the configured 30-minute
+default TTL is reclaimable, and reclaim writes the abandoned task and phase to
+`test-lease.reclaims.jsonl`. Normal code releases from `finally`. In a Laravel
+repository, empty trusted command configuration is inferred as
+`vendor/bin/pint --test` plus `php artisan test --parallel`.
 
 ## 15. Operations to avoid
 

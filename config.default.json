@@ -1,9 +1,9 @@
 {
-  "version": 7,
+  "version": 8,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
-  "concurrency": 3,
+  "codingConcurrency": 8,
   "maxConcurrency": 20,
   "maxAttempts": 2,
   "defaultStartMode": "interactive",
@@ -63,6 +63,11 @@
   "allowUnrelatedDevelopCommitsToProduction": true,
   "integrationTestCommands": [],
   "releaseTestCommands": [],
+  "testLease": {
+    "ttlMinutes": 30,
+    "heartbeatSeconds": 15,
+    "pollMilliseconds": 250
+  },
   "testDatabaseIsolation": {
     "enabled": false,
     "provider": "postgresql",

@@ -45,6 +45,7 @@ $statePath = Join-Path $projectData "state.json"
 $sessionsPath = Join-Path $projectData "sessions"
 $eventsPath = Join-Path $projectData "events"
 $previewPath = Join-Path $projectData "preview.json"
+$testLeasePath = Join-Path $projectData "test-lease.json"
 $previewRoot = Join-Path $projectData "preview"
 $worktreeContainer = Join-Path (Split-Path $repoRoot -Parent) ".claude-factory-worktrees"
 $worktreeRoot = Join-Path $worktreeContainer $projectKey
@@ -60,6 +61,14 @@ if ($Initialize) {
     } else {
         $config = Read-FactoryJson -Path $configPath
         $configDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "config.default.json")
+        if (
+            $null -eq $config.PSObject.Properties["codingConcurrency"] -and
+            $null -ne $config.PSObject.Properties["concurrency"]
+        ) {
+            # Version 8 keeps the old value as a one-version compatibility
+            # alias instead of silently replacing it with the new default.
+            Set-FactoryProperty -Target $config -Name "codingConcurrency" -Value ([int]$config.concurrency)
+        }
         Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
         Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
         Write-FactoryJsonAtomic -Path $configPath -Value $config
@@ -91,6 +100,7 @@ if ($Initialize) {
                 resultRecordedAt = $null
                 pendingInstructions = $null
                 holdReason = $null
+                heldFromStatus = $null
                 attemptPrepared = $false
                 answerHash = $null
                 testDatabase = $null
@@ -116,6 +126,7 @@ if ($Initialize) {
     sessionsPath = $sessionsPath
     eventsPath = $eventsPath
     previewPath = $previewPath
+    testLeasePath = $testLeasePath
     previewRoot = $previewRoot
     worktreeContainer = $worktreeContainer
     worktreeRoot = $worktreeRoot

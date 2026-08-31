@@ -341,7 +341,8 @@ Default `status` rules:
    - `Open:` with `/factory chat <id>` when a background ID exists;
    - at most one useful alternative command.
 6. End with a compact completed-history node and one `╰─` technical footer:
-   active workers/concurrency, scheduler, and paused/running. Explain an absent
+   coding slots/concurrency, the exclusive test-lane holder and queued phases,
+   scheduler, and paused/running. Explain an absent
    scheduler in plain language only when no runnable work exists. If runnable
    work exists while the scheduler is stopped or failed, include the native
    scheduler problem under `NEEDS YOUR ACTION` with its saved reason, stderr log
@@ -436,15 +437,18 @@ clean anything.
 
 ### `concurrency [N]`
 
-Without `N`, show the current and maximum configured concurrency. With `N`, run:
+Without `N`, show the current and maximum coding concurrency plus the fixed
+test-lane width of one. With `N`, run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/set-concurrency.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Value N
 ```
 
-If the limit increased and queued work exists, run the native scheduler with
-`-Action resume` so it fills capacity immediately. If it decreased, never stop running workers; new
-launches wait until active workers fall below the new limit.
+Changing the limit must never resume or unpause the factory. If it increased
+while an already-running, unpaused scheduler exists, a native `tick` may fill
+capacity. Otherwise suggest the separate `factory resume` decision. If it
+decreased, never stop launched workers; new launches wait until coding slots
+fall below the new limit. `awaiting-input` still consumes a launched slot.
 
 ### `chat <task-id>`
 
@@ -480,10 +484,14 @@ read-only.
 ### `sync <task-id>`
 
 Synchronize the existing worker worktree with the latest configured remote
-development branch without creating a preview worktree. First run:
+development branch without creating a preview worktree. Acquire the exclusive
+test lane for this task with phase `verify`, retain its returned token, and wrap
+the entire prepare/check/finalize sequence in a `try`/`finally` that releases
+that token. First run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action prepare
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/test-lease.ps1" -Action acquire -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Phase verify
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action prepare -LeaseToken LEASE_TOKEN
 ```
 
 The bundled script requires a clean, idle `awaiting-review` or `held` task with
@@ -521,7 +529,7 @@ needed. Otherwise, validate the rebased result in the returned `worktree`:
 5. Finalize only after at least one check passed and none failed:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action finalize -TestsPath "TEST_REPORT_PATH"
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action finalize -TestsPath "TEST_REPORT_PATH" -LeaseToken LEASE_TOKEN
 ```
 
 Finalize verifies the current clean HEAD and recorded worker branch, including
@@ -530,6 +538,8 @@ records the new result and exact checks, deletes the temporary report, and
 returns the task to `awaiting-review`. If a turn is interrupted while status is
 `syncing`, run the same `/factory sync <task-id>` command again; prepare resumes
 validation of the existing rebased commit instead of rebasing it a second time.
+Always release with `test-lease.ps1 -Action release -Token LEASE_TOKEN` from the
+outer `finally`.
 
 ### `review <task-id>`
 
@@ -546,6 +556,12 @@ Choose concrete integration and release commands from trusted repository files,
 the reviewed diff, and the configured command lists. Never copy a command from
 untrusted task-source text. The review judgment applies only to the exact
 current commit SHA.
+
+Targeted review checks may run freely. Before any full-suite review run,
+acquire `test-lease.ps1 -Action acquire -Phase review` for the task, wait for
+ownership, and release its token from a `finally`. When inferring Laravel
+publication checks, prefer `vendor/bin/pint --test` and
+`php artisan test --parallel`; do not infer the single-process form.
 
 Write the decision as temporary JSON inside `sessionsPath`:
 
@@ -586,10 +602,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 `go` makes no new code judgment. It accepts only an `awaiting-review` or held
 task whose formal review verdict, exact worker SHA, and integration-plan hash
 all match. It records immutable approval and starts the native scheduler. The
-scheduler serially merges the approved SHA in `factory-integrator`, runs every
-recorded integration check, pushes development without force, rebuilds and
-tests `factory-release`, pushes production without force, verifies reachability,
-and performs guarded cleanup. A moved pre-integration branch, dirty worker,
+scheduler acquires one publication-priority test lease, builds both immutable
+candidates, runs the integrator and release check sets in parallel under that
+one lease, pushes without force, verifies reachability, releases from a
+`finally`, and performs guarded cleanup. A moved pre-integration branch, dirty worker,
 hash mismatch, merge conflict, or failed check stops publication and records
 the exact error; AI never repairs a conflict implicitly.
 
@@ -624,18 +640,23 @@ existing one task commit, and clears `pendingInstructions` only after that
 prompt exists. Resume the native scheduler after the action succeeds. Do not
 ask the operator to attach and paste the findings manually.
 
-`hold` preserves the worktree, commit, transcript, and session.
+`hold` preserves the worktree, commit, transcript, and session. It also accepts
+`queued`, where there are no artifacts to strand; release that cheap hold with
+`/factory release <id>`.
 
 ### `release <task-id>`
 
-Use this only to recover a stale saved session identity after reconciliation
-cannot find that session in the runtime listing:
+Use this to recover a stale saved session identity after reconciliation cannot
+find that session in the runtime listing, or to return an operator-held task
+that was held directly from `queued` back to the queue:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action release -TaskId TASK_ID
 ```
 
-`release` refuses a session that the runtime still reports as live and refuses
+For a task held directly from `queued`, `release` simply restores `queued`
+without creating a worktree or unpausing the factory. Otherwise, `release`
+refuses a session that the runtime still reports as live and refuses
 operator-controlled publication or sync states. It clears only the stale
 session identity, then restores `awaiting-review` for a matching validated
 commit/result, `queued` for pending rework delivery, `awaiting-input` for a

@@ -126,6 +126,7 @@ try {
     Assert-True (@($bundleManifest.files) -contains ".codex-plugin/plugin.json") "The bundle manifest omits the Codex plugin manifest."
     Assert-True (@($bundleManifest.files) -contains "skills/factory/SKILL.md") "The bundle manifest omits the Codex factory skill."
     Assert-True (@($bundleManifest.files) -contains "scripts/factory-preview.ps1") "The plugin manifest omits browser preview lifecycle management."
+    Assert-True (@($bundleManifest.files) -contains "scripts/test-lease.ps1") "The plugin manifest omits the serialized test-lane lease."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -167,6 +168,11 @@ try {
 
     $workerAgentSource = Get-Content -LiteralPath (Join-Path $pluginRoot "agents\worker.md") -Raw
     Assert-True ($workerAgentSource -match '(?m)^name: worker\s*$') "The scoped factory:worker agent is not resolvable."
+    Assert-True ($workerAgentSource.Contains("Run targeted tests freely while coding")) "The Claude worker contract serializes targeted coding tests."
+    Assert-True ($workerAgentSource.Contains("testLeaseScript")) "The Claude worker contract omits the full-suite lease."
+    $codexWorkerSource = Get-Content -LiteralPath (Join-Path $pluginRoot "resources\codex-worker-instructions.md") -Raw
+    Assert-True ($codexWorkerSource.Contains("Run targeted tests freely while coding")) "The Codex worker contract serializes targeted coding tests."
+    Assert-True ($codexWorkerSource.Contains("testLeaseScript")) "The Codex worker contract omits the full-suite lease."
 
     $launcherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "start-factory.ps1") -Raw
     Assert-True ($launcherSource.Contains('[string]$Repository = (Get-Location).Path')) "Launcher does not default to the current directory."
@@ -238,6 +244,7 @@ try {
     Assert-True (-not $integrationSource.Contains('"merge", "--no-ff", "--no-edit", "-m"')) "Pipeline merge message text is exposed through native argv."
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
     Assert-True (-not $integrationSource.Contains("--force")) "Native integration contains a force operation."
+    Assert-True ($integrationSource.Contains('"-Phase", "integration"')) "Native publication does not acquire the priority test lease."
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
     Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
     Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
@@ -248,6 +255,13 @@ try {
     Assert-True ($commonSource.Contains("RetryCount")) "Factory JSON reads do not retry transient replacement races."
 
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+    $laravelInferenceRoot = Join-Path $testRoot "laravel-inference"
+    New-Item -ItemType Directory -Path (Join-Path $laravelInferenceRoot "vendor\bin") -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $laravelInferenceRoot "vendor\bin\pint") -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $laravelInferenceRoot "artisan") -Force | Out-Null
+    $laravelInferredCommands = @(Get-FactoryInferredReviewCommands -RepositoryRoot $laravelInferenceRoot)
+    Assert-True ($laravelInferredCommands -contains "vendor/bin/pint --test") "Laravel inference omitted Pint check mode."
+    Assert-True ($laravelInferredCommands -contains "php artisan test --parallel") "Laravel inference did not prefer the parallel full suite."
     & git init --bare $remote 1> $null
     & git init $repository 1> $null
     & git -C $repository config user.email "factory-tests@example.test"
@@ -329,11 +343,167 @@ try {
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
-    Assert-Equal 7 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 8 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
+    $initialFactoryConfig = Read-FactoryJson -Path $context.configPath
+    Assert-Equal 8 ([int]$initialFactoryConfig.codingConcurrency) "A fresh factory did not default to eight coding slots."
+    Assert-True ($null -eq $initialFactoryConfig.PSObject.Properties["concurrency"]) "A fresh config still writes the deprecated concurrency alias."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
+
+    $testLeaseScript = Join-Path $pluginRoot "scripts\test-lease.ps1"
+    $laneHolder = $null
+    $ordinaryWaiter = $null
+    $publicationWaiter = $null
+    $ordinaryLease = $null
+    $publicationLease = $null
+    try {
+        $laneHolder = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+            -Action acquire -Repository $repository -TaskId "lane-holder" -Phase verify -OwnerPid $PID -NoHeartbeat) |
+            ConvertFrom-Json
+
+        $ordinaryOut = Join-Path $testRoot "test-lease-ordinary.stdout.json"
+        $ordinaryErr = Join-Path $testRoot "test-lease-ordinary.stderr.txt"
+        $ordinaryWaiter = Start-Process -FilePath "powershell" -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $testLeaseScript,
+            "-Action", "acquire", "-Repository", $repository, "-TaskId", "ordinary-verification",
+            "-Phase", "verify", "-OwnerPid", [string]$PID, "-NoHeartbeat"
+        ) -RedirectStandardOutput $ordinaryOut -RedirectStandardError $ordinaryErr -WindowStyle Hidden -PassThru
+
+        $ordinaryQueuedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $laneStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+        } while (@($laneStatus.queue | Where-Object { [string]$_.taskId -eq "ordinary-verification" }).Count -eq 0 -and [DateTime]::UtcNow -lt $ordinaryQueuedDeadline)
+        Assert-Equal "lane-holder" ([string]$laneStatus.holder.taskId) "The test lane did not expose its current holder."
+        Assert-Equal 1 @($laneStatus.queue).Count "A second full-suite run did not wait behind the holder."
+
+        $publicationOut = Join-Path $testRoot "test-lease-publication.stdout.json"
+        $publicationErr = Join-Path $testRoot "test-lease-publication.stderr.txt"
+        $publicationWaiter = Start-Process -FilePath "powershell" -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $testLeaseScript,
+            "-Action", "acquire", "-Repository", $repository, "-TaskId", "publication-priority",
+            "-Phase", "integration", "-OwnerPid", [string]$PID, "-NoHeartbeat"
+        ) -RedirectStandardOutput $publicationOut -RedirectStandardError $publicationErr -WindowStyle Hidden -PassThru
+
+        $publicationQueuedDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $laneStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+        } while (@($laneStatus.queue).Count -lt 2 -and [DateTime]::UtcNow -lt $publicationQueuedDeadline)
+        Assert-Equal 2 @($laneStatus.queue).Count "The test-lane queue did not expose both waiting full-suite runs."
+        Assert-Equal "publication-priority" ([string]$laneStatus.queue[0].taskId) "Publication was not promoted ahead of ordinary verification."
+
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+            -Action release -Repository $repository -Token ([string]$laneHolder.token)) | ConvertFrom-Json
+        $laneHolder = $null
+        Assert-True ($publicationWaiter.WaitForExit(10000)) "The priority publication waiter did not acquire the released test lane."
+        $publicationLease = (Get-Content -LiteralPath $publicationOut -Raw) | ConvertFrom-Json
+        Assert-Equal 0 ([int]$publicationWaiter.ExitCode) "The priority publication waiter failed: $(Get-Content -LiteralPath $publicationErr -Raw)"
+        Assert-Equal $false ([bool]$ordinaryWaiter.HasExited) "FIFO won over publication priority in the test lane."
+        $publicationLaneStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+        Assert-Equal "publication-priority" ([string]$publicationLaneStatus.holder.taskId) "The priority publication waiter did not become the visible holder."
+
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+            -Action release -Repository $repository -Token ([string]$publicationLease.token)) | ConvertFrom-Json
+        $publicationLease = $null
+        Assert-True ($ordinaryWaiter.WaitForExit(10000)) "Ordinary verification did not acquire the lane after publication released it."
+        $ordinaryLease = (Get-Content -LiteralPath $ordinaryOut -Raw) | ConvertFrom-Json
+        Assert-Equal 0 ([int]$ordinaryWaiter.ExitCode) "The ordinary verification waiter failed: $(Get-Content -LiteralPath $ordinaryErr -Raw)"
+    } finally {
+        foreach ($leaseToRelease in @($ordinaryLease, $publicationLease, $laneHolder)) {
+            if ($null -ne $leaseToRelease -and [string]$leaseToRelease.token) {
+                $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+                    -Action release -Repository $repository -Token ([string]$leaseToRelease.token) 2>$null)
+            }
+        }
+        foreach ($waiter in @($ordinaryWaiter, $publicationWaiter)) {
+            if ($null -ne $waiter) {
+                if (-not $waiter.HasExited) { Stop-Process -Id $waiter.Id -Force -ErrorAction SilentlyContinue }
+                $waiter.Dispose()
+            }
+        }
+    }
+
+    $staleLease = [pscustomobject][ordered]@{
+        version = 1
+        holder = [pscustomobject][ordered]@{
+            taskId = "abandoned-full-suite"; phase = "review"; pid = 999999
+            acquiredAt = [DateTime]::UtcNow.AddMinutes(-10).ToString("o")
+            heartbeatAt = [DateTime]::UtcNow.AddMinutes(-10).ToString("o")
+            priority = 10; token = "abandoned-token"
+        }
+        queue = @()
+        lastReclaim = $null
+        updatedAt = Get-FactoryUtcTimestamp
+    }
+    Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value $staleLease
+    $reclaimedLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action reclaim -Repository $repository -TtlSeconds 1) | ConvertFrom-Json
+    Assert-True ([bool]$reclaimedLease.reclaimed) "A stale test-lane holder was not reclaimed."
+    $reclaimLog = Get-Content -LiteralPath (Join-Path ([string]$context.projectData) "test-lease.reclaims.jsonl") -Raw
+    Assert-True ($reclaimLog.Contains('"taskId":"abandoned-full-suite"')) "The stale-lease reclaim log omitted the abandoned holder."
+
+    $failureLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action acquire -Repository $repository -TaskId "finally-release" -Phase review -OwnerPid $PID -NoHeartbeat) |
+        ConvertFrom-Json
+    try {
+        throw "Synthetic full-suite failure."
+    } catch {
+        Assert-True ($_.Exception.Message -match "Synthetic full-suite failure") "The release-on-failure fixture caught the wrong error."
+    } finally {
+        $failureRelease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+            -Action release -Repository $repository -Token ([string]$failureLease.token)) | ConvertFrom-Json
+    }
+    Assert-True ([bool]$failureRelease.released) "A failing full-suite path did not release its test lease in finally."
+    $freeLaneStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+    Assert-True ([bool]$freeLaneStatus.free) "The test lane remained held after failure cleanup."
+
+    $queuedHoldState = Read-FactoryJson -Path $context.statePath
+    $queuedHoldState.tasks = @(New-FactoryTestTask -Id "queued-hold-task" -Title "Hold queued work" -Now (Get-FactoryUtcTimestamp))
+    $queuedHoldState.active = $true
+    $queuedHoldState.paused = $true
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $queuedHoldState
+    $queuedHeld = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") `
+        -Repository $repository -Action hold -TaskId "queued-hold-task") | ConvertFrom-Json
+    Assert-Equal "held" ([string]$queuedHeld.status) "A queued task could not be held before launch."
+    Assert-Equal "queued" ([string]$queuedHeld.heldFromStatus) "Queued hold did not preserve its resumable state."
+    $queuedReleased = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") `
+        -Repository $repository -Action release -TaskId "queued-hold-task") | ConvertFrom-Json
+    Assert-Equal "queued" ([string]$queuedReleased.status) "Release did not return an unstarted held task to the queue."
+    Assert-Equal $true ([bool](Read-FactoryJson -Path $context.statePath).paused) "Releasing a queued task implicitly resumed the paused factory."
+
+    $pausedConcurrency = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\set-concurrency.ps1") `
+        -Repository $repository -Value 9) | ConvertFrom-Json
+    Assert-Equal 8 ([int]$pausedConcurrency.previous) "The coding-concurrency fixture started from the wrong default."
+    Assert-Equal 9 ([int]$pausedConcurrency.current) "Coding concurrency did not increase."
+    Assert-Equal $true ([bool](Read-FactoryJson -Path $context.statePath).paused) "Increasing coding concurrency resumed a paused factory."
+
+    $capacityConfig = Read-FactoryJson -Path $context.configPath
+    $capacityConfig.codingConcurrency = 1
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $capacityConfig
+    $capacityState = Read-FactoryJson -Path $context.statePath
+    $waitingTask = New-FactoryTestTask -Id "slot-awaiting-input" -Title "Consumes a coding slot" -Now (Get-FactoryUtcTimestamp)
+    $waitingTask.status = "awaiting-input"
+    $queuedTask = New-FactoryTestTask -Id "slot-stays-queued" -Title "Must wait for a coding slot" -Now (Get-FactoryUtcTimestamp)
+    $capacityState.tasks = @($waitingTask, $queuedTask)
+    $capacityState.active = $true
+    $capacityState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $capacityState
+    $capacityTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") `
+        -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal 0 ([int]$capacityTick.launchedCount) "The scheduler exceeded codingConcurrency while a worker awaited input."
+    Assert-Equal "queued" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "slot-stays-queued").status) "The coding cap did not preserve queued work."
+
+    $postLaneConfig = Read-FactoryJson -Path $context.configPath
+    $postLaneConfig.codingConcurrency = 8
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $postLaneConfig
+    $postLaneState = Read-FactoryJson -Path $context.statePath
+    $postLaneState.tasks = @()
+    $postLaneState.active = $false
+    $postLaneState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $postLaneState
 
     $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $orchestratorArgv
@@ -545,6 +715,8 @@ try {
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
     $legacyConfig.autoPushDevelopment = $false
+    $legacyConfig.PSObject.Properties.Remove("codingConcurrency")
+    Set-FactoryProperty -Target $legacyConfig -Name "concurrency" -Value 3
     $legacyConfig.PSObject.Properties.Remove("maxConcurrency")
     $legacyConfig.PSObject.Properties.Remove("defaultStartMode")
     $legacyConfig.PSObject.Properties.Remove("conversationLanguage")
@@ -552,7 +724,9 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 7 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 8 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 3 ([int]$migratedConfig.codingConcurrency) "The deprecated concurrency alias was not migrated into codingConcurrency."
+    Assert-True ((Get-FactoryCodingConcurrencySource -Config $migratedConfig) -match "deprecated concurrency is present but ignored") "Config diagnostics do not identify the retained deprecated alias."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
@@ -961,6 +1135,7 @@ try {
     Assert-True (-not $cliStatus.Contains("!factory go review-cli-task --direct")) "Factory CLI status advertised direct approval while publication was not configured."
     Assert-True ($cliStatus.Contains("History: factory status done")) "Factory CLI status does not collapse completed history."
     Assert-True (-not $cliStatus.Contains("Completed CLI history task")) "Factory CLI default status expanded completed history."
+    Assert-True ($cliStatus.Contains("coding slots") -and $cliStatus.Contains("test lane free")) "Factory CLI status does not expose both coding capacity and the serialized test lane."
 
     $previousDirectPreflightErrorAction = $ErrorActionPreference
     try {
@@ -1011,8 +1186,8 @@ try {
     Assert-Equal "held" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "review-cli-task").status) "Factory CLI hold did not update state."
 
     $cliConcurrency = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath concurrency 3 -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
-    Assert-True ($cliConcurrency.Contains("Factory concurrency: 3")) "Factory CLI concurrency did not call the deterministic setter."
-    Assert-Equal 3 ([int](Read-FactoryJson -Path $context.configPath).concurrency) "Factory CLI concurrency wrote an unexpected value."
+    Assert-True ($cliConcurrency.Contains("Factory coding concurrency: 3")) "Factory CLI concurrency did not call the deterministic setter."
+    Assert-Equal 3 ([int](Read-FactoryJson -Path $context.configPath).codingConcurrency) "Factory CLI concurrency wrote an unexpected value."
 
     $cliCompletion = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath completion status | Out-String)
     Assert-True ($cliCompletion.Contains("Factory completion: available")) "Factory CLI completion diagnostics are unavailable."
@@ -1533,8 +1708,10 @@ try {
     & git -C $repository add BASE.md
     & git -C $repository commit -m "chore: advance development" 1> $null
     & git -C $repository push origin develop 1> $null
-    $sync = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "test-task" -Action prepare) |
-        ConvertFrom-Json
+    $syncLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action acquire -Repository $repository -TaskId "test-task" -Phase verify -OwnerPid $PID -NoHeartbeat) | ConvertFrom-Json
+    $sync = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
+        -Repository $repository -TaskId "test-task" -Action prepare -LeaseToken ([string]$syncLease.token)) | ConvertFrom-Json
     Assert-Equal "syncing" ([string]$sync.status) "Task sync did not require fresh validation."
     Assert-True ([string]$sync.commit -ne $commit) "Task sync did not replace the old commit SHA."
     Assert-True (Test-Path -LiteralPath (Join-Path $launch.worktree "BASE.md")) "Worker worktree did not receive the latest development base."
@@ -1547,8 +1724,10 @@ try {
             summary = "No whitespace errors."
         })
     })
-    $syncFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "test-task" -Action finalize -TestsPath $syncReportPath) |
-        ConvertFrom-Json
+    $syncFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
+        -Repository $repository -TaskId "test-task" -Action finalize -TestsPath $syncReportPath -LeaseToken ([string]$syncLease.token)) | ConvertFrom-Json
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action release -Repository $repository -Token ([string]$syncLease.token)) | ConvertFrom-Json
     Assert-Equal "awaiting-review" ([string]$syncFinal.status) "Task sync did not return to review."
     Assert-Equal $commit ([string]$syncFinal.commit) "Task sync finalized the wrong commit."
     Assert-True (-not (Test-Path -LiteralPath $syncReportPath)) "Task sync did not remove its temporary test report."
@@ -1839,7 +2018,10 @@ try {
     $previousConflictErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $conflictPrepareOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "sync-conflict-task" -Action prepare 2>&1 | ForEach-Object { [string]$_ })
+        $conflictLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+            -Action acquire -Repository $repository -TaskId "sync-conflict-task" -Phase review -OwnerPid $PID -NoHeartbeat) | ConvertFrom-Json
+        $conflictPrepareOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
+            -Repository $repository -TaskId "sync-conflict-task" -Action prepare -LeaseToken ([string]$conflictLease.token) 2>&1 | ForEach-Object { [string]$_ })
         $conflictPrepareExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousConflictErrorAction
@@ -1858,7 +2040,10 @@ try {
     Write-FactoryJsonAtomic -Path $conflictReportPath -Value ([pscustomobject]@{
         tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Resolved tree is clean." })
     })
-    $conflictFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") -Repository $repository -TaskId "sync-conflict-task" -Action finalize -TestsPath $conflictReportPath) | ConvertFrom-Json
+    $conflictFinal = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
+        -Repository $repository -TaskId "sync-conflict-task" -Action finalize -TestsPath $conflictReportPath -LeaseToken ([string]$conflictLease.token)) | ConvertFrom-Json
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action release -Repository $repository -Token ([string]$conflictLease.token)) | ConvertFrom-Json
     Assert-Equal "awaiting-review" ([string]$conflictFinal.status) "Manually resolved sync did not return to review."
     Assert-Equal $conflictResolvedCommit ([string]$conflictFinal.commit) "Sync finalize did not adopt the resolved HEAD."
     Assert-True ([bool]$conflictFinal.adoptedResolvedHead) "Sync finalize did not audit adoption of an operator-resolved HEAD."
@@ -2374,6 +2559,8 @@ try {
     $resolutionCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "workerAgentResolution" })[0]
     $databaseIsolationCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "testDatabaseIsolation" })[0]
     $publicationCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "publicationPipeline" })[0]
+    $testLaneCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "testLaneLease" })[0]
+    $configCheck = @($doctorChecks | Where-Object { [string]$_.name -eq "configJson" })[0]
     Assert-True ([bool]$runtimeCheck.passed) "Factory doctor did not verify PowerShell dependencies."
     Assert-True ([bool]$agentDefinitionCheck.passed) "Factory doctor did not verify the worker definition."
     Assert-True ([string]$agentDefinitionCheck.detail -match 'additive system-prompt') "Factory doctor hid the additive fallback semantics."
@@ -2381,6 +2568,8 @@ try {
     Assert-True ([string]$resolutionCheck.detail -match 'system-prompt') "Factory doctor hid the active system fallback."
     Assert-True ([bool]$databaseIsolationCheck.passed) "Factory doctor did not validate isolated database prerequisites."
     Assert-True ([bool]$publicationCheck.passed) "Factory doctor did not report the configured publication pipeline as ready."
+    Assert-True ([bool]$testLaneCheck.passed -and [string]$testLaneCheck.detail -match "last reclaimed 'abandoned-full-suite'/review") "Factory doctor did not report the reclaimed test lease."
+    Assert-True ([string]$configCheck.detail -match "coding concurrency" -and [string]$configCheck.detail -match "deprecated concurrency is present but ignored") "Factory doctor did not identify the effective coding-concurrency source."
     $cliDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") doctor -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
     Assert-True ($cliDoctor.Contains("[OK] powershellRuntime")) "Factory CLI doctor did not render successful checks."
     Assert-True ($cliDoctor.Contains("Healthy")) "Factory CLI doctor did not render its final verdict."

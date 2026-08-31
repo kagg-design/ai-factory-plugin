@@ -35,7 +35,7 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
 $state = Read-FactoryJson -Path ([string]$context.statePath)
 $task = Get-FactoryTask -State $state -TaskId $TaskId
 $config = Read-FactoryJson -Path ([string]$context.configPath)
-$readiness = Get-FactoryDirectApprovalReadiness -Config $config -State $state -Task $task
+$readiness = Get-FactoryDirectApprovalReadiness -Config $config -State $state -Task $task -RepositoryRoot ([string]$context.repositoryRoot)
 if (-not [bool]$readiness.ready) {
     throw "Direct approval is unavailable: $(@($readiness.blockers) -join '; '). Run 'factory config edit', then retry."
 }

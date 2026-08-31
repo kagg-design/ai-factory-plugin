@@ -240,6 +240,11 @@ try {
         productionBranch = [string]$config.productionBranch
         conversationLanguage = [string]$config.conversationLanguage
         requiredChecks = @($config.workerRequiredChecks)
+        fullTestCommands = @(Resolve-FactoryReviewCommands `
+            -ConfigValue (Get-FactoryNestedValue -Target $config -Name "integrationTestCommands" -Default @()) `
+            -RepositoryRoot ([string]$context.repositoryRoot))
+        testLeaseScript = Join-Path ([string]$context.pluginRoot) "scripts\test-lease.ps1"
+        syncScript = Join-Path ([string]$context.pluginRoot) "scripts\sync-task.ps1"
         testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
         existingCommit = if ($existingCommit) { $existingCommit } else { $null }
         reworkRequestedAt = if ($reworkRequestedAt) { $reworkRequestedAt } else { $null }

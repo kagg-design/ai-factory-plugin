@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [ValidateSet("prepare", "finalize")][string]$Action = "prepare",
-    [string]$TestsPath = ""
+    [string]$TestsPath = "",
+    [string]$LeaseToken = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +39,7 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+    $workerVerification = $Action -eq "prepare" -and [string]$task.status -in @("starting", "planning", "running")
     $repositoryRoot = [IO.Path]::GetFullPath([string]$context.repositoryRoot)
     $worktreeRoot = [IO.Path]::GetFullPath([string]$context.worktreeRoot)
     $worktree = if ([string]$task.worktree) {
@@ -48,6 +50,23 @@ try {
     $branch = [string]$task.branch
     $commit = [string]$task.commit
 
+    if (-not $LeaseToken) {
+        throw "Sync requires the exclusive test lease token. Acquire phase 'verify' or 'review' first."
+    }
+    if (-not (Test-Path -LiteralPath ([string]$context.testLeasePath) -PathType Leaf)) {
+        throw "Sync test lease does not exist."
+    }
+    $leaseState = Read-FactoryJson -Path ([string]$context.testLeasePath)
+    $leaseHolder = Get-FactoryNestedValue -Target $leaseState -Name "holder"
+    if (
+        $null -eq $leaseHolder -or
+        [string](Get-FactoryNestedValue -Target $leaseHolder -Name "token" -Default "") -ne $LeaseToken -or
+        [string](Get-FactoryNestedValue -Target $leaseHolder -Name "taskId" -Default "") -ne $TaskId -or
+        [string](Get-FactoryNestedValue -Target $leaseHolder -Name "phase" -Default "") -notin @("verify", "review")
+    ) {
+        throw "Sync test lease token does not own this task's verify/review lane."
+    }
+
     if (-not $worktree -or -not (Test-Path -LiteralPath $worktree)) {
         throw "Task '$TaskId' has no usable worker worktree."
     }
@@ -57,12 +76,10 @@ try {
     if (-not $branch -or $branch -notlike "factory-worker/*") {
         throw "Task '$TaskId' uses unsafe branch '$branch'."
     }
-    if (-not $commit) {
-        throw "Task '$TaskId' has no validated commit to synchronize."
-    }
     if (
         $null -ne $task.backgroundSession -and
-        [string]$task.backgroundSession.state -eq "working"
+        [string]$task.backgroundSession.state -eq "working" -and
+        -not $workerVerification
     ) {
         throw "Task '$TaskId' still has a working background session."
     }
@@ -75,6 +92,11 @@ try {
     }
     if ($dirty.Count -gt 0) {
         throw "Worker worktree has uncommitted changes. Sync requires a clean worktree."
+    }
+    if ($workerVerification) {
+        $commit = $head
+    } elseif (-not $commit) {
+        throw "Task '$TaskId' has no validated commit to synchronize."
     }
 
     if ($Action -eq "finalize") {
@@ -197,10 +219,10 @@ try {
         } | ConvertTo-Json -Depth 20
         exit 0
     }
-    if ([string]$task.status -notin @("awaiting-review", "held")) {
+    if (-not $workerVerification -and [string]$task.status -notin @("awaiting-review", "held")) {
         throw "Task '$TaskId' is '$($task.status)'; sync requires awaiting-review or held."
     }
-    if ($null -eq $task.workerResult -or [string]$task.workerResult.commit -ne $commit) {
+    if (-not $workerVerification -and ($null -eq $task.workerResult -or [string]$task.workerResult.commit -ne $commit)) {
         throw "Task '$TaskId' has no worker result matching '$commit'."
     }
 
@@ -240,7 +262,7 @@ try {
     }
     $oldCommit = $commit
     $oldParent = (& git -C $worktree rev-parse "$oldCommit^" 2>$null).Trim()
-    $previousTests = @($task.workerResult.tests)
+    $previousTests = if ($workerVerification -or $null -eq $task.workerResult) { @() } else { @($task.workerResult.tests) }
 
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -271,6 +293,31 @@ try {
     }
     $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $newCommit)
     $now = Get-FactoryUtcTimestamp
+    if ($workerVerification) {
+        Set-FactoryProperty -Target $task -Name "verificationSync" -Value ([pscustomobject][ordered]@{
+            commit = $newCommit
+            baseRef = $baseRef
+            baseCommit = $baseCommit
+            preparedAt = $now
+        })
+        Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
+        Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        [ordered]@{
+            taskId = $TaskId
+            status = [string]$task.status
+            verificationPrepared = $true
+            alreadyCurrent = $false
+            oldCommit = $oldCommit
+            commit = $newCommit
+            baseRef = $baseRef
+            baseCommit = $baseCommit
+            worktree = $worktree
+            changedFiles = $changedFiles
+            previousTests = @()
+        } | ConvertTo-Json -Depth 20
+        exit 0
+    }
     Set-FactoryProperty -Target $task -Name "commit" -Value $newCommit
     Set-FactoryProperty -Target $task -Name "workerResult" -Value $null
     Set-FactoryProperty -Target $task -Name "review" -Value $null

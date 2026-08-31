@@ -151,9 +151,11 @@ Add-DoctorCheck -Name "pluginManifest" -Passed $manifestOk -Detail $manifestDeta
 Add-DoctorCheck -Name "repositoryRoot" -Passed (Test-Path -LiteralPath $context.repositoryRoot) -Detail ([string]$context.repositoryRoot)
 Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.projectData) -Detail ([string]$context.projectData)
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
-Add-DoctorCheck -Name "configJson" -Passed ([int]$config.concurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), concurrency $($config.concurrency)/$($config.maxConcurrency), runtime=$workerRuntime"
+$codingConcurrency = Get-FactoryCodingConcurrency -Config $config
+$codingConcurrencySource = Get-FactoryCodingConcurrencySource -Config $config
+Add-DoctorCheck -Name "configJson" -Passed ($codingConcurrency -ge 1 -and $workerRuntime -in @("claude", "codex")) -Detail "v$($config.version), coding concurrency $codingConcurrency/$($config.maxConcurrency) via $codingConcurrencySource, fixed test lane 1, runtime=$workerRuntime"
 
-$publicationReadiness = Get-FactoryPublicationReadiness -Config $config -State $state
+$publicationReadiness = Get-FactoryPublicationReadiness -Config $config -State $state -RepositoryRoot ([string]$context.repositoryRoot)
 $publicationDetail = if ([bool]$publicationReadiness.ready) {
     $remoteName = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
     "ready for $remoteName/$($config.developmentBranch) -> $remoteName/$($config.productionBranch); $(@($publicationReadiness.integrationTestCommands).Count) integration and $(@($publicationReadiness.releaseTestCommands).Count) release check(s)"
@@ -186,6 +188,28 @@ try {
     }
 } catch {
     Add-DoctorCheck -Name "testDatabaseIsolation" -Passed $false -Detail $_.Exception.Message
+}
+
+$testLeaseCheck = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "test-lease.ps1"),
+    "-Action", "status", "-Repository", [string]$context.repositoryRoot
+)
+if ([int]$testLeaseCheck.exitCode -eq 0) {
+    $testLeaseInfo = ([string]$testLeaseCheck.stdout).Trim() | ConvertFrom-Json
+    $leaseHolder = Get-FactoryNestedValue -Target $testLeaseInfo -Name "holder"
+    $lastReclaim = Get-FactoryNestedValue -Target $testLeaseInfo -Name "lastReclaim"
+    $leaseDetail = if ([bool]$testLeaseInfo.stale) {
+        "stale $([string]$leaseHolder.phase) lease for '$([string]$leaseHolder.taskId)', heartbeat $([string]$leaseHolder.heartbeatAt); run test-lease.ps1 -Action reclaim"
+    } elseif ($null -ne $leaseHolder) {
+        "held by '$([string]$leaseHolder.taskId)' for $([string]$leaseHolder.phase); $(@($testLeaseInfo.queue).Count) queued"
+    } elseif ($null -ne $lastReclaim) {
+        "free; last reclaimed '$([string]$lastReclaim.taskId)'/$([string]$lastReclaim.phase) at $([string]$lastReclaim.reclaimedAt); log $([string]$testLeaseInfo.reclaimLogPath)"
+    } else {
+        "free; $(@($testLeaseInfo.queue).Count) queued; TTL $([int]$testLeaseInfo.ttlSeconds)s"
+    }
+    Add-DoctorCheck -Name "testLaneLease" -Passed (-not [bool]$testLeaseInfo.stale) -Severity "warning" -Detail $leaseDetail
+} else {
+    Add-DoctorCheck -Name "testLaneLease" -Passed $false -Severity "warning" -Detail ([string]$testLeaseCheck.output)
 }
 
 $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }

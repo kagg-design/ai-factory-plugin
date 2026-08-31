@@ -129,7 +129,8 @@ try {
         $integrationCommands = @(Resolve-FactoryReviewCommands `
             -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "integrationTestCommands" -Default @()) `
             -ConfigValue (Get-FactoryNestedValue -Target $config -Name "integrationTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()))
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "integration" -Default @()) `
+            -RepositoryRoot ([string]$context.repositoryRoot))
         if ($integrationCommands.Count -eq 0) {
             if ($Mode -eq "operator-direct") {
                 throw "Direct approval requires trusted integration test commands in private config or previously resolved review state."
@@ -139,7 +140,8 @@ try {
         $releaseCommands = @(Resolve-FactoryReviewCommands `
             -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "releaseTestCommands" -Default @()) `
             -ConfigValue (Get-FactoryNestedValue -Target $config -Name "releaseTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()))
+            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
+            -RepositoryRoot ([string]$context.repositoryRoot))
         if ($releaseCommands.Count -eq 0) { $releaseCommands = @($integrationCommands) }
 
         $productionMode = [string](Get-FactoryNestedValue -Target $config -Name "productionMode" -Default "merge-develop")

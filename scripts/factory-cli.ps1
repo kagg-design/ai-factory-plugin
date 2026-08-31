@@ -86,6 +86,13 @@ function Get-CliShortId {
     return $text.Substring(0, 8)
 }
 
+function Format-CliDuration {
+    param([int]$Seconds)
+    if ($Seconds -lt 60) { return "$Seconds s" }
+    if ($Seconds -lt 3600) { return "$([Math]::Floor($Seconds / 60)) min" }
+    return "$([Math]::Floor($Seconds / 3600)) h $([Math]::Floor(($Seconds % 3600) / 60)) min"
+}
+
 function Get-CliShortSummary {
     param($Value, [int]$MaximumLength = 200)
 
@@ -330,7 +337,7 @@ function Get-CliNextAction {
     elseif ($status -eq "awaiting-review") {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
-        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task
+        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task -RepositoryRoot ([string]$Repository)
         if ($reviewVerdict -notin @("approved", "changes-required", "blocked") -and [bool]$directReadiness.ready) {
             $alternative = "!factory go $id --direct"
         }
@@ -339,7 +346,7 @@ function Get-CliNextAction {
     elseif ($status -eq "held" -and $commit -and $resultCommit -eq $commit) {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
-        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task
+        $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task -RepositoryRoot ([string]$Repository)
         if ($reviewVerdict -notin @("approved", "changes-required", "blocked") -and [bool]$directReadiness.ready) {
             $alternative = "!factory go $id --direct"
         }
@@ -458,11 +465,11 @@ function Write-CliStatus {
         }
     )
 
-    $activeStates = @("starting", "planning", "running")
+    $activeStates = @("starting", "planning", "awaiting-input", "running")
     $runnableStates = @("queued", "starting", "planning", "running", "approved", "integrating", "production")
     $activeWorkers = @($allTasks | Where-Object { [string]$_.status -in $activeStates }).Count
     $runnable = @($allTasks | Where-Object { [string]$_.status -in $runnableStates }).Count
-    $concurrency = [int](Get-CliProperty -InputObject $Config -Name "concurrency" -Default 0)
+    $concurrency = Get-FactoryCodingConcurrency -Config $Config
     $paused = [bool](Get-CliProperty -InputObject $State -Name "paused" -Default $false)
     $active = [bool](Get-CliProperty -InputObject $State -Name "active" -Default $false)
     $schedulerState = Get-CliProperty -InputObject $State -Name "scheduler"
@@ -497,7 +504,28 @@ function Write-CliStatus {
     $lines = New-Object Collections.Generic.List[string]
     $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory $($script:Tree.Horizontal) $projectName")
     $workerRuntime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
-    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) runtime $workerRuntime $($script:Tree.Horizontal) workers $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
+    $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) runtime $workerRuntime $($script:Tree.Horizontal) coding slots $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
+    try {
+        $testLease = Invoke-CliJsonScript -ScriptName "test-lease.ps1" -Arguments @(
+            "-Action", "status", "-Repository", [string]$Context.repositoryRoot
+        )
+        $leaseHolder = Get-CliProperty -InputObject $testLease -Name "holder"
+        $leaseQueue = @(Get-CliProperty -InputObject $testLease -Name "queue" -Default @())
+        if ($null -eq $leaseHolder) {
+            $lines.Add("$($script:Tree.Vertical)  test lane free $($script:Tree.Horizontal) queue $($leaseQueue.Count)")
+        } else {
+            $leaseAge = Format-CliDuration -Seconds ([int](Get-CliProperty -InputObject $testLease -Name "holderAgeSeconds" -Default 0))
+            $staleSuffix = if ([bool](Get-CliProperty -InputObject $testLease -Name "stale" -Default $false)) { " $($script:Tree.Horizontal) STALE" } else { "" }
+            $lines.Add("$($script:Tree.Vertical)  test lane $([string]$leaseHolder.phase) $($script:Tree.Horizontal) $([string]$leaseHolder.taskId) $($script:Tree.Horizontal) $leaseAge$staleSuffix")
+        }
+        if ($leaseQueue.Count -gt 0) {
+            $queueItems = @($leaseQueue | Select-Object -First 5 | ForEach-Object { "$([string]$_.phase):$([string]$_.taskId)" })
+            $queueTail = if ($leaseQueue.Count -gt 5) { " (+$($leaseQueue.Count - 5) more)" } else { "" }
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$($script:Tree.Vertical)  test queue $($script:Tree.Horizontal) " -ContinuationPrefix "$($script:Tree.Vertical)               " -Text (($queueItems -join ", ") + $queueTail)
+        }
+    } catch {
+        $lines.Add("$($script:Tree.Vertical)  test lane unavailable $($script:Tree.Horizontal) $(ConvertTo-CliLine -Value $_.Exception.Message)")
+    }
     if ($cronId -and $schedulerStatus -eq "running") {
         $lines.Add("$($script:Tree.Vertical)  Legacy Claude cron $cronId will remove itself on its next one-shot tick.")
     }
@@ -775,7 +803,12 @@ function Write-CliHold {
     )
     Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Held $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
-    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resume later: /factory answer $TaskId --text `"Continue`""
+    $resume = if ([string](Get-CliProperty -InputObject $result -Name "heldFromStatus") -eq "queued") {
+        "/factory release $TaskId"
+    } else {
+        "/factory answer $TaskId --text `"Continue`""
+    }
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resume later: $resume"
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) No AI call was used."
 }
 
@@ -785,7 +818,7 @@ function Write-CliGo {
     $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
     if ($DirectApproval) {
-        $readiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $task
+        $readiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $task -RepositoryRoot ([string]$Repository)
         if (-not [bool]$readiness.ready) {
             throw "Direct approval is unavailable: $(@($readiness.blockers) -join '; '). Run 'factory config edit', then retry."
         }
@@ -952,10 +985,10 @@ function Write-CliCleanup {
 function Write-CliConcurrency {
     param($Context, $Config, $State, [string]$Value)
 
-    $current = [int](Get-CliProperty -InputObject $Config -Name "concurrency" -Default 1)
+    $current = Get-FactoryCodingConcurrency -Config $Config
     $maximum = [int](Get-CliProperty -InputObject $Config -Name "maxConcurrency" -Default 20)
     if (-not $Value) {
-        Write-Output "Factory concurrency: $current (maximum $maximum)"
+        Write-Output "Factory coding concurrency: $current (maximum $maximum; test lane is fixed at 1)"
         Write-Output "Set it with: factory concurrency <1-$maximum>"
         return
     }
@@ -967,16 +1000,15 @@ function Write-CliConcurrency {
         "-Repository", [string]$Repository,
         "-Value", [string]$parsed
     )
-    Write-Output "Factory concurrency: $([int]$result.previous) $($script:Tree.Arrow) $([int]$result.current) (maximum $([int]$result.maximum))"
+    Write-Output "Factory coding concurrency: $([int]$result.previous) $($script:Tree.Arrow) $([int]$result.current) (maximum $([int]$result.maximum); test lane 1)"
     Write-Output (ConvertTo-CliLine -Value $result.note)
     $queuedCount = @($State.tasks | Where-Object { [string]$_.status -eq "queued" }).Count
     $schedulerState = Get-CliProperty -InputObject $State -Name "scheduler"
     $schedulerStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "status") -Fallback "stopped"
-    if ([bool]$result.increased -and $queuedCount -gt 0 -and [bool]$State.active -and -not [bool]$State.paused) {
-        $schedulerAction = if ($schedulerStatus -eq "running") { "tick" } else { "resume" }
-        Invoke-CliSchedulerAction -Context $Context -Action $schedulerAction
+    if ([bool]$result.increased -and $queuedCount -gt 0 -and [bool]$State.active -and -not [bool]$State.paused -and $schedulerStatus -eq "running") {
+        Invoke-CliSchedulerAction -Context $Context -Action "tick"
     } elseif ($queuedCount -gt 0 -and $schedulerStatus -ne "running") {
-        Write-Output "Queued tasks exist but the native scheduler is stopped. Run: factory resume"
+        Write-Output "Queued tasks exist but changing the limit never resumes the factory. Run explicitly: factory resume"
     }
 }
 

@@ -351,8 +351,8 @@ function Invoke-SchedulerTick {
             $state = Read-FactoryJson -Path ([string]$context.statePath)
             $configNow = Read-FactoryJson -Path ([string]$context.configPath)
             if (-not [bool]$state.active -or [bool]$state.paused) { break }
-            $activeWorkers = @($state.tasks | Where-Object { [string]$_.status -in @("starting", "planning", "running") }).Count
-            $capacity = [int]$configNow.concurrency - $activeWorkers
+            $activeWorkers = Get-FactoryLaunchedWorkerCount -State $state
+            $capacity = (Get-FactoryCodingConcurrency -Config $configNow) - $activeWorkers
             if ($capacity -le 0) { break }
             $queued = @($state.tasks | Where-Object { [string]$_.status -eq "queued" } | Sort-Object createdAt, id)
             if ($queued.Count -eq 0) { break }
@@ -378,7 +378,7 @@ function Invoke-SchedulerTick {
         }
 
         $state = Read-FactoryJson -Path ([string]$context.statePath)
-        $activeWorkers = @($state.tasks | Where-Object { [string]$_.status -in @("starting", "planning", "running") }).Count
+        $activeWorkers = Get-FactoryLaunchedWorkerCount -State $state
         $queuedCount = @($state.tasks | Where-Object { [string]$_.status -eq "queued" }).Count
         $approvedCount = @($state.tasks | Where-Object { [string]$_.status -in @("approved", "integrating", "production") }).Count
         $runnableCount = $activeWorkers + $queuedCount + $approvedCount
