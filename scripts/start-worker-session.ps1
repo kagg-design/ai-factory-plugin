@@ -210,6 +210,8 @@ try {
         Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
     }
 
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task)
+
     $testDatabase = Initialize-FactoryTestDatabase `
         -Config $config `
         -RepositoryRoot ([string]$context.repositoryRoot) `

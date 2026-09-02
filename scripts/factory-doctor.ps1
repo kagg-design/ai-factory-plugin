@@ -198,7 +198,20 @@ if ([int]$testLeaseCheck.exitCode -eq 0) {
     $testLeaseInfo = ([string]$testLeaseCheck.stdout).Trim() | ConvertFrom-Json
     $leaseHolder = Get-FactoryNestedValue -Target $testLeaseInfo -Name "holder"
     $lastReclaim = Get-FactoryNestedValue -Target $testLeaseInfo -Name "lastReclaim"
-    $leaseDetail = if ([bool]$testLeaseInfo.stale) {
+    $heartbeatUnreadable = $null -ne $leaseHolder -and -not [bool](Get-FactoryNestedValue -Target $testLeaseInfo -Name "heartbeatReadable" -Default $true)
+    $heartbeatStalled = [bool](Get-FactoryNestedValue -Target $testLeaseInfo -Name "heartbeatStalled" -Default $false)
+    $heartbeatMissing = (
+        $null -ne $leaseHolder -and
+        [bool](Get-FactoryNestedValue -Target $testLeaseInfo -Name "holderProcessAlive" -Default $false) -and
+        -not [bool](Get-FactoryNestedValue -Target $testLeaseInfo -Name "heartbeatPidAlive" -Default $false)
+    )
+    $leaseDetail = if ($heartbeatUnreadable) {
+        "$([string]$testLeaseInfo.heartbeatWarning) Run 'factory doctor' after repairing '$([string]$testLeaseInfo.path)'; heartbeat log $([string]$testLeaseInfo.heartbeatLogPath)"
+    } elseif ($heartbeatStalled) {
+        "heartbeat has not advanced for live holder '$([string]$leaseHolder.taskId)'/$([string]$leaseHolder.phase); log $([string]$testLeaseInfo.heartbeatLogPath)"
+    } elseif ($heartbeatMissing) {
+        "heartbeat process is not alive for live holder '$([string]$leaseHolder.taskId)'/$([string]$leaseHolder.phase); log $([string]$testLeaseInfo.heartbeatLogPath)"
+    } elseif ([bool]$testLeaseInfo.stale) {
         "stale $([string]$leaseHolder.phase) lease for '$([string]$leaseHolder.taskId)', heartbeat $([string]$leaseHolder.heartbeatAt); run test-lease.ps1 -Action reclaim"
     } elseif ($null -ne $leaseHolder) {
         "held by '$([string]$leaseHolder.taskId)' for $([string]$leaseHolder.phase); $(@($testLeaseInfo.queue).Count) queued"
@@ -207,7 +220,8 @@ if ([int]$testLeaseCheck.exitCode -eq 0) {
     } else {
         "free; $(@($testLeaseInfo.queue).Count) queued; TTL $([int]$testLeaseInfo.ttlSeconds)s"
     }
-    Add-DoctorCheck -Name "testLaneLease" -Passed (-not [bool]$testLeaseInfo.stale) -Severity "warning" -Detail $leaseDetail
+    $leaseHealthy = -not ([bool]$testLeaseInfo.stale -or $heartbeatUnreadable -or $heartbeatStalled -or $heartbeatMissing)
+    Add-DoctorCheck -Name "testLaneLease" -Passed $leaseHealthy -Severity "warning" -Detail $leaseDetail
 } else {
     Add-DoctorCheck -Name "testLaneLease" -Passed $false -Severity "warning" -Detail ([string]$testLeaseCheck.output)
 }
@@ -232,6 +246,30 @@ foreach ($line in @(& git -C $context.repositoryRoot worktree list --porcelain 2
     }
 }
 Add-DoctorCheck -Name "worktreeRegistry" -Passed $true -Severity "info" -Detail "$($registeredFactoryWorktrees.Count) factory worktree(s)"
+
+$blockedWorkerTasks = @(
+    @($state.tasks) | Where-Object {
+        $taskStatus = [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "")
+        $session = Get-FactoryNestedValue -Target $_ -Name "backgroundSession"
+        $sessionState = [string](Get-FactoryNestedValue -Target $session -Name "state" -Default "")
+        $sessionState -eq "blocked" -and $taskStatus -in @("starting", "planning", "running", "blocked")
+    }
+)
+$blockedWorkerDetail = if ($blockedWorkerTasks.Count -eq 0) {
+    "none"
+} else {
+    @($blockedWorkerTasks | ForEach-Object {
+        $session = Get-FactoryNestedValue -Target $_ -Name "backgroundSession"
+        $blockedAt = Get-FactoryNestedValue -Target $session -Name "blockedAt"
+        $parsedBlockedAt = ConvertFrom-FactoryRoundtripTimestamp -Value $blockedAt
+        $age = if ([bool]$parsedBlockedAt.success) {
+            [Math]::Max(0, [int]([DateTime]::UtcNow - ([DateTime]$parsedBlockedAt.value)).TotalMinutes)
+        } else { 0 }
+        $reason = [string](Get-FactoryNestedValue -Target $session -Name "blockedReason" -Default "reason unavailable")
+        "'$([string]$_.id)' ${age}m: $reason"
+    }) -join "; "
+}
+Add-DoctorCheck -Name "blockedWorkerSessions" -Passed ($blockedWorkerTasks.Count -eq 0) -Severity "warning" -Detail $blockedWorkerDetail
 
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")

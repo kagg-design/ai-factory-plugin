@@ -322,7 +322,61 @@ function Get-FactoryTask {
 }
 
 function Get-FactoryUtcTimestamp {
-    return [DateTime]::UtcNow.ToString("o")
+    return [DateTime]::UtcNow.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertFrom-FactoryRoundtripTimestamp {
+    param($Value)
+
+    if ($Value -is [DateTime]) {
+        $dateTime = [DateTime]$Value
+        if ($dateTime.Kind -eq [DateTimeKind]::Unspecified) {
+            $dateTime = [DateTime]::SpecifyKind($dateTime, [DateTimeKind]::Utc)
+        } else {
+            $dateTime = $dateTime.ToUniversalTime()
+        }
+        return [pscustomobject]@{ success = $true; value = $dateTime; error = "" }
+    }
+
+    if ($null -eq $Value) {
+        return [pscustomobject]@{ success = $false; value = $null; error = "timestamp is null" }
+    }
+    $text = [string]$Value
+    if (-not $text) {
+        return [pscustomobject]@{ success = $false; value = $null; error = "timestamp is empty" }
+    }
+
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal
+    foreach ($format in @(
+        "o",
+        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK",
+        "yyyy-MM-dd'T'HH:mm:ssK"
+    )) {
+        $parsed = [DateTime]::MinValue
+        if ([DateTime]::TryParseExact(
+            $text,
+            $format,
+            [Globalization.CultureInfo]::InvariantCulture,
+            $styles,
+            [ref]$parsed
+        )) {
+            return [pscustomobject]@{ success = $true; value = $parsed.ToUniversalTime(); error = "" }
+        }
+    }
+    return [pscustomobject]@{
+        success = $false
+        value = $null
+        error = "timestamp '$text' is not an accepted invariant round-trip value"
+    }
+}
+
+function ConvertTo-FactoryRoundtripTimestamp {
+    param($Value)
+
+    $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $Value
+    if (-not [bool]$parsed.success) { throw [string]$parsed.error }
+    return ([DateTime]$parsed.value).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Get-FactoryFileSha256 {
@@ -335,6 +389,172 @@ function Get-FactoryFileSha256 {
     } finally {
         $algorithm.Dispose()
     }
+}
+
+function Get-FactoryTextSha256 {
+    param([AllowEmptyString()][string]$Value)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Get-FactoryComposerPackageFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$Installed
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+    $document = Read-FactoryJson -Path $Path
+    $packages = if ($Installed) {
+        if ($document -is [Array]) {
+            @($document)
+        } else {
+            @(Get-FactoryNestedValue -Target $document -Name "packages" -Default @())
+        }
+    } else {
+        @(
+            @(Get-FactoryNestedValue -Target $document -Name "packages" -Default @())
+            @(Get-FactoryNestedValue -Target $document -Name "packages-dev" -Default @())
+        )
+    }
+    $entries = @(
+        $packages | ForEach-Object {
+            $name = [string](Get-FactoryNestedValue -Target $_ -Name "name" -Default "")
+            $version = [string](Get-FactoryNestedValue -Target $_ -Name "version" -Default "")
+            $source = Get-FactoryNestedValue -Target $_ -Name "source"
+            $dist = Get-FactoryNestedValue -Target $_ -Name "dist"
+            $sourceReference = [string](Get-FactoryNestedValue -Target $source -Name "reference" -Default "")
+            $distReference = [string](Get-FactoryNestedValue -Target $dist -Name "reference" -Default "")
+            if ($name) { "$name|$version|$sourceReference|$distReference" }
+        } | Sort-Object -Unique
+    )
+    return Get-FactoryTextSha256 -Value ($entries -join "`n")
+}
+
+function Test-FactoryTaskHasLiveSession {
+    param($Task)
+
+    if ($null -eq $Task) { return $false }
+    $session = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
+    if ($null -eq $session) { return $false }
+    return [string](Get-FactoryNestedValue -Target $session -Name "state" -Default "") -in @("working", "blocked")
+}
+
+function Sync-FactoryWorktreeDependencies {
+    param(
+        [Parameter(Mandatory = $true)][string]$Worktree,
+        $Task = $null,
+        [switch]$AllowTaskOwnedSession,
+        [scriptblock]$Invoker = $null
+    )
+
+    $resolvedWorktree = [IO.Path]::GetFullPath($Worktree)
+    if (-not (Test-Path -LiteralPath $resolvedWorktree -PathType Container)) {
+        throw "Cannot install dependencies because worktree does not exist: $resolvedWorktree"
+    }
+    $operations = New-Object Collections.Generic.List[object]
+
+    $composerManifest = Join-Path $resolvedWorktree "composer.json"
+    $composerLock = Join-Path $resolvedWorktree "composer.lock"
+    if (
+        (Test-Path -LiteralPath $composerManifest -PathType Leaf) -and
+        (Test-Path -LiteralPath $composerLock -PathType Leaf)
+    ) {
+        $installedJson = Join-Path $resolvedWorktree "vendor\composer\installed.json"
+        $stampPath = Join-Path $resolvedWorktree "vendor\composer\.factory-composer-lock.sha256"
+        $lockHash = Get-FactoryFileSha256 -Path $composerLock
+        $stamp = if (Test-Path -LiteralPath $stampPath -PathType Leaf) {
+            ([IO.File]::ReadAllText($stampPath, (New-Object Text.UTF8Encoding($false)))).Trim()
+        } else { "" }
+        $current = $stamp -eq $lockHash -and (Test-Path -LiteralPath $installedJson -PathType Leaf)
+        if (-not $current -and (Test-Path -LiteralPath $installedJson -PathType Leaf)) {
+            $lockedPackages = Get-FactoryComposerPackageFingerprint -Path $composerLock
+            $installedPackages = Get-FactoryComposerPackageFingerprint -Path $installedJson -Installed
+            $current = $lockedPackages -and $lockedPackages -eq $installedPackages
+            if ($current) {
+                [IO.File]::WriteAllText($stampPath, $lockHash + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+            }
+        }
+        if (-not $current) {
+            $operations.Add([pscustomobject]@{
+                manager = "composer"
+                command = "composer"
+                arguments = @("install", "--no-interaction", "--no-progress")
+                displayCommand = "composer install --no-interaction --no-progress"
+                stampPath = $stampPath
+                sourceHash = $lockHash
+                installedPath = $installedJson
+            })
+        }
+    }
+
+    $npmLock = Join-Path $resolvedWorktree "package-lock.json"
+    if (Test-Path -LiteralPath $npmLock -PathType Leaf) {
+        $nodeModules = Join-Path $resolvedWorktree "node_modules"
+        $stampPath = Join-Path $nodeModules ".factory-package-lock.sha256"
+        $lockHash = Get-FactoryFileSha256 -Path $npmLock
+        $stamp = if (Test-Path -LiteralPath $stampPath -PathType Leaf) {
+            ([IO.File]::ReadAllText($stampPath, (New-Object Text.UTF8Encoding($false)))).Trim()
+        } else { "" }
+        if ($stamp -ne $lockHash -or -not (Test-Path -LiteralPath $nodeModules -PathType Container)) {
+            $operations.Add([pscustomobject]@{
+                manager = "npm"
+                command = "npm"
+                arguments = @("ci")
+                displayCommand = "npm ci"
+                stampPath = $stampPath
+                sourceHash = $lockHash
+                installedPath = $nodeModules
+            })
+        }
+    }
+
+    if ($operations.Count -gt 0 -and (Test-FactoryTaskHasLiveSession -Task $Task) -and -not $AllowTaskOwnedSession) {
+        $taskId = [string](Get-FactoryNestedValue -Target $Task -Name "id" -Default "unknown")
+        throw "Refusing dependency installation in '$resolvedWorktree' because task '$taskId' has a live worker session. Install only as part of that task's sanctioned create or sync operation."
+    }
+
+    $results = New-Object Collections.Generic.List[object]
+    foreach ($operation in $operations) {
+        $run = if ($null -ne $Invoker) {
+            & $Invoker `
+                -Command ([string]$operation.command) `
+                -Arguments @($operation.arguments) `
+                -WorkingDirectory $resolvedWorktree
+        } else {
+            Invoke-FactoryNativeProcess `
+                -Command "cmd.exe" `
+                -Arguments @("/d", "/s", "/c", [string]$operation.displayCommand) `
+                -WorkingDirectory $resolvedWorktree
+        }
+        if ([int]$run.exitCode -ne 0) {
+            $detail = ([string]$run.output -replace '[\r\n\t]+', ' ').Trim()
+            $suffix = if ($detail) { ": $detail" } else { "" }
+            throw "Dependency command failed in '$resolvedWorktree': $($operation.displayCommand)$suffix"
+        }
+        if (-not (Test-Path -LiteralPath ([string]$operation.installedPath))) {
+            throw "Dependency command succeeded but did not create '$($operation.installedPath)': $($operation.displayCommand)"
+        }
+        $stampParent = Split-Path -Parent ([string]$operation.stampPath)
+        if ($stampParent) { New-Item -ItemType Directory -Path $stampParent -Force | Out-Null }
+        [IO.File]::WriteAllText(
+            [string]$operation.stampPath,
+            [string]$operation.sourceHash + [Environment]::NewLine,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        $results.Add([pscustomobject]@{
+            manager = [string]$operation.manager
+            command = [string]$operation.displayCommand
+            installed = $true
+        })
+    }
+    return @($results | ForEach-Object { $_ })
 }
 
 function Resolve-FactoryAsanaTaskUrl {
@@ -376,11 +596,18 @@ function Get-FactoryInferredReviewCommands {
         return @()
     }
     $commands = New-Object Collections.Generic.List[string]
+    if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "composer.json") -PathType Leaf) {
+        $commands.Add("composer install --no-interaction --no-progress")
+    }
+    if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "package-lock.json") -PathType Leaf) {
+        $commands.Add("npm ci")
+    }
     if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "vendor\bin\pint") -PathType Leaf) {
         $commands.Add("vendor/bin/pint --test")
     }
     if (Test-Path -LiteralPath (Join-Path $RepositoryRoot "artisan") -PathType Leaf) {
-        $commands.Add("php artisan test --parallel")
+        $processes = [Math]::Max(1, [Math]::Min(5, [int][Math]::Ceiling([Environment]::ProcessorCount / 2.0)))
+        $commands.Add("php artisan test --parallel --processes=$processes")
     }
     return @($commands.ToArray())
 }
@@ -388,24 +615,16 @@ function Get-FactoryInferredReviewCommands {
 function Resolve-FactoryReviewCommands {
     param($InputValue = @(), $ConfigValue = @(), $SavedValue = @(), [string]$RepositoryRoot = "")
 
-    $commands = @($InputValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $commands = @($InputValue | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
     if ($commands.Count -eq 0) {
-        $commands = @($ConfigValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $commands = @($ConfigValue | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
     }
     if ($commands.Count -eq 0) {
-        $commands = @($SavedValue | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $commands = @($SavedValue | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
     }
     if ($commands.Count -eq 0) {
         $commands = @(Get-FactoryInferredReviewCommands -RepositoryRoot $RepositoryRoot)
     }
-    $commands = @($commands | ForEach-Object {
-        $command = ([string]$_).Trim()
-        if ($command -match '^(?i:php(?:\.exe)?\s+artisan\s+test)$') {
-            "$command --parallel"
-        } else {
-            $command
-        }
-    })
     foreach ($command in $commands) {
         if ($command.Length -gt 4096 -or $command -match '[\r\n]') {
             throw "Review test commands must be single-line strings no longer than 4096 characters."

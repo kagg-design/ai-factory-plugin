@@ -79,6 +79,7 @@ function Reset-PipelineWorktree {
         $null = Invoke-PipelineGit -WorkingDirectory $RepositoryRoot -Arguments @("worktree", "add", "--detach", $path, $BaseCommit) -Failure "Could not create $Scope worktree"
     }
     Copy-PipelineIgnoredFiles -Config $Config -RepositoryRoot $RepositoryRoot -Destination $path
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $path)
     return $path
 }
 
@@ -365,6 +366,7 @@ try {
     $integrator = Reset-PipelineWorktree -RepositoryRoot $repositoryRoot -WorktreeRoot ([string]$context.worktreeRoot) -Scope integrator -BaseCommit $remoteDevelopment -Config $config
     $integrationMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $developmentBranch
     $integrationMerge = Invoke-PipelineMerge -Worktree $integrator -Commit $taskCommit -Label "Development" -Message $integrationMessage
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $integrator)
     $productionSource = if ([string]$plan.productionMode -eq "task-only") { $taskCommit } else { $integrationMerge }
 
     $currentStage = "production"
@@ -376,6 +378,7 @@ try {
     }
     $productionMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $productionBranch -Promoting $promoting
     $releaseMerge = Invoke-PipelineMerge -Worktree $release -Commit $productionSource -Label "Production" -Message $productionMessage
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $release)
 
     $integrationCheckHandle = $null
     $releaseCheckHandle = $null

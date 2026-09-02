@@ -43,5 +43,7 @@ foreach ($relative in @($config.copyIgnoredFiles)) {
     Copy-Item $source $destination -Recurse -Force
 }
 
+$null = @(Sync-FactoryWorktreeDependencies -Worktree $target)
+
 # The last non-empty stdout line is the path Claude Code uses.
 Write-Output ([IO.Path]::GetFullPath($target))

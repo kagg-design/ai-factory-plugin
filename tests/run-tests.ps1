@@ -98,6 +98,7 @@ function New-FactoryTestTask {
         workerResult = $null
         review = $null
         approval = $null
+        syncPreparation = $null
         error = $null
         createdAt = $Now
         updatedAt = $Now
@@ -219,6 +220,7 @@ try {
     Assert-True (-not $workerLauncherSource.Contains('"--session-id"')) "Worker launcher still passes the unsupported background session ID."
     Assert-True ($workerLauncherSource.Contains("conversationLanguage = [string]`$config.conversationLanguage")) "Worker payload does not include the configured conversation language."
     Assert-True ($workerLauncherSource.Contains("Invoke-FactoryWorkerLaunch")) "Worker launcher does not use the safe native process helper."
+    Assert-True ($workerLauncherSource.Contains("Sync-FactoryWorktreeDependencies")) "Worker worktree creation does not align dependencies before launch."
     Assert-True (-not $workerLauncherSource.Contains("Get-FileHash")) "Worker launcher still depends on ambient PowerShell utility modules for hashing."
     Assert-True ((Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\worker-git-guard.ps1") -Raw).Contains("exit 2")) "Worker Git guard does not fail closed."
 
@@ -245,8 +247,12 @@ try {
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
     Assert-True (-not $integrationSource.Contains("--force")) "Native integration contains a force operation."
     Assert-True ($integrationSource.Contains('"-Phase", "integration"')) "Native publication does not acquire the priority test lease."
+    Assert-True ([regex]::Matches($integrationSource, 'Sync-FactoryWorktreeDependencies').Count -ge 3) "Pipeline reset and merged candidates do not align their dependencies."
     $syncSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\sync-task.ps1") -Raw
     Assert-True ($syncSource.Contains("rebase --onto")) "Task sync does not rebase the task commit."
+    Assert-True ($syncSource.Contains("Sync-FactoryWorktreeDependencies")) "Task sync does not align dependencies after rebase."
+    $createWorktreeSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\create-worktree.ps1") -Raw
+    Assert-True ($createWorktreeSource.Contains("Sync-FactoryWorktreeDependencies")) "Hook-created worktrees do not align dependencies."
     Assert-True ($publicSkill.Contains("sync <task-id>")) "The public skill does not expose task sync."
     Assert-True ($publicSkill.Contains("release <task-id>")) "The public skill does not expose stale-session release."
     Assert-True ($publicSkill.Contains("queues a new attempt")) "The public skill still describes rework as an undelivered chat continuation."
@@ -259,9 +265,68 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $laravelInferenceRoot "vendor\bin") -Force | Out-Null
     New-Item -ItemType File -Path (Join-Path $laravelInferenceRoot "vendor\bin\pint") -Force | Out-Null
     New-Item -ItemType File -Path (Join-Path $laravelInferenceRoot "artisan") -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $laravelInferenceRoot "composer.json") -Force | Out-Null
     $laravelInferredCommands = @(Get-FactoryInferredReviewCommands -RepositoryRoot $laravelInferenceRoot)
+    Assert-Equal "composer install --no-interaction --no-progress" ([string]$laravelInferredCommands[0]) "Laravel inference did not install Composer dependencies first."
     Assert-True ($laravelInferredCommands -contains "vendor/bin/pint --test") "Laravel inference omitted Pint check mode."
-    Assert-True ($laravelInferredCommands -contains "php artisan test --parallel") "Laravel inference did not prefer the parallel full suite."
+    $inferredParallelCommand = @($laravelInferredCommands | Where-Object { $_ -like "php artisan test --parallel --processes=*" })[0]
+    Assert-True ([bool]$inferredParallelCommand) "Laravel inference did not emit an explicit bounded parallel full suite."
+    $inferredProcesses = 0
+    [void][int]::TryParse(($inferredParallelCommand -replace '^.*--processes=', ''), [ref]$inferredProcesses)
+    Assert-True ($inferredProcesses -ge 1 -and $inferredProcesses -le 5) "Laravel inference emitted an unsafe process count: $inferredProcesses."
+
+    $verbatimCommand = "  php artisan test  "
+    $resolvedVerbatimCommands = @(Resolve-FactoryReviewCommands -ConfigValue @($verbatimCommand))
+    Assert-Equal $verbatimCommand ([string]$resolvedVerbatimCommands[0]) "A configured check command was not preserved byte-for-byte."
+    Assert-True (-not ([string]$resolvedVerbatimCommands[0]).Contains("--parallel")) "A configured single-process test command was rewritten."
+
+    $dependencyRoot = Join-Path $testRoot "dependency-sync"
+    New-Item -ItemType Directory -Path $dependencyRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dependencyRoot "composer.json"), '{"require":{"example/package":"1.0.0"}}', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((Join-Path $dependencyRoot "composer.lock"), '{"packages":[{"name":"example/package","version":"1.0.0"}],"packages-dev":[]}', (New-Object Text.UTF8Encoding($false)))
+    $dependencyInvocations = New-Object Collections.Generic.List[string]
+    $dependencyInvoker = {
+        param([string]$Command, [object[]]$Arguments, [string]$WorkingDirectory)
+        $dependencyInvocations.Add("$Command $($Arguments -join ' ')")
+        $installedDirectory = Join-Path $WorkingDirectory "vendor\composer"
+        New-Item -ItemType Directory -Path $installedDirectory -Force | Out-Null
+        $lock = Read-FactoryJson -Path (Join-Path $WorkingDirectory "composer.lock")
+        Write-FactoryJsonAtomic -Path (Join-Path $installedDirectory "installed.json") -Value ([pscustomobject]@{ packages = @($lock.packages) })
+        return [pscustomobject]@{ exitCode = 0; output = "installed" }
+    }
+    $dependencyInstall = @(Sync-FactoryWorktreeDependencies -Worktree $dependencyRoot -Invoker $dependencyInvoker)
+    Assert-Equal 1 $dependencyInstall.Count "A stale Composer worktree did not install dependencies."
+    Assert-Equal "composer install --no-interaction --no-progress" ([string]$dependencyInvocations[0]) "Composer dependency installation used the wrong command."
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $dependencyRoot -Invoker $dependencyInvoker)
+    Assert-Equal 1 $dependencyInvocations.Count "An unchanged Composer worktree reinstalled dependencies."
+    [IO.File]::WriteAllText((Join-Path $dependencyRoot "composer.lock"), '{"packages":[{"name":"example/package","version":"2.0.0"}],"packages-dev":[]}', (New-Object Text.UTF8Encoding($false)))
+    $liveDependencyTask = [pscustomobject]@{
+        id = "live-dependency-task"
+        backgroundSession = [pscustomobject]@{ id = "live"; state = "working" }
+    }
+    $liveDependencyRefused = $false
+    try {
+        $null = @(Sync-FactoryWorktreeDependencies -Worktree $dependencyRoot -Task $liveDependencyTask -Invoker $dependencyInvoker)
+    } catch {
+        $liveDependencyRefused = $_.Exception.Message -match "live worker session"
+    }
+    Assert-True $liveDependencyRefused "A batch-style dependency install was allowed in a live worker worktree."
+    Assert-Equal 1 $dependencyInvocations.Count "A refused live-worktree install still invoked Composer."
+
+    $npmDependencyRoot = Join-Path $testRoot "npm-dependency-sync"
+    New-Item -ItemType Directory -Path $npmDependencyRoot -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $npmDependencyRoot "package-lock.json"), '{"name":"fixture","lockfileVersion":3,"packages":{}}', (New-Object Text.UTF8Encoding($false)))
+    $npmInvocations = New-Object Collections.Generic.List[string]
+    $npmInvoker = {
+        param([string]$Command, [object[]]$Arguments, [string]$WorkingDirectory)
+        $npmInvocations.Add("$Command $($Arguments -join ' ')")
+        New-Item -ItemType Directory -Path (Join-Path $WorkingDirectory "node_modules") -Force | Out-Null
+        return [pscustomobject]@{ exitCode = 0; output = "installed" }
+    }
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $npmDependencyRoot -Invoker $npmInvoker)
+    $null = @(Sync-FactoryWorktreeDependencies -Worktree $npmDependencyRoot -Invoker $npmInvoker)
+    Assert-Equal 1 $npmInvocations.Count "An npm worktree did not use its lock stamp to skip a no-op install."
+    Assert-Equal "npm ci" ([string]$npmInvocations[0]) "npm dependency installation did not use npm ci."
     & git init --bare $remote 1> $null
     & git init $repository 1> $null
     & git -C $repository config user.email "factory-tests@example.test"
@@ -350,9 +415,77 @@ try {
     Assert-True ($null -eq $initialFactoryConfig.PSObject.Properties["concurrency"]) "A fresh config still writes the deprecated concurrency alias."
     $launcherTestConfig = Read-FactoryJson -Path $context.configPath
     $launcherTestConfig.nativeScheduler.startWithOrchestrator = $false
+    $launcherTestConfig.testLease.heartbeatSeconds = 1
     Write-FactoryJsonAtomic -Path $context.configPath -Value $launcherTestConfig
 
     $testLeaseScript = Join-Path $pluginRoot "scripts\test-lease.ps1"
+    $dateTimeHeartbeat = [DateTime]::SpecifyKind([DateTime]::UtcNow.AddMinutes(-2), [DateTimeKind]::Utc)
+    $parsedDateTimeHeartbeat = ConvertFrom-FactoryRoundtripTimestamp -Value $dateTimeHeartbeat
+    Assert-True ([bool]$parsedDateTimeHeartbeat.success) "A DateTime-valued lease heartbeat was not accepted."
+    Assert-True ([Math]::Abs(([DateTime]$parsedDateTimeHeartbeat.value - $dateTimeHeartbeat).TotalMilliseconds) -lt 1) "A DateTime-valued lease heartbeat changed during normalization."
+
+    $cultureLeaseTimestamp = [DateTime]::UtcNow.AddMinutes(-2).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    $cultureAges = New-Object Collections.Generic.List[int]
+    $originalCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        foreach ($cultureName in @("en-GB", "en-US", "ru-RU")) {
+            [Threading.Thread]::CurrentThread.CurrentCulture = New-Object Globalization.CultureInfo($cultureName)
+            Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
+                version = 1
+                holder = [pscustomobject]@{
+                    taskId = "culture-holder"; phase = "review"; pid = $PID
+                    acquiredAt = $cultureLeaseTimestamp; heartbeatAt = $cultureLeaseTimestamp
+                    priority = 10; token = "culture-token"
+                }
+                queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
+            })
+            $cultureStatus = (& $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+            $cultureAges.Add([int]$cultureStatus.holderAgeSeconds)
+        }
+    } finally {
+        [Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture
+    }
+    Assert-True ((($cultureAges | Measure-Object -Maximum).Maximum - ($cultureAges | Measure-Object -Minimum).Minimum) -le 2) "Lease age changed with the current culture: $($cultureAges -join ', ')."
+
+    Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
+        version = 1
+        holder = [pscustomobject]@{
+            taskId = "unreadable-holder"; phase = "review"; pid = 999999
+            acquiredAt = Get-FactoryUtcTimestamp; heartbeatAt = "not-a-timestamp"
+            priority = 10; token = "unreadable-token"
+        }
+        queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
+    })
+    $unreadableStatus = (& $testLeaseScript -Action status -Repository $repository 2>$null) | ConvertFrom-Json
+    Assert-Equal $false ([bool]$unreadableStatus.heartbeatReadable) "An unreadable lease heartbeat was accepted."
+    Assert-Equal $false ([bool]$unreadableStatus.stale) "An unreadable lease heartbeat failed open as stale."
+    $unreadableReclaim = (& $testLeaseScript -Action reclaim -Repository $repository -TtlSeconds 1) | ConvertFrom-Json
+    Assert-Equal $false ([bool]$unreadableReclaim.reclaimed) "An unreadable lease heartbeat was reclaimed."
+    $unreadableDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $unreadableLeaseCheck = @($unreadableDoctor.checks | Where-Object { [string]$_.name -eq "testLaneLease" })[0]
+    Assert-True (-not [bool]$unreadableLeaseCheck.passed -and [string]$unreadableLeaseCheck.detail -match "unreadable") "Factory doctor did not surface an unreadable lease heartbeat."
+
+    $oldLiveTimestamp = [DateTime]::UtcNow.AddDays(-1).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
+        version = 1
+        holder = [pscustomobject]@{
+            taskId = "live-old-holder"; phase = "review"; pid = $PID
+            acquiredAt = $oldLiveTimestamp; heartbeatAt = $oldLiveTimestamp
+            priority = 10; token = "live-old-token"
+        }
+        queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
+    })
+    $liveOldReclaim = (& $testLeaseScript -Action reclaim -Repository $repository -TtlSeconds 1) | ConvertFrom-Json
+    Assert-Equal $false ([bool]$liveOldReclaim.reclaimed) "A lease owned by a live PID was reclaimed from an old timestamp."
+    Remove-Item -LiteralPath ([string]$context.testLeasePath) -Force
+
+    $heartbeatLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
+        -Action acquire -Repository $repository -TaskId "heartbeat-start" -Phase review -OwnerPid $PID) | ConvertFrom-Json
+    $heartbeatStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+    Assert-True ([int]$heartbeatLease.heartbeatPid -gt 0 -and [bool]$heartbeatStatus.heartbeatPidAlive) "Lease acquire did not start and record a live heartbeat process."
+    $heartbeatRelease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript -Action release -Repository $repository -Token ([string]$heartbeatLease.token)) | ConvertFrom-Json
+    Assert-True ([bool]$heartbeatRelease.released) "Heartbeat lease could not be released."
+
     $laneHolder = $null
     $ordinaryWaiter = $null
     $publicationWaiter = $null
@@ -1008,7 +1141,7 @@ try {
         )
     }
     $state.version = 2
-    foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "cleanup", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
+    foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "syncPreparation", "cleanup", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
         $state.tasks[0].PSObject.Properties.Remove($propertyName)
     }
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -1427,6 +1560,54 @@ try {
     Assert-Equal "working" ([string]$sessionState.tasks[0].backgroundSession.state) "Current Claude status field was not captured."
     Assert-Equal "live-transcript" ([string]$sessionState.tasks[0].backgroundSession.transcriptPath) "A stale same-shape agent row overwrote authoritative metadata."
 
+    $blockedSessionTask = New-FactoryTestTask -Id "blocked-session-task" -Title "Surface a blocked worker" -Now (Get-FactoryUtcTimestamp)
+    $blockedSessionTask.status = "running"
+    $blockedSessionWorktree = Join-Path $testRoot "blocked-session-worktree"
+    New-Item -ItemType Directory -Path $blockedSessionWorktree -Force | Out-Null
+    $blockedSessionTask.worktree = $blockedSessionWorktree
+    $blockedSessionTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"; id = "blocked123"; sessionId = "blocked123-session"
+        name = "factory-blocked-session-task"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
+    }
+    $blockedFixtureState = Read-FactoryJson -Path $context.statePath
+    $blockedFixtureState.tasks = @($blockedFixtureState.tasks) + @($blockedSessionTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedFixtureState
+    [IO.File]::AppendAllText(
+        $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
+        "launch`tblocked123`t$blockedSessionWorktree`tfactory-blocked-session-task`tblocked" + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $blockedFixtureConfig = Read-FactoryJson -Path $context.configPath
+    $blockedFixtureConfig.blockedSessionTimeoutMinutes = 60
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $blockedFixtureConfig
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $blockedVisibleTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "blocked-session-task"
+    Assert-Equal "running" ([string]$blockedVisibleTask.status) "A newly observed blocked session timed out immediately."
+    Assert-Equal "blocked" ([string]$blockedVisibleTask.backgroundSession.state) "Blocked session state was not persisted."
+    Assert-True ([bool][string]$blockedVisibleTask.backgroundSession.blockedAt) "Blocked session did not record when the stall began."
+    Assert-True ([string]$blockedVisibleTask.backgroundSession.blockedReason -match "lastAssistantMessage") "Blocked session did not carry an actionable wait reason."
+    $blockedStatusOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status blocked -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($blockedStatusOutput.Contains("SESSION BLOCKED") -and $blockedStatusOutput.Contains("blocked-session-task")) "Factory status hid a blocked runtime session behind the task state."
+    $blockedDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $blockedDoctorCheck = @($blockedDoctor.checks | Where-Object { [string]$_.name -eq "blockedWorkerSessions" })[0]
+    Assert-True (-not [bool]$blockedDoctorCheck.passed -and [string]$blockedDoctorCheck.detail -match "blocked-session-task") "Factory doctor did not report a blocked worker session."
+
+    $blockedTimeoutState = Read-FactoryJson -Path $context.statePath
+    $blockedTimeoutTask = Get-FactoryTask -State $blockedTimeoutState -TaskId "blocked-session-task"
+    $blockedTimeoutTask.backgroundSession.blockedAt = [DateTime]::UtcNow.AddMinutes(-2).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedTimeoutState
+    $blockedFixtureConfig.blockedSessionTimeoutMinutes = 1
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $blockedFixtureConfig
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $blockedTimedOutTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "blocked-session-task"
+    Assert-Equal "blocked" ([string]$blockedTimedOutTask.status) "A long-blocked session continued consuming a coding slot."
+    Assert-True ([string]$blockedTimedOutTask.holdReason -match "remained blocked") "Blocked-session timeout omitted the stall reason."
+    $blockedCleanupState = Read-FactoryJson -Path $context.statePath
+    $blockedCleanupState.tasks = @($blockedCleanupState.tasks | Where-Object { [string]$_.id -ne "blocked-session-task" })
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedCleanupState
+    $blockedFixtureConfig.blockedSessionTimeoutMinutes = 30
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $blockedFixtureConfig
+
     $env:CLAUDE_FACTORY_TEST_AGENT_STATUS = "stopped"
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     $machineHeldState = Read-FactoryJson -Path $context.statePath
@@ -1716,6 +1897,23 @@ try {
     Assert-True ([string]$sync.commit -ne $commit) "Task sync did not replace the old commit SHA."
     Assert-True (Test-Path -LiteralPath (Join-Path $launch.worktree "BASE.md")) "Worker worktree did not receive the latest development base."
     $commit = [string]$sync.commit
+    [IO.File]::WriteAllText(
+        (Join-Path $repository "BASE-SECOND.md"),
+        "development moved after prepare`n",
+        (New-Object Text.UTF8Encoding($false))
+    )
+    & git -C $repository add BASE-SECOND.md
+    & git -C $repository commit -m "chore: advance development after sync prepare" 1> $null
+    & git -C $repository push origin develop 1> $null
+    $syncReprepared = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
+        -Repository $repository -TaskId "test-task" -Action prepare -LeaseToken ([string]$syncLease.token)) | ConvertFrom-Json
+    Assert-Equal "syncing" ([string]$syncReprepared.status) "A prepared task did not remain in sync validation after the base moved."
+    Assert-True (-not [bool]$syncReprepared.alreadyPrepared) "Sync prepare reused a marker for an older development base."
+    Assert-True ([string]$syncReprepared.commit -ne $commit) "Sync prepare did not re-rebase after development moved."
+    Assert-True (Test-Path -LiteralPath (Join-Path $launch.worktree "BASE-SECOND.md")) "Re-prepared worker worktree did not receive the second development base."
+    $commit = [string]$syncReprepared.commit
+    $syncPreparationState = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "test-task"
+    Assert-Equal ([string]$syncReprepared.baseCommit) ([string]$syncPreparationState.syncPreparation.baseCommit) "Sync preparation marker did not record the current development base."
     $syncReportPath = Join-Path $context.sessionsPath "test-task.sync-tests.json"
     Write-FactoryJsonAtomic -Path $syncReportPath -Value ([pscustomobject]@{
         tests = @([pscustomobject]@{

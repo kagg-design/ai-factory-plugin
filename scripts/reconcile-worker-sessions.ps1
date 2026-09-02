@@ -21,6 +21,25 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
 $CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
+$blockedSessionTimeoutMinutes = [Math]::Max(
+    1,
+    [int](Get-FactoryNestedValue -Target $config -Name "blockedSessionTimeoutMinutes" -Default 30)
+)
+
+function Get-FactoryBlockedSessionReason {
+    param($SessionRow)
+
+    foreach ($name in @(
+        "blockedReason", "waitingFor", "permissionDecisionReason", "pendingToolCall",
+        "toolCall", "currentTool", "error", "lastAssistantMessage"
+    )) {
+        $value = Get-FactoryNestedValue -Target $SessionRow -Name $name
+        if ($null -eq $value) { continue }
+        $text = if ($value -is [string]) { [string]$value } else { $value | ConvertTo-Json -Depth 10 -Compress }
+        if ($text) { return "$name`: $text" }
+    }
+    return "The runtime reports a blocked worker session; attach to inspect the pending tool call."
+}
 
 $agentRows = @()
 $claudeListingAvailable = $true
@@ -115,6 +134,25 @@ try {
             }
             Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value $rowState
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastSeenAt" -Value (Get-FactoryUtcTimestamp)
+            if ($rowState -eq "blocked" -and $before -in @("starting", "planning", "running")) {
+                $blockedAt = Get-FactoryNestedValue -Target $task.backgroundSession -Name "blockedAt"
+                if ($null -eq $blockedAt) {
+                    $candidateBlockedAt = Get-FactoryNestedValue -Target $sessionRow -Name "blockedAt"
+                    if ($null -eq $candidateBlockedAt) { $candidateBlockedAt = Get-FactoryNestedValue -Target $sessionRow -Name "updatedAt" }
+                    if ($null -eq $candidateBlockedAt) { $candidateBlockedAt = Get-FactoryNestedValue -Target $task -Name "updatedAt" }
+                    $parsedCandidate = ConvertFrom-FactoryRoundtripTimestamp -Value $candidateBlockedAt
+                    $blockedAt = if ([bool]$parsedCandidate.success) {
+                        ConvertTo-FactoryRoundtripTimestamp -Value $parsedCandidate.value
+                    } else {
+                        Get-FactoryUtcTimestamp
+                    }
+                    Set-FactoryProperty -Target $task.backgroundSession -Name "blockedAt" -Value $blockedAt
+                }
+                Set-FactoryProperty -Target $task.backgroundSession -Name "blockedReason" -Value (Get-FactoryBlockedSessionReason -SessionRow $sessionRow)
+            } elseif ($rowState -ne "blocked") {
+                Set-FactoryProperty -Target $task.backgroundSession -Name "blockedAt" -Value $null
+                Set-FactoryProperty -Target $task.backgroundSession -Name "blockedReason" -Value $null
+            }
             # Only adopt a UUID from a row that IS this background session (or when nothing is
             # recorded yet). A name+cwd match can land on a previous attempt's row, and writing
             # its UUID here would permanently pin the task to the dead session.
@@ -373,7 +411,18 @@ try {
             } elseif ($sessionState -eq "working" -and [string]$task.status -in @("starting", "planning")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value $(if ([string]$task.startMode -eq "interactive") { "planning" } else { "running" })
             } elseif ($sessionState -eq "blocked" -and [string]$task.status -in @("starting", "planning", "running")) {
-                Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
+                $blockedAt = Get-FactoryNestedValue -Target $task.backgroundSession -Name "blockedAt"
+                $parsedBlockedAt = ConvertFrom-FactoryRoundtripTimestamp -Value $blockedAt
+                $blockedSeconds = if ([bool]$parsedBlockedAt.success) {
+                    [Math]::Max(0, [int]([DateTime]::UtcNow - ([DateTime]$parsedBlockedAt.value)).TotalSeconds)
+                } else { 0 }
+                if ($blockedSeconds -ge ($blockedSessionTimeoutMinutes * 60)) {
+                    $blockedReason = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "blockedReason" -Default "reason unavailable")
+                    $holdReason = "Worker session remained blocked for at least $blockedSessionTimeoutMinutes minute(s). Waiting for: $blockedReason"
+                    Set-FactoryProperty -Target $task -Name "status" -Value "blocked"
+                    Set-FactoryProperty -Target $task -Name "holdReason" -Value $holdReason
+                    Set-FactoryProperty -Target $task -Name "error" -Value $holdReason
+                }
             } elseif ($sessionState -eq "failed" -and [string]$task.status -in @("starting", "planning", "running")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
                 Set-FactoryProperty -Target $task -Name "error" -Value "Worker session failed before a valid FACTORY_RESULT was captured."

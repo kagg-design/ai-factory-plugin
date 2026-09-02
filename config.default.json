@@ -6,6 +6,7 @@
   "codingConcurrency": 8,
   "maxConcurrency": 20,
   "maxAttempts": 2,
+  "blockedSessionTimeoutMinutes": 30,
   "defaultStartMode": "interactive",
   "conversationLanguage": "English",
   "pollCron": "*/2 * * * *",

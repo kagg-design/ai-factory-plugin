@@ -9,6 +9,7 @@ param(
     [int]$WaitTimeoutSeconds = 0,
     [int]$PollMilliseconds = 0,
     [int]$TtlSeconds = 0,
+    [string]$HeartbeatLogPath = "",
     [switch]$NoHeartbeat
 )
 
@@ -20,6 +21,8 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 $leasePath = Join-Path ([string]$context.projectData) "test-lease.json"
 $reclaimLogPath = Join-Path ([string]$context.projectData) "test-lease.reclaims.jsonl"
+$defaultHeartbeatLogPath = Join-Path ([string]$context.projectData) "test-lease.heartbeat.log"
+if (-not $HeartbeatLogPath) { $HeartbeatLogPath = $defaultHeartbeatLogPath }
 $settings = Get-FactoryNestedValue -Target $config -Name "testLease"
 $configuredTtlMinutes = [int](Get-FactoryNestedValue -Target $settings -Name "ttlMinutes" -Default 30)
 $effectiveTtlSeconds = if ($TtlSeconds -gt 0) { $TtlSeconds } else { [Math]::Max(60, $configuredTtlMinutes * 60) }
@@ -50,6 +53,16 @@ function Read-TestLeaseState {
 
 function Write-TestLeaseState {
     param([Parameter(Mandatory = $true)]$Lease)
+    $holder = Get-FactoryNestedValue -Target $Lease -Name "holder"
+    if ($null -ne $holder) {
+        foreach ($name in @("acquiredAt", "heartbeatAt")) {
+            $rawTimestamp = Get-FactoryNestedValue -Target $holder -Name $name
+            $parsedTimestamp = ConvertFrom-FactoryRoundtripTimestamp -Value $rawTimestamp
+            if ([bool]$parsedTimestamp.success) {
+                Set-FactoryProperty -Target $holder -Name $name -Value (ConvertTo-FactoryRoundtripTimestamp -Value $parsedTimestamp.value)
+            }
+        }
+    }
     Set-FactoryProperty -Target $Lease -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
     Write-FactoryJsonAtomic -Path $leasePath -Value $Lease
 }
@@ -60,13 +73,27 @@ function Get-TestLeasePriority {
     return 10
 }
 
-function Get-TestLeaseAgeSeconds {
+function Get-TestLeaseHeartbeatInfo {
     param($Holder)
-    if ($null -eq $Holder) { return 0 }
-    $heartbeatAt = [string](Get-FactoryNestedValue -Target $Holder -Name "heartbeatAt" -Default "")
-    $parsed = [DateTime]::MinValue
-    if (-not [DateTime]::TryParse($heartbeatAt, [ref]$parsed)) { return [int]::MaxValue }
-    return [Math]::Max(0, [int]([DateTime]::UtcNow - $parsed.ToUniversalTime()).TotalSeconds)
+    if ($null -eq $Holder) {
+        return [pscustomobject]@{ readable = $true; ageSeconds = 0; value = $null; warning = "" }
+    }
+    $heartbeatAt = Get-FactoryNestedValue -Target $Holder -Name "heartbeatAt" -Default $null
+    $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $heartbeatAt
+    if (-not [bool]$parsed.success) {
+        return [pscustomobject]@{
+            readable = $false
+            ageSeconds = 0
+            value = $null
+            warning = "Test lease heartbeat is unreadable ($($parsed.error)); treating the holder as fresh and refusing automatic reclaim."
+        }
+    }
+    return [pscustomobject]@{
+        readable = $true
+        ageSeconds = [Math]::Max(0, [int]([DateTime]::UtcNow - ([DateTime]$parsed.value)).TotalSeconds)
+        value = [DateTime]$parsed.value
+        warning = ""
+    }
 }
 
 function Test-TestLeaseProcess {
@@ -82,12 +109,13 @@ function Test-TestLeaseProcess {
 
 function Write-TestLeaseReclaimRecord {
     param($Holder, [string]$Reason)
+    $heartbeatAt = Get-FactoryNestedValue -Target $Holder -Name "heartbeatAt" -Default $null
     $record = [ordered]@{
         reclaimedAt = Get-FactoryUtcTimestamp
         taskId = [string](Get-FactoryNestedValue -Target $Holder -Name "taskId" -Default "unknown")
         phase = [string](Get-FactoryNestedValue -Target $Holder -Name "phase" -Default "unknown")
         pid = [int](Get-FactoryNestedValue -Target $Holder -Name "pid" -Default 0)
-        heartbeatAt = [string](Get-FactoryNestedValue -Target $Holder -Name "heartbeatAt" -Default "")
+        heartbeatAt = ConvertTo-FactoryRoundtripTimestamp -Value $heartbeatAt
         reason = $Reason
     }
     $line = ($record | ConvertTo-Json -Depth 10 -Compress) + [Environment]::NewLine
@@ -99,8 +127,11 @@ function Reclaim-StaleTestLease {
     param([Parameter(Mandatory = $true)]$Lease)
     $holder = Get-FactoryNestedValue -Target $Lease -Name "holder"
     if ($null -eq $holder) { return $null }
-    $ageSeconds = Get-TestLeaseAgeSeconds -Holder $holder
-    if ($ageSeconds -le $effectiveTtlSeconds) { return $null }
+    $ownerPid = [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0)
+    if (Test-TestLeaseProcess -ProcessId $ownerPid) { return $null }
+    $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
+    if (-not [bool]$heartbeat.readable -or [int]$heartbeat.ageSeconds -le $effectiveTtlSeconds) { return $null }
+    $ageSeconds = [int]$heartbeat.ageSeconds
     $reason = "Test lease heartbeat is $ageSeconds second(s) old; TTL is $effectiveTtlSeconds second(s)."
     $record = Write-TestLeaseReclaimRecord -Holder $holder -Reason $reason
     Set-FactoryProperty -Target $Lease -Name "holder" -Value $null
@@ -147,7 +178,8 @@ function Start-TestLeaseHeartbeat {
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
         "-Action", "heartbeat", "-Repository", [string]$context.repositoryRoot,
         "-Token", $LeaseToken, "-OwnerPid", [string]$LeaseOwnerPid,
-        "-TtlSeconds", [string]$effectiveTtlSeconds
+        "-TtlSeconds", [string]$effectiveTtlSeconds,
+        "-HeartbeatLogPath", $HeartbeatLogPath
     )
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $executable
@@ -164,6 +196,11 @@ function Start-TestLeaseHeartbeat {
     $process.StartInfo = $startInfo
     try {
         if (-not $process.Start()) { throw "Could not start the test-lease heartbeat." }
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+        if ($process.HasExited) {
+            throw "Test-lease heartbeat exited immediately with code $($process.ExitCode). See '$HeartbeatLogPath'."
+        }
         return [int]$process.Id
     } finally {
         $process.Dispose()
@@ -172,22 +209,28 @@ function Start-TestLeaseHeartbeat {
 
 if ($Action -eq "heartbeat") {
     if (-not $Token -or $OwnerPid -le 0) { throw "Heartbeat requires Token and OwnerPid." }
-    while (Test-TestLeaseProcess -ProcessId $OwnerPid) {
-        Start-Sleep -Seconds $heartbeatSeconds
-        if (-not (Test-TestLeaseProcess -ProcessId $OwnerPid)) { break }
-        $mutex = $null
-        try {
-            $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
-            $lease = Read-TestLeaseState
-            $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
-            if ($null -eq $holder -or [string](Get-FactoryNestedValue -Target $holder -Name "token" -Default "") -ne $Token) {
-                break
+    try {
+        while (Test-TestLeaseProcess -ProcessId $OwnerPid) {
+            Start-Sleep -Seconds $heartbeatSeconds
+            if (-not (Test-TestLeaseProcess -ProcessId $OwnerPid)) { break }
+            $mutex = $null
+            try {
+                $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+                $lease = Read-TestLeaseState
+                $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
+                if ($null -eq $holder -or [string](Get-FactoryNestedValue -Target $holder -Name "token" -Default "") -ne $Token) {
+                    break
+                }
+                Set-FactoryProperty -Target $holder -Name "heartbeatAt" -Value (Get-FactoryUtcTimestamp)
+                Write-TestLeaseState -Lease $lease
+            } finally {
+                Exit-FactoryMutex -Mutex $mutex
             }
-            Set-FactoryProperty -Target $holder -Name "heartbeatAt" -Value (Get-FactoryUtcTimestamp)
-            Write-TestLeaseState -Lease $lease
-        } finally {
-            Exit-FactoryMutex -Mutex $mutex
         }
+    } catch {
+        $line = "$(Get-FactoryUtcTimestamp) token=$Token ownerPid=$OwnerPid $($_.Exception.Message)" + [Environment]::NewLine
+        try { [IO.File]::AppendAllText($HeartbeatLogPath, $line, (New-Object Text.UTF8Encoding($false))) } catch {}
+        throw
     }
     exit 0
 }
@@ -195,17 +238,40 @@ if ($Action -eq "heartbeat") {
 if ($Action -eq "status") {
     $lease = Read-TestLeaseState
     $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
-    $ageSeconds = Get-TestLeaseAgeSeconds -Holder $holder
+    $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
+    $ownerPid = if ($null -ne $holder) { [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0) } else { 0 }
+    $heartbeatPid = if ($null -ne $holder) { [int](Get-FactoryNestedValue -Target $holder -Name "heartbeatPid" -Default 0) } else { 0 }
+    $ownerAlive = Test-TestLeaseProcess -ProcessId $ownerPid
+    $heartbeatPidAlive = Test-TestLeaseProcess -ProcessId $heartbeatPid
+    $acquired = if ($null -ne $holder) {
+        ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $holder -Name "acquiredAt" -Default $null)
+    } else { [pscustomobject]@{ success = $false; value = $null } }
+    $heartbeatChanged = (
+        [bool]$heartbeat.readable -and [bool]$acquired.success -and
+        ([DateTime]$heartbeat.value) -ne ([DateTime]$acquired.value)
+    )
+    $heartbeatStalled = (
+        $null -ne $holder -and $ownerAlive -and -not $heartbeatChanged -and
+        [int]$heartbeat.ageSeconds -gt [Math]::Max(5, $heartbeatSeconds * 2)
+    )
+    if (-not [bool]$heartbeat.readable) { [Console]::Error.WriteLine([string]$heartbeat.warning) }
     [ordered]@{
         path = $leasePath
         free = ($null -eq $holder)
         holder = $holder
-        holderAgeSeconds = $ageSeconds
-        stale = ($null -ne $holder -and $ageSeconds -gt $effectiveTtlSeconds)
+        holderAgeSeconds = [int]$heartbeat.ageSeconds
+        heartbeatReadable = [bool]$heartbeat.readable
+        heartbeatWarning = [string]$heartbeat.warning
+        holderProcessAlive = $ownerAlive
+        heartbeatPidAlive = $heartbeatPidAlive
+        heartbeatChanged = $heartbeatChanged
+        heartbeatStalled = $heartbeatStalled
+        stale = ($null -ne $holder -and -not $ownerAlive -and [bool]$heartbeat.readable -and [int]$heartbeat.ageSeconds -gt $effectiveTtlSeconds)
         ttlSeconds = $effectiveTtlSeconds
         queue = @(Get-SortedTestLeaseQueue -Lease $lease)
         lastReclaim = Get-FactoryNestedValue -Target $lease -Name "lastReclaim"
         reclaimLogPath = $reclaimLogPath
+        heartbeatLogPath = $HeartbeatLogPath
     } | ConvertTo-Json -Depth 20
     exit 0
 }
@@ -317,7 +383,39 @@ while ($null -eq $acquired) {
     Start-Sleep -Milliseconds $PollMilliseconds
 }
 
-$heartbeatPid = if ($NoHeartbeat) { 0 } else { Start-TestLeaseHeartbeat -LeaseToken $requestToken -LeaseOwnerPid $effectiveOwnerPid }
+$heartbeatPid = 0
+if (-not $NoHeartbeat) {
+    try {
+        $heartbeatPid = Start-TestLeaseHeartbeat -LeaseToken $requestToken -LeaseOwnerPid $effectiveOwnerPid
+        $heartbeatMutex = $null
+        try {
+            $heartbeatMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+            $lease = Read-TestLeaseState
+            $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
+            if ($null -eq $holder -or [string](Get-FactoryNestedValue -Target $holder -Name "token" -Default "") -ne $requestToken) {
+                throw "Test lease changed before its heartbeat process could be recorded."
+            }
+            Set-FactoryProperty -Target $holder -Name "heartbeatPid" -Value $heartbeatPid
+            Write-TestLeaseState -Lease $lease
+        } finally {
+            Exit-FactoryMutex -Mutex $heartbeatMutex
+        }
+    } catch {
+        $cleanupMutex = $null
+        try {
+            $cleanupMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+            $lease = Read-TestLeaseState
+            $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
+            if ($null -ne $holder -and [string](Get-FactoryNestedValue -Target $holder -Name "token" -Default "") -eq $requestToken) {
+                Set-FactoryProperty -Target $lease -Name "holder" -Value $null
+                Write-TestLeaseState -Lease $lease
+            }
+        } finally {
+            Exit-FactoryMutex -Mutex $cleanupMutex
+        }
+        throw
+    }
+}
 [ordered]@{
     acquired = $true
     token = $requestToken

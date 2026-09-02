@@ -337,7 +337,9 @@ active factory tasks.
 
 A Claude session state shown in parentheses is a separate concept:
 
-- `(blocked)` usually means the session is idle and waiting for input;
+- `(blocked)` on an `awaiting-input` task is normally the intended wait for the
+  operator. On a `starting`, `planning`, or `running` task it is displayed as
+  `SESSION BLOCKED` with its age and captured wait reason;
 - `(done)` means the background session finished its turn.
 
 A session may be `(done)` while its factory task remains `awaiting-review`
@@ -665,6 +667,17 @@ whose parent is the current configured development tip, then run the same
 clean tree, and exactly one task commit before adopting the new SHA. If
 validation is interrupted after a successful rebase, the task remains
 `syncing`, cannot be approved, and the same command resumes its checks.
+The preparation marker includes the exact fetched development SHA. If that tip
+moves before validation completes, another `sync` re-rebases and updates the
+marker instead of returning `alreadyPrepared` for stale work.
+
+Every operation that creates, resets, merges into, or rebases a factory
+worktree aligns dependencies in that worktree before checks or worker launch.
+Composer runs `composer install --no-interaction --no-progress`, including dev
+dependencies; npm runs `npm ci`. Matching locks skip installation. Never run a
+manual batch install across worker worktrees: the native dependency helper
+refuses a task with a live session, while the task-owned sync operation is the
+only sanctioned live-session path.
 
 The source branch is configured per repository:
 
@@ -800,7 +813,10 @@ factory scheduler status
   readiness, runtime files, locks, worktrees, scheduler, and the exclusive
   full-suite lease. Publication
   settings that intentionally disable direct release are a warning, not a
-  required factory-health failure.
+  required factory-health failure. It also reports runtime-blocked worker
+  sessions and their captured wait reason. Reconciliation moves one to task
+  state `blocked` after the private `blockedSessionTimeoutMinutes` threshold
+  (30 minutes by default), releasing its coding slot.
 - `factory scheduler status` validates the recorded PID/start time and named
   ownership, reports busy activity and its live heartbeat, and prints the tick
   and error log paths without calling AI.
@@ -896,11 +912,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
   -Action reclaim -Repository D:\Projects\MotiveHR
 ```
 
-Every holder heartbeats. A heartbeat older than the configured 30-minute
-default TTL is reclaimable, and reclaim writes the abandoned task and phase to
-`test-lease.reclaims.jsonl`. Normal code releases from `finally`. In a Laravel
-repository, empty trusted command configuration is inferred as
-`vendor/bin/pint --test` plus `php artisan test --parallel`.
+Every holder heartbeats, and status reports both the holder and heartbeat PIDs.
+A heartbeat older than the configured 30-minute default TTL is reclaimable only
+after the holder PID is gone. Timestamp parsing is invariant and
+culture-independent; an unreadable timestamp is treated as fresh and reported
+by `factory doctor` instead of being reclaimed. A heartbeat process that dies
+or never advances is also a doctor warning, with failures in the private
+`test-lease.heartbeat.log`. Reclaim writes the abandoned task and phase to
+`test-lease.reclaims.jsonl`. Normal code releases from `finally`.
+
+Configured integration, release, and worker commands run byte-for-byte as
+written. An explicit `php artisan test` stays single-process. When trusted
+commands are empty, Composer installation is inferred first; Laravel's suite is
+inferred as `php artisan test --parallel --processes=N`, where `N` is half the
+logical CPU count rounded up and clamped to 1–5. The explicit value appears in
+logs and audits.
 
 ## 15. Operations to avoid
 

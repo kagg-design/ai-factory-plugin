@@ -173,7 +173,12 @@ function Invoke-CliReconcile {
 function Get-CliTaskReason {
     param($Task)
 
+    $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
+    $blockedReason = if ((Get-CliEffectiveStatus -Task $Task) -eq "session-blocked") {
+        Get-CliProperty -InputObject $session -Name "blockedReason"
+    } else { $null }
     foreach ($candidate in @(
+        $blockedReason,
         (Get-CliProperty -InputObject $Task -Name "holdReason"),
         (Get-CliProperty -InputObject $Task -Name "error"),
         (Get-CliProperty -InputObject (Get-CliProperty -InputObject $Task -Name "workerResult") -Name "blockingReason"),
@@ -191,6 +196,28 @@ function Get-CliTaskReason {
         }
     }
     return ""
+}
+
+function Get-CliEffectiveStatus {
+    param($Task)
+
+    $status = [string](Get-CliProperty -InputObject $Task -Name "status")
+    $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
+    $sessionState = [string](Get-CliProperty -InputObject $session -Name "state")
+    if ($sessionState -eq "blocked" -and $status -in @("starting", "planning", "running")) {
+        return "session-blocked"
+    }
+    return $status
+}
+
+function Get-CliBlockedSessionAge {
+    param($Task)
+
+    $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
+    $blockedAt = Get-CliProperty -InputObject $session -Name "blockedAt"
+    $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $blockedAt
+    if (-not [bool]$parsed.success) { return 0 }
+    return [Math]::Max(0, [int]([DateTime]::UtcNow - ([DateTime]$parsed.value)).TotalSeconds)
 }
 
 function Get-CliSessionInfo {
@@ -247,6 +274,7 @@ function Get-CliStateText {
         "held" { "retained and on hold" }
         "rejected" { "rejected but retained" }
         "blocked" { "blocked" }
+        "session-blocked" { "worker session is blocked" }
         "failed" { "failed" }
         "done" { "completed" }
         default { if ($Status) { $Status } else { "unknown" } }
@@ -263,6 +291,7 @@ function Get-CliStateLabel {
         "syncing" { "SYNC" }
         "integrating" { "INTEGRATING" }
         "production" { "PRODUCTION" }
+        "session-blocked" { "SESSION BLOCKED" }
         default { $Status.ToUpperInvariant() }
     }
     return $label
@@ -274,7 +303,7 @@ function Get-CliGroup {
     if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "held", "rejected")) { return "Needs your action" }
     if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production")) { return "Working" }
     if ($Status -eq "queued") { return "Waiting" }
-    if ($Status -in @("blocked", "failed")) { return "Problems" }
+    if ($Status -in @("blocked", "failed", "session-blocked")) { return "Problems" }
     return "Other"
 }
 
@@ -369,13 +398,14 @@ function Add-CliTaskTree {
     $id = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "id") -Fallback "unknown-id"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "title") -Fallback "Untitled task"
     $status = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "status") -Fallback "unknown"
+    $effectiveStatus = Get-CliEffectiveStatus -Task $Task
     $taskConnector = if ($IsLast) { "$($script:Tree.Last)$($script:Tree.Horizontal)" } else { "$($script:Tree.Branch)$($script:Tree.Horizontal)" }
     $detailPrefix = if ($IsLast) { "$($script:Tree.Vertical)     " } else { "$($script:Tree.Vertical)  $($script:Tree.Vertical)  " }
     Add-CliWrappedLine `
         -Lines $Lines `
         -FirstPrefix "$($script:Tree.Vertical)  $taskConnector " `
         -ContinuationPrefix $detailPrefix `
-        -Text "$(Get-CliStateLabel -Status $status) $($script:Tree.Horizontal) $id $($script:Tree.Horizontal) $title"
+        -Text "$(Get-CliStateLabel -Status $effectiveStatus) $($script:Tree.Horizontal) $id $($script:Tree.Horizontal) $title"
 
     $details = New-Object Collections.Generic.List[string]
     $source = Get-CliTaskSourceInfo -Task $Task
@@ -388,7 +418,11 @@ function Add-CliTaskTree {
     if ($brief -and $brief -ne $title -and $title.Length -lt 80) {
         $details.Add("What: $(Get-CliShortSummary -Value $brief)")
     }
-    $details.Add("State: $(Get-CliStateText -Status $status)")
+    if ($effectiveStatus -eq "session-blocked") {
+        $details.Add("State: worker session blocked for $(Format-CliDuration -Seconds (Get-CliBlockedSessionAge -Task $Task)); task state is $status")
+    } else {
+        $details.Add("State: $(Get-CliStateText -Status $status)")
+    }
     $reason = Get-CliTaskReason -Task $Task
     if ($reason) { $details.Add("Reason: $(Get-CliShortSummary -Value $reason -MaximumLength 260)") }
     $commit = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "commit")
@@ -459,7 +493,9 @@ function Write-CliStatus {
         if ($Filter -eq "done") {
             # Completed rows are rendered separately below.
         } elseif ($Filter -and $Filter -ne "all") {
-            $unfinished | Where-Object { [string]$_.status -eq $Filter }
+            $unfinished | Where-Object {
+                [string]$_.status -eq $Filter -or ($Filter -eq "blocked" -and (Get-CliEffectiveStatus -Task $_) -eq "session-blocked")
+            }
         } else {
             $unfinished | ForEach-Object { $_ }
         }
@@ -515,8 +551,20 @@ function Write-CliStatus {
             $lines.Add("$($script:Tree.Vertical)  test lane free $($script:Tree.Horizontal) queue $($leaseQueue.Count)")
         } else {
             $leaseAge = Format-CliDuration -Seconds ([int](Get-CliProperty -InputObject $testLease -Name "holderAgeSeconds" -Default 0))
-            $staleSuffix = if ([bool](Get-CliProperty -InputObject $testLease -Name "stale" -Default $false)) { " $($script:Tree.Horizontal) STALE" } else { "" }
-            $lines.Add("$($script:Tree.Vertical)  test lane $([string]$leaseHolder.phase) $($script:Tree.Horizontal) $([string]$leaseHolder.taskId) $($script:Tree.Horizontal) $leaseAge$staleSuffix")
+            $leaseWarning = if (-not [bool](Get-CliProperty -InputObject $testLease -Name "heartbeatReadable" -Default $true)) {
+                "HEARTBEAT UNREADABLE"
+            } elseif ([bool](Get-CliProperty -InputObject $testLease -Name "heartbeatStalled" -Default $false)) {
+                "HEARTBEAT STALLED"
+            } elseif (
+                [bool](Get-CliProperty -InputObject $testLease -Name "holderProcessAlive" -Default $false) -and
+                -not [bool](Get-CliProperty -InputObject $testLease -Name "heartbeatPidAlive" -Default $false)
+            ) {
+                "HEARTBEAT PROCESS DOWN"
+            } elseif ([bool](Get-CliProperty -InputObject $testLease -Name "stale" -Default $false)) {
+                "STALE"
+            } else { "" }
+            $warningSuffix = if ($leaseWarning) { " $($script:Tree.Horizontal) $leaseWarning" } else { "" }
+            $lines.Add("$($script:Tree.Vertical)  test lane $([string]$leaseHolder.phase) $($script:Tree.Horizontal) $([string]$leaseHolder.taskId) $($script:Tree.Horizontal) $leaseAge$warningSuffix")
         }
         if ($leaseQueue.Count -gt 0) {
             $queueItems = @($leaseQueue | Select-Object -First 5 | ForEach-Object { "$([string]$_.phase):$([string]$_.taskId)" })
@@ -539,7 +587,7 @@ function Write-CliStatus {
         [pscustomobject]@{ Name = "OTHER"; Key = "Other" }
     )
     foreach ($group in $groups) {
-        $groupTasks = @($selected | Where-Object { (Get-CliGroup -Status ([string]$_.status)) -eq $group.Key })
+        $groupTasks = @($selected | Where-Object { (Get-CliGroup -Status (Get-CliEffectiveStatus -Task $_)) -eq $group.Key })
         $schedulerRows = if ($group.Key -eq "Needs your action" -and $schedulerProblem) { 1 } else { 0 }
         $groupCount = $groupTasks.Count + $schedulerRows
         if ($groupCount -eq 0) { continue }

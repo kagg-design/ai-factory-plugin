@@ -1,6 +1,17 @@
 # Changelog
 
 ## Unreleased
+- Made the serialized test lease culture-safe and fail-closed: round-trip UTC
+  timestamps no longer turn into locale-dependent dates, unreadable heartbeats
+  are never reclaimed, a live holder PID prevents reclaim, and heartbeat PID,
+  progress, and failure logs are visible to status and doctor. Worktree create,
+  reset, merge, and sync operations now install changed Composer/npm locks in
+  place while skipping matching installs and refusing batch mutation beneath a
+  live worker. Configured check commands run verbatim; inferred Laravel suites
+  use an explicit 1–5 process bound. Sync preparation is pinned to the fetched
+  development SHA and re-rebases when it moves. Runtime-blocked workers are
+  visible immediately and time out of coding capacity with an actionable
+  reason.
 - Made worker envelope capture deterministic: the first standalone result or
   plan marker wins, nested JSON braces are parsed correctly, and malformed
   marker JSON reaches the task error. Completed tasks now derive authoritative

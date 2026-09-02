@@ -97,3 +97,7 @@ FACTORY_RESULT
 
 For blocked or failed work, use `blocked` or `failed`, do not fabricate a
 commit, and state the exact blocking reason.
+If a command is refused by a permission or Git guard, do not wait indefinitely
+for an approval that the factory cannot grant. Emit `FACTORY_RESULT` with
+`status: "blocked"` and include the refused command and refusal in `notes` and
+`blockingReason`.

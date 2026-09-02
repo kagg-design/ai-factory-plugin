@@ -163,3 +163,53 @@ CI runner.
 - `docs/tasks/TASK-worktree-test-database-isolation.md` — why each worker already has its own database.
 - Making the suite itself faster (persistent connections, fewer migrations per process) is a separate
   ticket; this one is about who may run it, not how long it takes.
+
+---
+
+## Addendum, 2026-09-01 — what the first day of the lease actually hit
+
+The lease landed and works: `acquire`/`release`/`status` behave, the heartbeat holds a long review, and
+`sync` refusing to run without a token caught the orchestrator immediately. Three things surfaced in
+the first eleven publications' worth of use, all outside the lease itself.
+
+### A. `prepare` will not re-rebase, and `finalize` refuses a stale base — the two halves deadlock
+
+Observed on `local:20260831-162741-0c63f991`. Sequence: a `prepare` in the morning rebased onto develop
+`ed29d35` and recorded the branch as prepared. Two publications later develop was `ed149e4`. Then:
+
+- `sync-task.ps1 prepare` answered `alreadyPrepared: true` and did nothing;
+- `sync-task.ps1 finalize` threw `Sync candidate '<head>' does not contain current development base
+  '<base>'` (sync-task.ps1:150-153).
+
+So the task could neither be re-prepared nor finalized, and the orchestrator had to rebase the worktree
+by hand to get out. **Required:** `prepare` compares the recorded base against the current remote tip
+and rebases again when it moved, regardless of the prepared marker. The marker should mean "prepared
+against base X", not "prepared".
+
+### B. The pipeline cannot run the suite in parallel yet — two separate reasons
+
+Requirement 6 above says the pipeline should use the project's parallel form. Two things block it:
+
+1. **`brianium/paratest` is a `require-dev`**, and the `factory-integrator` / `factory-release`
+   worktrees had been installed without dev dependencies, so Collision refused outright:
+   `Running Collision 8.x artisan test command in parallel requires at least ParaTest 7.x`. Installing
+   dev deps in both worktrees fixed that — but nothing in the plugin does it, so it will regress the
+   next time those worktrees are rebuilt. Whatever prepares them must install dev dependencies if the
+   configured check commands need them.
+2. **With parallel working, the two check sets together exhaust Postgres.** `integrate-task.ps1:383-384`
+   starts the integrator and release sets at the same time (`checksParallel = true`), so at
+   `--processes=8` each that is sixteen databases migrating at once, and the run dies with
+   `SQLSTATE[53200]: out of shared memory — you might need to increase max_locks_per_transaction`.
+
+So requirement 6 needs a precondition: **serialise the two check sets** (they are two halves of one
+publication and one lease, so nothing is lost but wall clock), or cap the process count, or document
+the server setting. Until then the pipeline stays on the single-process form and a publication costs
+about seven minutes.
+
+### C. The lease guards the plugin's scripts, not a human at a terminal
+
+The orchestrator ran two full suites by hand, in the same worktree, against the same test-database
+prefix, and got `SQLSTATE[40P01] deadlock detected` during migrations. The lease was held at the time —
+by that same orchestrator, for a different purpose. Not a defect in the lease; a note for the skill:
+**any hand-run full suite has to take the lease too**, and `factory status` showing the holder is what
+makes that checkable.

@@ -278,6 +278,7 @@ try {
             workerResult = $null
             review = $null
             approval = $null
+            syncPreparation = $null
             integration = $null
             production = $null
             rejectionReason = $null

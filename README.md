@@ -556,6 +556,11 @@ capacity because each represents a launched worker. `awaiting-review` does not.
 Targeted tests may run during coding without the test lease. A worker's final
 full suite, review full suites, and native publication checks serialize through
 the one test lane. Publication waiters outrank verification/review waiters.
+If a runtime reports a blocked session before producing a plan or result,
+`factory status` shows `SESSION BLOCKED`, its age, and the captured wait reason.
+After `blockedSessionTimeoutMinutes` (30 by default), reconciliation changes the
+task itself to `blocked`, so it no longer consumes a coding slot. `factory
+doctor` reports both fresh and timed-out blocked worker sessions.
 
 ## Commands
 
@@ -639,6 +644,17 @@ commit directly on the recorded worker branch, with the current development
 tip as its parent; rerunning `/factory sync <task-id>` validates and adopts that
 HEAD. An interrupted validation remains `syncing` and cannot be approved until
 the same command successfully finalizes it.
+The preparation marker records the exact remote development SHA. Running
+`sync` again after that tip moves re-rebases the task onto the new tip instead
+of trusting the older marker.
+
+Worktree creation, task synchronization, and both publication candidate
+preparations align dependencies with the lock files in that exact worktree.
+Composer uses `composer install --no-interaction --no-progress` (including dev
+dependencies); npm uses `npm ci`. Matching lock stamps or package sets skip the
+command. There is no batch updater, and the generic installer refuses a worker
+worktree that has a live session; the worker-owned sync path is the sanctioned
+exception because that session is waiting for its own sync operation.
 
 `cleanup` is intentionally strict. It reconciles the task first, refuses
 active sessions and dirty worktrees, refreshes the configured remote branches,
@@ -814,6 +830,14 @@ Set canonical project checks explicitly when possible:
 }
 ```
 
+Configured values are passed to the runner verbatim. In particular, `php
+artisan test` remains single-process; the factory never appends `--parallel`
+to an operator-provided command. When checks are empty, Composer projects infer
+`composer install --no-interaction --no-progress` first. Laravel then infers
+`vendor/bin/pint --test` when available and `php artisan test --parallel
+--processes=N`, where `N` is half the logical processor count rounded up and
+clamped to 1–5. The explicit number is retained in status and failure audits.
+
 Each executed check retains its command verbatim and its numeric exit code. The
 task audit stores an ANSI-free summary capped at 8,192 characters; for failures
 that summary is the useful tail rather than the start of a large test run. The
@@ -832,11 +856,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
 ```
 
 `factory status` shows the current task, phase, lease age, and queued phases.
-`factory doctor` warns about a stale lease and reports the most recent reclaim.
-A heartbeat older than `testLease.ttlMinutes` (30 minutes by default) may be
-reclaimed with `-Action reclaim`; every reclaim appends the abandoned task and
-phase to the private `test-lease.reclaims.jsonl` audit. Normal callers always
-release their ownership token from `finally`.
+`factory doctor` warns about a stale lease, an unreadable heartbeat, a missing
+heartbeat process, or a heartbeat that never advanced, and reports the most
+recent reclaim. Timestamps are parsed only as invariant round-trip values. An
+unreadable timestamp is treated as fresh rather than failing open. A heartbeat
+older than `testLease.ttlMinutes` (30 minutes by default) may be reclaimed with
+`-Action reclaim` only after the holder PID is gone; every reclaim appends the
+abandoned task and phase to the private `test-lease.reclaims.jsonl` audit.
+Detached heartbeat failures are written to `test-lease.heartbeat.log`. Normal
+callers always release their ownership token from `finally`.
 
 The worker runs targeted tests freely while coding. Immediately before its
 final full suite it acquires phase `verify`, rebases through the guarded sync
@@ -844,8 +872,7 @@ script while still holding the lease, runs the trusted full-suite commands, and
 releases. Review uses phase `review`. Native publication acquires one
 higher-priority lease for both its integrator and release check sets; those two
 sets may run in parallel with each other because they belong to the same
-publication. Laravel inference prefers `vendor/bin/pint --test` and
-`php artisan test --parallel`.
+publication. Laravel inference uses the bounded commands described above.
 
 ### Isolated PostgreSQL test databases
 

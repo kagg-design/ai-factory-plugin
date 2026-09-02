@@ -183,6 +183,7 @@ try {
         Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
         Set-FactoryProperty -Target $task -Name "review" -Value $null
         Set-FactoryProperty -Target $task -Name "approval" -Value $null
+        Set-FactoryProperty -Target $task -Name "syncPreparation" -Value $null
         Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
         Set-FactoryProperty -Target $task -Name "error" -Value $null
         Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value $now
@@ -207,22 +208,13 @@ try {
         throw "Worker HEAD '$head' differs from recorded commit '$commit'. Use sync finalize with a test report to adopt a manually resolved one-commit rebase."
     }
 
-    if ([string]$task.status -eq "syncing") {
-        [ordered]@{
-            taskId = $TaskId
-            status = "syncing"
-            alreadyPrepared = $true
-            commit = $commit
-            worktree = $worktree
-            changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $commit)
-            previousTests = @()
-        } | ConvertTo-Json -Depth 20
-        exit 0
+    if (-not $workerVerification -and [string]$task.status -notin @("awaiting-review", "held", "syncing")) {
+        throw "Task '$TaskId' is '$($task.status)'; sync requires awaiting-review, held, or syncing."
     }
-    if (-not $workerVerification -and [string]$task.status -notin @("awaiting-review", "held")) {
-        throw "Task '$TaskId' is '$($task.status)'; sync requires awaiting-review or held."
-    }
-    if (-not $workerVerification -and ($null -eq $task.workerResult -or [string]$task.workerResult.commit -ne $commit)) {
+    if (
+        -not $workerVerification -and [string]$task.status -ne "syncing" -and
+        ($null -eq $task.workerResult -or [string]$task.workerResult.commit -ne $commit)
+    ) {
         throw "Task '$TaskId' has no worker result matching '$commit'."
     }
 
@@ -244,14 +236,22 @@ try {
 
     & git -C $worktree merge-base --is-ancestor $baseCommit $commit
     if ($LASTEXITCODE -eq 0) {
+        $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task -AllowTaskOwnedSession)
+        $preparation = Get-FactoryNestedValue -Target $task -Name "syncPreparation"
+        $alreadyPrepared = (
+            [string]$task.status -eq "syncing" -and
+            [string](Get-FactoryNestedValue -Target $preparation -Name "baseCommit" -Default "") -eq $baseCommit
+        )
         [ordered]@{
             taskId = $TaskId
             status = [string]$task.status
             alreadyCurrent = $true
+            alreadyPrepared = $alreadyPrepared
             commit = $commit
             baseRef = $baseRef
             baseCommit = $baseCommit
             worktree = $worktree
+            previousTests = @((Get-FactoryNestedValue -Target $preparation -Name "previousTests" -Default @()))
         } | ConvertTo-Json -Depth 10
         exit 0
     }
@@ -262,7 +262,14 @@ try {
     }
     $oldCommit = $commit
     $oldParent = (& git -C $worktree rev-parse "$oldCommit^" 2>$null).Trim()
-    $previousTests = if ($workerVerification -or $null -eq $task.workerResult) { @() } else { @($task.workerResult.tests) }
+    $existingPreparation = Get-FactoryNestedValue -Target $task -Name "syncPreparation"
+    $previousTests = if ($workerVerification) {
+        @()
+    } elseif ($null -ne $task.workerResult) {
+        @($task.workerResult.tests)
+    } else {
+        @((Get-FactoryNestedValue -Target $existingPreparation -Name "previousTests" -Default @()))
+    }
 
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -291,6 +298,12 @@ try {
     if ([int]$commitCount -ne 1) {
         throw "Synchronized branch contains $commitCount task commits above '$baseRef'; expected one."
     }
+    try {
+        $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task -AllowTaskOwnedSession)
+    } catch {
+        & git -c core.longpaths=true -C $worktree reset --hard $oldCommit 1> $null 2> $null
+        throw
+    }
     $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $newCommit)
     $now = Get-FactoryUtcTimestamp
     if ($workerVerification) {
@@ -308,6 +321,7 @@ try {
             status = [string]$task.status
             verificationPrepared = $true
             alreadyCurrent = $false
+            alreadyPrepared = $false
             oldCommit = $oldCommit
             commit = $newCommit
             baseRef = $baseRef
@@ -322,6 +336,13 @@ try {
     Set-FactoryProperty -Target $task -Name "workerResult" -Value $null
     Set-FactoryProperty -Target $task -Name "review" -Value $null
     Set-FactoryProperty -Target $task -Name "approval" -Value $null
+    Set-FactoryProperty -Target $task -Name "syncPreparation" -Value ([pscustomobject][ordered]@{
+        commit = $newCommit
+        baseRef = $baseRef
+        baseCommit = $baseCommit
+        previousTests = @($previousTests)
+        preparedAt = $now
+    })
     Set-FactoryProperty -Target $task -Name "status" -Value "syncing"
     Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value "Re-run appropriate checks after synchronization with $baseRef, then finalize sync validation."
     Set-FactoryProperty -Target $task -Name "error" -Value $null
@@ -333,6 +354,7 @@ try {
         taskId = $TaskId
         status = "syncing"
         alreadyCurrent = $false
+        alreadyPrepared = $false
         oldCommit = $oldCommit
         commit = $newCommit
         baseRef = $baseRef
