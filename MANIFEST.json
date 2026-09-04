@@ -42,6 +42,7 @@
     "scripts/factory-preview-service.ps1",
     "scripts/enqueue-task.ps1",
     "scripts/integrate-task.ps1",
+    "scripts/migrate-runtime.ps1",
     "scripts/orchestrator-session.ps1",
     "scripts/prepare-intake.ps1",
     "scripts/project-context.ps1",

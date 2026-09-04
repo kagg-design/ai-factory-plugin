@@ -299,6 +299,19 @@ function Test-FactoryTaskHasActiveSession {
     return $sessionState -notin @("done", "stopped", "failed")
 }
 
+function Test-FactoryTaskHasCurrentApprovedReview {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    $commit = [string](Get-FactoryNestedValue -Target $Task -Name "commit" -Default "")
+    $review = Get-FactoryNestedValue -Target $Task -Name "review"
+    $approval = Get-FactoryNestedValue -Target $Task -Name "approval"
+    if (-not $commit -or $null -eq $review -or $null -ne $approval) { return $false }
+    return (
+        [string](Get-FactoryNestedValue -Target $review -Name "commit" -Default "") -eq $commit -and
+        [string](Get-FactoryNestedValue -Target $review -Name "verdict" -Default "") -eq "approved"
+    )
+}
+
 function Get-FactoryLaunchStallInfo {
     param(
         [Parameter(Mandatory = $true)]$Task,
@@ -361,6 +374,7 @@ function Get-FactoryOperatorActionEvents {
         if ([bool]$stall.stalled) {
             $events.Add([pscustomobject][ordered]@{
                 kind = "stalled-launch"; taskId = $taskId; title = $title; status = $status
+                audience = "orchestrator"
                 reason = "Worker launch has no recorded session after $([int]$stall.ageSeconds) second(s)."
                 occurredAt = [string]$stall.startedAt; command = "factory retry $taskId"
             })
@@ -369,19 +383,31 @@ function Get-FactoryOperatorActionEvents {
         if ($status -eq "awaiting-input") {
             $events.Add([pscustomobject][ordered]@{
                 kind = "awaiting-input"; taskId = $taskId; title = $title; status = $status
+                audience = "orchestrator"
                 reason = "Worker needs operator input."; occurredAt = $occurredAt; command = "factory chat $taskId"
             })
         } elseif ($status -eq "awaiting-review" -and -not (Test-FactoryTaskHasActiveSession -Task $task)) {
-            $events.Add([pscustomobject][ordered]@{
-                kind = "awaiting-review"; taskId = $taskId; title = $title; status = $status
-                reason = "Validated result is ready and the worker session is closed."; occurredAt = $occurredAt; command = "factory inspect $taskId"
-            })
+            if (Test-FactoryTaskHasCurrentApprovedReview -Task $task) {
+                $events.Add([pscustomobject][ordered]@{
+                    kind = "awaiting-approval"; taskId = $taskId; title = $title; status = $status
+                    audience = "human"
+                    reason = "The current commit has an approved review and is waiting for the operator's go decision."
+                    occurredAt = $occurredAt; command = "factory go $taskId"
+                })
+            } else {
+                $events.Add([pscustomobject][ordered]@{
+                    kind = "awaiting-review"; taskId = $taskId; title = $title; status = $status
+                    audience = "orchestrator"
+                    reason = "Validated result is ready and the worker session is closed."; occurredAt = $occurredAt; command = "factory inspect $taskId"
+                })
+            }
         } elseif ($status -in @("blocked", "failed")) {
             $reason = [string](Get-FactoryNestedValue -Target $task -Name "error" -Default (
                 Get-FactoryNestedValue -Target $task -Name "holdReason" -Default "Operator inspection is required."
             ))
             $events.Add([pscustomobject][ordered]@{
                 kind = $status; taskId = $taskId; title = $title; status = $status
+                audience = "orchestrator"
                 reason = $reason; occurredAt = $occurredAt; command = "factory inspect $taskId"
             })
         }
@@ -396,19 +422,81 @@ function Get-FactoryOperatorActionEvents {
             (Test-FactoryTaskHasActiveSession -Task $_))
     }).Count
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $scheduler
-    if ($runnable -gt 0 -and ($schedulerStatus -in @("failed", "stopped") -or -not $schedulerAlive)) {
+    $paused = [bool](Get-FactoryNestedValue -Target $State -Name "paused" -Default $false)
+    if ($runnable -gt 0 -and ($paused -or -not $schedulerAlive)) {
         $reason = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastError" -Default "")
         if (-not $reason) { $reason = "Runnable work exists, but the native scheduler process is not running." }
         $events.Add([pscustomobject][ordered]@{
-            kind = "scheduler"; taskId = $null; title = "Native scheduler"; status = if ($schedulerAlive) { $schedulerStatus } else { "stopped" }
+            kind = "scheduler"; taskId = $null; title = "Native scheduler"; status = if ($paused) { "paused" } elseif ($schedulerAlive) { $schedulerStatus } else { "stopped" }
+            audience = "orchestrator"
             reason = $reason
             occurredAt = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastFailureAt" -Default (
                 Get-FactoryNestedValue -Target $scheduler -Name "heartbeatAt" -Default ""
             ))
-            command = if ([bool](Get-FactoryNestedValue -Target $State -Name "paused" -Default $false)) { "factory resume" } else { "factory scheduler start" }
+            command = if ($paused) { "factory resume" } else { "factory scheduler start" }
         })
     }
     return @($events.ToArray())
+}
+
+function Get-FactoryMutexDiagnosticPaths {
+    param([Parameter(Mandatory = $true)][string]$ProjectKey)
+
+    try {
+        $pluginRoot = Split-Path -Parent $PSScriptRoot
+        $runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
+            [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
+        } else {
+            $legacyRuntimeHome = [IO.Path]::GetFullPath((Join-Path $pluginRoot "runtime"))
+            $recommendedRuntimeHome = if ($env:LOCALAPPDATA) {
+                [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ClaudeFactory"))
+            } elseif ($env:USERPROFILE) {
+                [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE "AppData\Local\ClaudeFactory"))
+            } else {
+                $legacyRuntimeHome
+            }
+            $recommendedProjectData = Join-Path (Join-Path $recommendedRuntimeHome "projects") $ProjectKey
+            $legacyProjectData = Join-Path (Join-Path $legacyRuntimeHome "projects") $ProjectKey
+            if (Test-Path -LiteralPath $recommendedProjectData -PathType Container) {
+                $recommendedRuntimeHome
+            } elseif (Test-Path -LiteralPath $legacyProjectData -PathType Container) {
+                $legacyRuntimeHome
+            } else {
+                $recommendedRuntimeHome
+            }
+        }
+        $projectData = Join-Path (Join-Path $runtimeHome "projects") $ProjectKey
+        if (-not (Test-Path -LiteralPath $projectData -PathType Container)) { return $null }
+        return [pscustomobject]@{
+            owner = Join-Path $projectData "factory-lock-owner.json"
+            events = Join-Path $projectData "factory-locks.jsonl"
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-FactoryMutexCaller {
+    try {
+        $frames = @(Get-PSCallStack)
+        $frame = @($frames | Where-Object { [string]$_.ScriptName -and -not ([string]$_.ScriptName).EndsWith("factory-common.ps1", [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
+        if ($frame.Count -eq 0) { return "process:$PID" }
+        return "$([IO.Path]::GetFileName([string]$frame[0].ScriptName)):$([int]$frame[0].ScriptLineNumber)"
+    } catch {
+        return "process:$PID"
+    }
+}
+
+function Write-FactoryMutexDiagnosticEvent {
+    param($Paths, [Parameter(Mandatory = $true)]$Event)
+
+    if ($null -eq $Paths) { return }
+    try {
+        $line = ($Event | ConvertTo-Json -Depth 10 -Compress) + [Environment]::NewLine
+        [IO.File]::AppendAllText([string]$Paths.events, $line, (New-Object Text.UTF8Encoding($false)))
+    } catch {
+        # Lock diagnostics must never become a new factory failure mode.
+    }
 }
 
 function Enter-FactoryMutex {
@@ -419,12 +507,55 @@ function Enter-FactoryMutex {
 
     $safeKey = $ProjectKey -replace '[^A-Za-z0-9_.-]', '-'
     $mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactory-$safeKey")
+    $waitStartedAt = [DateTime]::UtcNow
+    $ownsMutex = $false
     try {
-        if (-not $mutex.WaitOne($TimeoutMilliseconds)) {
-            throw "Timed out waiting for the factory state lock for '$ProjectKey'."
+        try {
+            $ownsMutex = $mutex.WaitOne($TimeoutMilliseconds)
+        } catch [System.Threading.AbandonedMutexException] {
+            # Ownership is granted when the previous process abandoned the mutex.
+            $ownsMutex = $true
         }
-    } catch [System.Threading.AbandonedMutexException] {
-        # Ownership is granted when the previous process abandoned the mutex.
+    } catch {
+        $mutex.Dispose()
+        throw
+    }
+    $paths = Get-FactoryMutexDiagnosticPaths -ProjectKey $ProjectKey
+    $waitMilliseconds = [int]([DateTime]::UtcNow - $waitStartedAt).TotalMilliseconds
+    $caller = Get-FactoryMutexCaller
+    if (-not $ownsMutex) {
+        $ownerDetail = ""
+        if ($null -ne $paths -and (Test-Path -LiteralPath ([string]$paths.owner) -PathType Leaf)) {
+            try {
+                $owner = Read-FactoryJson -Path ([string]$paths.owner)
+                $ownerDetail = " Current holder: PID $([int]$owner.pid), $([string]$owner.caller), acquired $([string]$owner.acquiredAt)."
+            } catch {}
+        }
+        Write-FactoryMutexDiagnosticEvent -Paths $paths -Event ([ordered]@{
+            event = "timeout"; timestamp = Get-FactoryUtcTimestamp; pid = $PID; caller = $caller
+            waitedMilliseconds = $waitMilliseconds; timeoutMilliseconds = $TimeoutMilliseconds
+        })
+        $mutex.Dispose()
+        throw "Timed out waiting for the factory state lock for '$ProjectKey'.$ownerDetail"
+    }
+
+    $acquiredAt = Get-FactoryUtcTimestamp
+    $token = [Guid]::NewGuid().ToString("N")
+    $mutex | Add-Member -NotePropertyName FactoryDiagnosticPaths -NotePropertyValue $paths -Force
+    $mutex | Add-Member -NotePropertyName FactoryDiagnosticToken -NotePropertyValue $token -Force
+    $mutex | Add-Member -NotePropertyName FactoryAcquiredAtUtc -NotePropertyValue ([DateTime]::UtcNow) -Force
+    $mutex | Add-Member -NotePropertyName FactoryWaitMilliseconds -NotePropertyValue $waitMilliseconds -Force
+    $mutex | Add-Member -NotePropertyName FactoryCaller -NotePropertyValue $caller -Force
+    if ($null -ne $paths) {
+        try {
+            Write-FactoryJsonAtomic -Path ([string]$paths.owner) -Value ([ordered]@{
+                token = $token; projectKey = $ProjectKey; pid = $PID
+                processStartTimeUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+                caller = $caller; acquiredAt = $acquiredAt; waitMilliseconds = $waitMilliseconds
+            })
+        } catch {
+            # Lock diagnostics must never become a new factory failure mode.
+        }
     }
     return $mutex
 }
@@ -433,12 +564,33 @@ function Exit-FactoryMutex {
     param($Mutex)
 
     if ($null -eq $Mutex) { return }
+    $paths = Get-FactoryNestedValue -Target $Mutex -Name "FactoryDiagnosticPaths"
+    $token = [string](Get-FactoryNestedValue -Target $Mutex -Name "FactoryDiagnosticToken" -Default "")
+    $acquiredAtUtc = Get-FactoryNestedValue -Target $Mutex -Name "FactoryAcquiredAtUtc"
+    $caller = [string](Get-FactoryNestedValue -Target $Mutex -Name "FactoryCaller" -Default "process:$PID")
+    $waitMilliseconds = [int](Get-FactoryNestedValue -Target $Mutex -Name "FactoryWaitMilliseconds" -Default 0)
+    $holdMilliseconds = if ($null -ne $acquiredAtUtc) { [int]([DateTime]::UtcNow - ([DateTime]$acquiredAtUtc)).TotalMilliseconds } else { 0 }
+    if ($null -ne $paths -and $token -and (Test-Path -LiteralPath ([string]$paths.owner) -PathType Leaf)) {
+        try {
+            $owner = Read-FactoryJson -Path ([string]$paths.owner)
+            if ([string]$owner.token -eq $token) { Remove-Item -LiteralPath ([string]$paths.owner) -Force }
+        } catch {}
+    }
     try {
         $Mutex.ReleaseMutex()
     } catch {
         # The caller may be unwinding before it acquired ownership.
     } finally {
         $Mutex.Dispose()
+    }
+    $slowThresholdMilliseconds = 1000
+    [void][int]::TryParse([string]$env:CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS, [ref]$slowThresholdMilliseconds)
+    $slowThresholdMilliseconds = [Math]::Max(1, $slowThresholdMilliseconds)
+    if ($holdMilliseconds -ge $slowThresholdMilliseconds -or $waitMilliseconds -ge $slowThresholdMilliseconds) {
+        Write-FactoryMutexDiagnosticEvent -Paths $paths -Event ([ordered]@{
+            event = "released"; timestamp = Get-FactoryUtcTimestamp; pid = $PID; caller = $caller
+            waitedMilliseconds = $waitMilliseconds; heldMilliseconds = $holdMilliseconds
+        })
     }
 }
 
@@ -1339,6 +1491,22 @@ function Test-FactorySamePath {
         $leftFull = [IO.Path]::GetFullPath($Left).TrimEnd('\', '/')
         $rightFull = [IO.Path]::GetFullPath($Right).TrimEnd('\', '/')
         return $leftFull.Equals($rightFull, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Test-FactoryPathWithin {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+
+    try {
+        $pathFull = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        $parentFull = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/')
+        $prefix = $parentFull + [IO.Path]::DirectorySeparatorChar
+        return $pathFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
     } catch {
         return $false
     }

@@ -6,8 +6,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) { [IO.Path]::GetFullPath($RuntimeHome) } else { Join-Path $pluginRoot "runtime" }
+if ($RuntimeHome) { $env:CLAUDE_FACTORY_HOME = [IO.Path]::GetFullPath($RuntimeHome) }
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $Repository) | ConvertFrom-Json
+$projectsRoot = [IO.Path]::GetFullPath((Join-Path ([string]$context.runtimeHome) "projects")).TrimEnd('\', '/')
+$projectData = [IO.Path]::GetFullPath([string]$context.projectData).TrimEnd('\', '/')
+$worktreeContainer = [IO.Path]::GetFullPath([string]$context.worktreeContainer).TrimEnd('\', '/')
+$worktreeRoot = [IO.Path]::GetFullPath([string]$context.worktreeRoot).TrimEnd('\', '/')
+if (-not $projectData.StartsWith($projectsRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing cleanup because project runtime '$projectData' is not below '$projectsRoot'."
+}
+if (-not $worktreeRoot.StartsWith($worktreeContainer + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing cleanup because worktree root '$worktreeRoot' is not below '$worktreeContainer'."
+}
+foreach ($protectedPath in @($pluginRoot, [string]$context.repositoryRoot, [string]$context.runtimeHome, $projectsRoot, $worktreeContainer)) {
+    if ($projectData.Equals([IO.Path]::GetFullPath($protectedPath).TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing cleanup because project runtime resolves to protected path '$projectData'."
+    }
+}
 $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-preview.ps1") -Action stop -Repository ([string]$context.repositoryRoot) -RuntimeHome ([string]$context.runtimeHome) | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "Failed to stop the browser preview before project cleanup." }
 $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") -Action stop -Repository ([string]$context.repositoryRoot) -RuntimeHome ([string]$context.runtimeHome) | Out-String)
@@ -45,20 +60,20 @@ foreach ($path in $registered) {
 
 & git -C $context.repositoryRoot worktree prune
 
-if (Test-Path $context.worktreeRoot) {
-    $items = Get-ChildItem $context.worktreeRoot -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $worktreeRoot) {
+    $items = Get-ChildItem -LiteralPath $worktreeRoot -Force -ErrorAction SilentlyContinue
     if ($items.Count -eq 0 -or $Force) {
-        Remove-Item $context.worktreeRoot -Recurse -Force
+        Remove-Item -LiteralPath $worktreeRoot -Recurse -Force
     }
 }
 
-if (Test-Path $context.projectData) {
-    Remove-Item $context.projectData -Recurse -Force
+if (Test-Path -LiteralPath $projectData) {
+    Remove-Item -LiteralPath $projectData -Recurse -Force
 }
 
-if (Test-Path $context.worktreeContainer) {
-    $items = Get-ChildItem $context.worktreeContainer -Force -ErrorAction SilentlyContinue
-    if ($items.Count -eq 0) { Remove-Item $context.worktreeContainer -Force }
+if (Test-Path -LiteralPath $worktreeContainer) {
+    $items = Get-ChildItem -LiteralPath $worktreeContainer -Force -ErrorAction SilentlyContinue
+    if ($items.Count -eq 0) { Remove-Item -LiteralPath $worktreeContainer -Force }
 }
 
 Write-Host "Factory runtime data removed for $($context.repositoryRoot)." -ForegroundColor Green

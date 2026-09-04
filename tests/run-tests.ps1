@@ -134,6 +134,9 @@ try {
     Assert-True (@($bundleManifest.files) -contains "scripts/factory-preview.ps1") "The plugin manifest omits browser preview lifecycle management."
     Assert-True (@($bundleManifest.files) -contains "scripts/test-lease.ps1") "The plugin manifest omits the serialized test-lane lease."
     Assert-True (@($bundleManifest.files) -contains "scripts/wait-factory.ps1") "The plugin manifest omits the native operator wait command."
+    Assert-True (@($bundleManifest.files) -contains "scripts/migrate-runtime.ps1") "The plugin manifest omits safe runtime migration."
+    Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "AGENTS.md")) "The repository omits the Codex runtime-cleanup guard."
+    Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "CLAUDE.md")) "The repository omits the Claude runtime-cleanup guard."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -414,6 +417,114 @@ try {
     $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE = Join-Path $testRoot "test-database-audit.tsv"
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) |
         ConvertFrom-Json
+
+    $env:CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS = "1"
+    try {
+        $diagnosticMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+        $lockOwnerPath = Join-Path ([string]$context.projectData) "factory-lock-owner.json"
+        Assert-True (Test-Path -LiteralPath $lockOwnerPath -PathType Leaf) "Factory mutex did not publish its current owner."
+        Start-Sleep -Milliseconds 20
+        Exit-FactoryMutex -Mutex $diagnosticMutex
+        $diagnosticMutex = $null
+        Assert-True (-not (Test-Path -LiteralPath $lockOwnerPath)) "Factory mutex retained a stale owner record after release."
+        $lockDiagnosticLog = Join-Path ([string]$context.projectData) "factory-locks.jsonl"
+        Assert-True ((Test-Path -LiteralPath $lockDiagnosticLog) -and (Get-Content -LiteralPath $lockDiagnosticLog -Raw).Contains('"event":"released"')) "Factory mutex omitted its slow-hold diagnostic."
+
+        $holderMarker = Join-Path $testRoot "mutex-holder-ready.marker"
+        $holderJob = Start-Job -ScriptBlock {
+            param($CommonScript, $RuntimeHome, $ProjectKey, $MarkerPath)
+            $env:CLAUDE_FACTORY_HOME = $RuntimeHome
+            . $CommonScript
+            $heldMutex = $null
+            try {
+                $heldMutex = Enter-FactoryMutex -ProjectKey $ProjectKey
+                [IO.File]::WriteAllText($MarkerPath, "ready", (New-Object Text.UTF8Encoding($false)))
+                Start-Sleep -Seconds 2
+            } finally {
+                Exit-FactoryMutex -Mutex $heldMutex
+            }
+        } -ArgumentList (Join-Path $pluginRoot "scripts\factory-common.ps1"), $runtime, ([string]$context.projectKey), $holderMarker
+        try {
+            $holderDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            while (-not (Test-Path -LiteralPath $holderMarker) -and [DateTime]::UtcNow -lt $holderDeadline) {
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-True (Test-Path -LiteralPath $holderMarker) "Synthetic mutex holder did not acquire the factory lock."
+            $timeoutAttributed = $false
+            try {
+                $unexpectedMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey) -TimeoutMilliseconds 100
+                Exit-FactoryMutex -Mutex $unexpectedMutex
+            } catch {
+                $timeoutAttributed = $_.Exception.Message -match "Current holder: PID" -and $_.Exception.Message -match "acquired"
+            }
+            Assert-True $timeoutAttributed "Factory mutex timeout did not identify its current owner."
+            Assert-True ((Get-Content -LiteralPath $lockDiagnosticLog -Raw).Contains('"event":"timeout"')) "Factory mutex timeout was not appended to its audit log."
+        } finally {
+            $null = Wait-Job -Job $holderJob -Timeout 5
+            if ($holderJob.State -eq "Running") { Stop-Job -Job $holderJob }
+            $null = Receive-Job -Job $holderJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $holderJob -Force
+        }
+    } finally {
+        if ($null -ne $diagnosticMutex) { Exit-FactoryMutex -Mutex $diagnosticMutex }
+        Remove-Item Env:\CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS -ErrorAction SilentlyContinue
+    }
+
+    $savedFactoryHome = [string]$env:CLAUDE_FACTORY_HOME
+    $savedLocalAppData = [string]$env:LOCALAPPDATA
+    try {
+        Remove-Item Env:\CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue
+        $env:LOCALAPPDATA = Join-Path $testRoot "synthetic-local-app-data"
+        $freshDefaultContext = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository) | ConvertFrom-Json
+        Assert-Equal "external-default" ([string]$freshDefaultContext.runtimeSource) "A fresh factory did not default outside the plugin checkout."
+        Assert-True ([string]$freshDefaultContext.runtimeHome -eq [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ClaudeFactory"))) "Fresh runtime default did not use LocalAppData."
+    } finally {
+        $env:CLAUDE_FACTORY_HOME = $savedFactoryHome
+        $env:LOCALAPPDATA = $savedLocalAppData
+    }
+
+    $migratedRuntimeHome = Join-Path $testRoot "migrated-runtime"
+    $runtimeSessionMutex = New-Object Threading.Mutex($false, "Local\ClaudeFactorySession-$([string]$context.projectKey)")
+    $ownsRuntimeSessionMutex = $false
+    try {
+        try {
+            $ownsRuntimeSessionMutex = $runtimeSessionMutex.WaitOne(0)
+        } catch [Threading.AbandonedMutexException] {
+            $ownsRuntimeSessionMutex = $true
+        }
+        Assert-True $ownsRuntimeSessionMutex "Synthetic runtime migration test could not own the orchestrator mutex."
+        $liveRuntimeMigration = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\migrate-runtime.ps1"),
+            "-Repository", $repository, "-RuntimeHome", $runtime, "-DestinationRuntimeHome", $migratedRuntimeHome,
+            "-ClaudeCommand", $fakeClaude
+        )
+        Assert-True ([int]$liveRuntimeMigration.exitCode -ne 0 -and [string]$liveRuntimeMigration.output -match "Exit the active factory orchestrator") "Runtime migration did not refuse an active orchestrator."
+    } finally {
+        if ($ownsRuntimeSessionMutex) { $runtimeSessionMutex.ReleaseMutex() }
+        $runtimeSessionMutex.Dispose()
+    }
+    $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
+    $env:CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    try {
+        $listedRuntimeMigration = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\migrate-runtime.ps1"),
+            "-Repository", $repository, "-RuntimeHome", $runtime, "-DestinationRuntimeHome", $migratedRuntimeHome,
+            "-ClaudeCommand", $fakeClaude
+        )
+        Assert-True (
+            [int]$listedRuntimeMigration.exitCode -ne 0 -and
+            [string]$listedRuntimeMigration.output -match "orch1234" -and
+            [string]$listedRuntimeMigration.output -match "claude stop orch1234"
+        ) "Runtime migration did not identify a live Claude orchestrator and its stop command."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
+    }
+    $runtimeMigration = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\migrate-runtime.ps1") `
+        -Repository $repository -RuntimeHome $runtime -DestinationRuntimeHome $migratedRuntimeHome -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-True ([bool]$runtimeMigration.migrated -and [bool]$runtimeMigration.verified) "Synthetic runtime migration did not copy and verify the project."
+    Assert-True ([bool]$runtimeMigration.sourceRetained -and (Test-Path -LiteralPath ([string]$context.projectData))) "Runtime migration removed its source copy."
+    Assert-True (Test-Path -LiteralPath (Join-Path ([string]$runtimeMigration.destination) "runtime-migration.json")) "Runtime migration omitted its receipt."
     Assert-Equal 8 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $initialFactoryConfig = Read-FactoryJson -Path $context.configPath
@@ -483,6 +594,35 @@ try {
     })
     $liveOldReclaim = (& $testLeaseScript -Action reclaim -Repository $repository -TtlSeconds 1) | ConvertFrom-Json
     Assert-Equal $false ([bool]$liveOldReclaim.reclaimed) "A lease owned by a live PID was reclaimed from an old timestamp."
+
+    $freshDeadTimestamp = Get-FactoryUtcTimestamp
+    Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
+        version = 1
+        holder = [pscustomobject]@{
+            taskId = "fresh-dead-holder"; phase = "integration"; pid = 999999; heartbeatPid = 999998
+            acquiredAt = $freshDeadTimestamp; heartbeatAt = $freshDeadTimestamp
+            priority = 100; token = "fresh-dead-token"
+        }
+        queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
+    })
+    $freshDeadReclaim = (& $testLeaseScript -Action reclaim -Repository $repository -TtlSeconds 1800) | ConvertFrom-Json
+    Assert-True ([bool]$freshDeadReclaim.reclaimed) "A provably dead test-lane holder waited for the full heartbeat TTL."
+    Assert-True ([string]$freshDeadReclaim.abandonedHolder.reason -match "before TTL") "Early dead-holder reclaim did not explain why TTL was bypassed."
+
+    Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
+        version = 1; holder = $null
+        queue = @(
+            [pscustomobject]@{ taskId = "dead-waiter"; phase = "review"; requestedAt = Get-FactoryUtcTimestamp; priority = 10; token = "dead-waiter-token"; waiterPid = 999999 },
+            [pscustomobject]@{ taskId = "live-waiter"; phase = "review"; requestedAt = Get-FactoryUtcTimestamp; priority = 10; token = "live-waiter-token"; waiterPid = $PID }
+        )
+        lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
+    })
+    $cleanedWaiterStatus = (& $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
+    Assert-Equal 1 ([int]$cleanedWaiterStatus.removedWaiters) "Test-lane status did not remove the phantom waiter."
+    Assert-Equal 1 @($cleanedWaiterStatus.queue).Count "Test-lane status still displayed a phantom waiter."
+    $persistedCleanedLease = Read-FactoryJson -Path ([string]$context.testLeasePath)
+    Assert-Equal 1 @($persistedCleanedLease.queue).Count "Test-lane status did not persist waiter cleanup."
+    Assert-Equal "live-waiter" ([string]$persistedCleanedLease.queue[0].taskId) "Test-lane status removed the live waiter instead of the dead one."
     Remove-Item -LiteralPath ([string]$context.testLeasePath) -Force
 
     $heartbeatLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
@@ -832,8 +972,8 @@ try {
         $schedulerFailureLog = [IO.File]::ReadAllText([string]$schedulerFailureStatus.stderrPath, [Text.Encoding]::UTF8)
         Assert-True ($schedulerFailureLog.Contains('"event":"tick-exception"') -and $schedulerFailureLog.Contains("Synthetic scheduler loop failure")) "Scheduler stderr log omitted the tick failure reason."
         $failedSchedulerCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
-        Assert-True ($failedSchedulerCli.Contains("NEEDS YOUR ACTION") -and $failedSchedulerCli.Contains("SCHEDULER") -and $failedSchedulerCli.Contains("runnable work is not being processed")) "Factory status rendered a failed scheduler with runnable work as decoration."
-        Assert-True ($failedSchedulerCli.Contains("Detected:") -and $failedSchedulerCli.Contains("factory scheduler start")) "Factory status omitted scheduler failure time or recovery command."
+        Assert-True ($failedSchedulerCli.Contains("native failed") -and $failedSchedulerCli.Contains("retrying")) "Factory status hid a live scheduler's retrying failure."
+        Assert-True (-not ($failedSchedulerCli.Contains("SCHEDULER") -and $failedSchedulerCli.Contains("runnable work is not being processed"))) "Factory status requested manual recovery for a live retrying scheduler."
         $failedSchedulerDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
         $failedSchedulerDoctorCheck = @($failedSchedulerDoctor.checks | Where-Object { [string]$_.name -eq "scheduler" })[0]
         Assert-True (-not [bool]$failedSchedulerDoctorCheck.passed -and [string]$failedSchedulerDoctorCheck.detail -match "failed") "Factory doctor did not diagnose the failed scheduler."
@@ -846,6 +986,35 @@ try {
     $schedulerFailureCleanup.active = $false
     $schedulerFailureCleanup.paused = $false
     Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerFailureCleanup
+
+    $schedulerOneShotMarker = Join-Path $testRoot "scheduler-fail-once.marker"
+    [IO.File]::WriteAllText($schedulerOneShotMarker, "fail once", (New-Object Text.UTF8Encoding($false)))
+    $env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER = $schedulerOneShotMarker
+    try {
+        $schedulerRecoveryStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
+        Assert-True ([bool]$schedulerRecoveryStart.started) "One-shot scheduler recovery fixture did not start."
+        $schedulerTransientFailure = $null
+        $schedulerTransientDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $schedulerTransientFailure = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        } while ([string]$schedulerTransientFailure.status -ne "failed" -and [DateTime]::UtcNow -lt $schedulerTransientDeadline)
+        Assert-Equal "failed" ([string]$schedulerTransientFailure.status) "The one-shot scheduler failure was not observed."
+        $transientFailureAt = [string]$schedulerTransientFailure.lastFailureAt
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action resume -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        $schedulerRecovered = $null
+        $schedulerRecoveryDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $schedulerRecovered = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        } while ([string]$schedulerRecovered.status -ne "running" -and [DateTime]::UtcNow -lt $schedulerRecoveryDeadline)
+        Assert-Equal "running" ([string]$schedulerRecovered.status) "Scheduler remained failed after a successful retry tick."
+        Assert-True (-not [string]$schedulerRecovered.lastError) "Scheduler retained a transient error after recovery."
+        Assert-Equal $transientFailureAt ([string]$schedulerRecovered.lastFailureAt) "Scheduler rewrote or discarded the original failure time after recovery."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    }
 
     $schedulerBusyState = Read-FactoryJson -Path $context.statePath
     $schedulerBusyTask = New-FactoryTestTask -Id "scheduler-busy-task" -Title "Long scheduler integration" -Now (Get-FactoryUtcTimestamp)
@@ -919,6 +1088,36 @@ try {
     Assert-True ([bool]$waitReady.signaled -and -not [bool]$waitReady.timedOut) "Factory wait did not return when review became actionable."
     $waitReadyAction = @($waitReady.actions)[0]
     Assert-Equal "awaiting-review" ([string]$waitReadyAction.kind) "Factory wait returned the wrong operator event."
+    $reviewedWaitState = Read-FactoryJson -Path $context.statePath
+    $reviewedWaitTask = Get-FactoryTask -State $reviewedWaitState -TaskId "wait-for-worker-close"
+    $reviewedWaitTask.review = [pscustomobject]@{
+        verdict = "approved"; commit = "reviewed-wait-commit"; summary = "ready"
+        integrationPlan = [pscustomobject]@{ planHash = "reviewed-wait-plan" }
+    }
+    $reviewedWaitTask.commit = "reviewed-wait-commit"
+    $reviewedWaitTask.approval = $null
+    $reviewedWaitTask.updatedAt = Get-FactoryUtcTimestamp
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $reviewedWaitState
+    $reviewedEvents = @(Get-FactoryOperatorActionEvents -State $reviewedWaitState -Config (Read-FactoryJson -Path $context.configPath))
+    $approvalEvent = @($reviewedEvents | Where-Object { [string]$_.taskId -eq "wait-for-worker-close" })[0]
+    Assert-Equal "awaiting-approval" ([string]$approvalEvent.kind) "Factory did not distinguish completed review from review work."
+    Assert-Equal "human" ([string]$approvalEvent.audience) "Reviewed task was assigned to the orchestrator instead of the human operator."
+    Assert-Equal "factory go wait-for-worker-close" ([string]$approvalEvent.command) "Reviewed task did not name the operator go command."
+    $waitAfterReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
+    Assert-True (-not [bool]$waitAfterReview.signaled -and [bool]$waitAfterReview.timedOut) "Factory wait woke the orchestrator for a task already waiting on human go."
+    $waitIncludingApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100 -IncludeOperatorApproval) | ConvertFrom-Json
+    Assert-Equal "awaiting-approval" ([string]@($waitIncludingApproval.actions)[0].kind) "Explicit human-approval wait did not expose the go decision."
+
+    $liveFailedSchedulerState = Read-FactoryJson -Path $context.statePath
+    $liveFailedSchedulerState.tasks = @($liveFailedSchedulerState.tasks) + @(New-FactoryTestTask -Id "live-retrying-scheduler-task" -Title "Queued during scheduler retry" -Now (Get-FactoryUtcTimestamp))
+    $liveFailedSchedulerState.scheduler.status = "failed"
+    $liveFailedSchedulerState.scheduler.lastError = "transient tick error"
+    $liveFailedSchedulerState.scheduler.lastFailureAt = Get-FactoryUtcTimestamp
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $liveFailedSchedulerState
+    $liveFailedActions = @(Get-FactoryOperatorActionEvents -State $liveFailedSchedulerState -Config (Read-FactoryJson -Path $context.configPath))
+    Assert-Equal 0 @($liveFailedActions | Where-Object { [string]$_.kind -eq "scheduler" }).Count "A live retrying scheduler was reported as dead."
     $waitCleanup = Read-FactoryJson -Path $context.statePath
     $waitCleanup.tasks = @()
     $waitCleanup.active = $false
@@ -1258,6 +1457,7 @@ try {
     Assert-True ($cliSource.Contains('"preview"') -and $cliSource.Contains('[switch]$NoOpen')) "Factory CLI does not expose native browser preview."
     Assert-True ($cliSource.Contains('"rotate"')) "Factory CLI does not expose native orchestrator rotation."
     Assert-True ($cliSource.Contains('"wait"') -and $cliSource.Contains('"retry"')) "Factory CLI does not expose native wait and retry commands."
+    Assert-True ($cliSource.Contains('"runtime"')) "Factory CLI does not expose runtime safety diagnostics."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -1294,8 +1494,16 @@ try {
         runtime = "claude"; id = "closing-review"; sessionId = "closing-review-session"
         name = "factory-closing-review-cli-task"; state = "working"; lastSeenAt = $now
     }
+    $approvalCliTask = New-FactoryTestTask -Id "approval-cli-task" -Title "Reviewed task waiting for operator go" -Now $now
+    $approvalCliTask.status = "awaiting-review"
+    $approvalCliTask.commit = "abcdef1234567890abcdef1234567890abcdef12"
+    $approvalCliTask.review = [pscustomobject]@{
+        verdict = "approved"; commit = $approvalCliTask.commit; summary = "Approved"
+        integrationPlan = [pscustomobject]@{ planHash = "approval-cli-plan" }
+    }
+    $approvalCliTask.approval = $null
     $rejectCliTask = New-FactoryTestTask -Id "reject-cli-task" -Title "Disposable CLI task without artifacts" -Now $now
-    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $closingReviewCliTask, $doneCliTask, $rejectCliTask)
+    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $closingReviewCliTask, $approvalCliTask, $doneCliTask, $rejectCliTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
 
     $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
@@ -1304,6 +1512,7 @@ try {
     Assert-True ($cliHelp.Contains("factory go <task-id> [--direct]")) "Factory CLI help omits direct approval."
     Assert-True ($cliHelp.Contains("factory rotate [status|cancel]")) "Factory CLI help omits orchestrator rotation."
     Assert-True ($cliHelp.Contains("factory wait [timeout-seconds]") -and $cliHelp.Contains("factory retry <task-id>")) "Factory CLI help omits native wait or retry."
+    Assert-True ($cliHelp.Contains("factory runtime [status|migrate]")) "Factory CLI help omits runtime safety and migration."
     $cliGoHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help go | Out-String)
     Assert-True ($cliGoHelp.Contains("skips independent AI code review")) "Factory go help hides direct approval semantics."
     $cliRotateHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help rotate | Out-String)
@@ -1369,6 +1578,7 @@ try {
     Assert-True ($cliStatus.Contains("coding slots") -and $cliStatus.Contains("test lane free")) "Factory CLI status does not expose both coding capacity and the serialized test lane."
     Assert-True ($cliStatus.Contains("WAITING") -and $cliStatus.Contains("FINISHING") -and $cliStatus.Contains("closing-review-cli-task")) "Factory status presented an awaiting-review task with a live worker as actionable review."
     Assert-True (-not $cliStatus.Contains("/factory review closing-review-cli-task")) "Factory status offered review before the worker session closed."
+    Assert-True ($cliStatus.Contains("GO") -and $cliStatus.Contains("approval-cli-task") -and $cliStatus.Contains("approved review is waiting for your go decision")) "Factory status did not distinguish human go from AI review."
 
     $previousDirectPreflightErrorAction = $ErrorActionPreference
     try {
@@ -1427,6 +1637,10 @@ try {
 
     $cliPaths = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath paths -Repository $repository | Out-String)
     Assert-True ($cliPaths.Contains([string]$context.configPath)) "Factory CLI paths omitted the private config path."
+    Assert-True ($cliPaths.Contains("factory runtime")) "Factory CLI paths hid runtime placement diagnostics."
+    $cliRuntime = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath runtime status -Repository $repository | Out-String)
+    Assert-True ($cliRuntime.Contains([string]$context.projectData) -and $cliRuntime.Contains("Resolution: explicit")) "Factory runtime diagnostics omitted active placement or resolution."
+    Assert-True ($cliRuntime.Contains("Project mapping is automatic")) "Factory runtime diagnostics implied manual project-directory mapping."
     $cliScheduler = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath scheduler status -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
     Assert-True ($cliScheduler.Contains("Native scheduler: stopped")) "Factory CLI did not render native scheduler status."
     $cliPurgePreview = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath purge -Repository $repository | Out-String)
@@ -1440,7 +1654,7 @@ try {
         try {
             $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
-            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "rotate" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview" -and $commandCompletion -contains "wait" -and $commandCompletion -contains "retry") "PowerShell did not complete the unified native commands."
+            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "rotate" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview" -and $commandCompletion -contains "wait" -and $commandCompletion -contains "retry" -and $commandCompletion -contains "runtime") "PowerShell did not complete the unified native commands."
             Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
@@ -3131,7 +3345,9 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_DB_ENV_FILE -ErrorAction SilentlyContinue

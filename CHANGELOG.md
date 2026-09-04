@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+
+- Move fresh factory runtime outside Git worktrees by default while preserving
+  automatic legacy discovery; add guarded, SHA-256-verified `factory runtime
+  migrate`, placement diagnostics, repository cleanup instructions, scoped
+  cleanup path guards, and state-mutex owner/slow-hold telemetry.
+- Recover scheduler display after transient tick failures, avoid treating a live
+  retrying scheduler as dead, distinguish AI `REVIEW` from human `GO` in status
+  and native waits, reclaim a test lane immediately when its holder processes
+  are proven dead, and persist removal of phantom waiter PIDs.
 - Added launch-liveness recovery and a native operator signal. Sessionless
   `starting`/`planning` tasks no longer consume worker capacity, launches carry
   ownership timestamps and fail after a configurable timeout, and native

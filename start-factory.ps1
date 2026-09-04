@@ -51,11 +51,7 @@ function Start-FactoryLauncherScheduler {
         Write-Warning "Native scheduler did not start: $($schedulerResult.output)"
     }
 }
-$env:CLAUDE_FACTORY_HOME = if ($RuntimeHome) {
-    [IO.Path]::GetFullPath($RuntimeHome)
-} else {
-    Join-Path $pluginRoot "runtime"
-}
+if ($RuntimeHome) { $env:CLAUDE_FACTORY_HOME = [IO.Path]::GetFullPath($RuntimeHome) }
 if ($Model) {
     $env:CLAUDE_FACTORY_MODEL = $Model
 }

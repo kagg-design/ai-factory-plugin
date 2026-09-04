@@ -102,6 +102,8 @@ factory concurrency 5
 factory doctor
 factory completion status
 factory paths
+factory runtime
+factory runtime migrate
 factory config edit
 factory scheduler status
 factory rotate
@@ -556,6 +558,9 @@ only while they have a recorded non-terminal worker session. A sessionless
 launch therefore cannot permanently occupy a slot. `awaiting-review` continues
 to consume its slot only while the worker session is still closing; afterward
 it becomes an operator review action.
+After an approved review is recorded for the current commit, status labels the
+task `GO` instead of `REVIEW`: AI review is complete and only the human
+operator's `factory go <id>` decision remains.
 Targeted tests may run during coding without the test lease. A worker's final
 full suite, review full suites, and native publication checks serialize through
 the one test lane. Publication waiters outrank verification/review waiters.
@@ -635,17 +640,22 @@ that continues to refresh while the child process runs. `factory start` and
 is in flight. Every tick is appended as one JSON line to
 `scheduler.stdout.log`; failures and unexpected process loss go to
 `scheduler.stderr.log`. Both paths are shown by `factory scheduler status`.
-If runnable work exists while the scheduler is stopped or failed, `factory
-status` places the scheduler under `NEEDS YOUR ACTION` instead of describing it
-as sleeping. The card includes the saved reason, detection time, error log, and
+If runnable work exists while the scheduler process is stopped or dead,
+`factory status` places it under `NEEDS YOUR ACTION` instead of describing it as
+sleeping. The card includes the saved reason, detection time, error log, and
 exact recovery command; `factory doctor` reports the same failure and log path.
+A live scheduler with a transient failed tick remains visible as `failed (...;
+retrying)` but does not request a second scheduler or wake the orchestrator. A
+successful retry clears `lastError` while retaining the original failure time.
 
 `factory wait` is the native, log-free notification boundary. It reads the
 atomic state snapshot until input, a closed-session review, a blocker, a
 failure, a stale sessionless launch, or a dead scheduler with runnable work
 needs the operator. An optional timeout returns cleanly when nothing changes.
 It deliberately does not signal for `awaiting-review` while that task's worker
-session is still live.
+session remains live. It also does not wake the orchestrator after an approved
+review is already recorded; that human-only `go` decision remains visible in
+`factory status`.
 
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,
@@ -949,10 +959,10 @@ Open its config:
 factory config edit -Repository D:\Projects\MotiveHR
 ```
 
-Private data is stored under:
+Fresh installations store private data outside every Git checkout under:
 
 ```text
-<plugin>\runtime\projects\<repository-name>-<path-hash>\
+%LOCALAPPDATA%\ClaudeFactory\projects\<repository-name>-<path-hash>\
 ```
 
 It includes config, queue state, background-session metadata, captured Stop
@@ -960,6 +970,26 @@ events, transcript paths, scheduler identity/heartbeat, and resolved test
 commands. Older config is migrated to v7 and state to v9 by adding missing
 fields; repository-specific settings are preserved. Test database isolation
 remains disabled unless explicitly enabled per repository.
+
+Existing `<plugin>\runtime\projects\...` data is detected automatically and
+continues to be used, so upgrading cannot silently open an empty factory. Run
+`factory runtime` to see the active resolution, exact paths, stored size,
+current state-mutex owner, and `factory-locks.jsonl` diagnostics. Slow lock
+holds and 30-second acquisition timeouts record the owning PID, caller, wait,
+and hold duration so a future timeout can be attributed instead of guessed.
+
+`factory runtime migrate` is an explicit offline migration. It refuses to run
+while the orchestrator, scheduler, a worker/publication task, preview, or
+test-lane holder is live. It copies the current project runtime to LocalAppData, compares every file
+by relative path, length, and SHA-256, writes a migration receipt, and retains
+the legacy source copy. Future resolution prefers the verified external copy;
+project mapping remains automatic from the canonical repository path. An
+explicit `CLAUDE_FACTORY_HOME` continues to override automatic selection.
+
+Ignored files are not protected from `git clean -fdx` or `git clean -fdX`.
+Repository safety instructions therefore prohibit those commands, while the
+external default makes Git cleanup structurally unable to reach active runtime
+state.
 
 The root `.ps1` files remain implementation entry points for compatibility and
 testing. Normal operation uses `factory start`, `factory paths`, `factory
@@ -977,7 +1007,8 @@ The suite uses a temporary local Git remote and a fake Claude CLI. It does not
 call a model, Asana, or a real project remote. It verifies external worktree
 creation, background-session metadata, Stop-hook capture, the review gate,
 exact-SHA approval, linked-worktree project identity, dynamic concurrency,
-scheduler failure/busy recovery, and bounded pipeline-output persistence.
+scheduler failure/busy recovery, early dead-lease reclaim, runtime migration,
+mutex diagnostics, and bounded pipeline-output persistence.
 
 ## Safe cleanup
 

@@ -66,11 +66,13 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory cleanup <id>    remove published artifacts
   !factory concurrency [N] show or change worker limit
   !factory rotate          prepare a fresh orchestrator with a durable handoff
+  !factory runtime         inspect or safely migrate private runtime storage
   !factory doctor          deterministic diagnostics
 
 PowerShell entry point (outside Claude)
   factory start [-Agent]   open/reuse orchestrator + scheduler; select workers
   factory paths|config     inspect private project runtime
+  factory runtime          show placement; migrate only while fully stopped
   factory scheduler        native process status/control
 
 Add work
@@ -345,9 +347,11 @@ Default `status` rules:
    coding slots/concurrency, the exclusive test-lane holder and queued phases,
    scheduler, and paused/running. Explain an absent
    scheduler in plain language only when no runnable work exists. If runnable
-   work exists while the scheduler is stopped or failed, include the native
+   work exists while the scheduler process is stopped or dead, include the native
    scheduler problem under `NEEDS YOUR ACTION` with its saved reason, stderr log
-   path, failure time, and exact recovery command. A busy scheduler is healthy:
+   path, failure time, and exact recovery command. A live scheduler whose last
+   tick failed is retrying: show the failure but do not ask for another scheduler
+   and do not wake the orchestrator. A busy scheduler is healthy:
    show its activity and task, and never recommend starting or resuming another.
 
 The tree layout is mandatory and must follow this shape:
@@ -390,10 +394,15 @@ Choose `Next:` from the actual task data:
 - `awaiting-review` with a live non-terminal worker session: put it under
   `WAITING`, label it `FINISHING`, keep the session in coding capacity, and use
   `/factory chat <id>`; review is not actionable until the session closes.
-- `awaiting-review` with a closed/terminal session: `/factory review <id>`. Also show
-  `!factory go <id> --direct` as an alternative only when no existing review
-  says `changes-required` or `blocked`. If the task is known to be behind the
-  development branch, make `/factory sync <id>` primary and explain why.
+- `awaiting-review` with a closed/terminal session and no current approved
+  review: `/factory review <id>`. Also show `!factory go <id> --direct` as an
+  alternative only when no existing review says `changes-required` or
+  `blocked`. If the task is known to be behind the development branch, make
+  `/factory sync <id>` primary and explain why.
+- `awaiting-review` with a closed/terminal session, `review.commit` equal to the
+  current task commit, an `approved` verdict, and no approval: label it `GO`,
+  state that the approved review is waiting for the human operator, and make
+  `/factory go <id>` primary. This is not review work for the orchestrator.
 - `approved`, `integrating`, `production`: say the factory will continue; do
   not invent a user decision.
 - `held` with a validated commit/result: `/factory review <id>` or
@@ -770,7 +779,35 @@ tailing scheduler logs until input, a closed-session review, a blocker, a
 failure, a stale sessionless launch, or a dead scheduler with runnable work
 requires the operator. Omit the timeout (or use zero) to wait indefinitely.
 Do not treat `awaiting-review` as actionable while its worker session remains
-non-terminal.
+non-terminal. The default wait is an orchestrator boundary and also excludes a
+current approved review that is waiting only for the human operator's `go`.
+That decision remains visible as `GO` in `factory status`. Native callers that
+explicitly need human-decision notifications may use the script's
+`-IncludeOperatorApproval` switch.
+
+### `runtime [status|migrate]`
+
+Runtime placement and migration are deterministic native operations:
+
+```text
+!factory runtime
+!factory runtime migrate
+```
+
+Fresh projects store private state under
+`%LOCALAPPDATA%\ClaudeFactory\projects\<repository-name>-<path-hash>` so Git
+cleanup in the plugin checkout cannot reach it. Existing legacy
+`<plugin>\runtime\projects\...` data is detected automatically and keeps being
+used; upgrading must never make a live factory appear empty. `runtime status`
+prints the selected source and paths, stored size, current state-mutex owner,
+and the slow-lock/timeout log.
+
+Migration is explicit and offline. It refuses a live orchestrator, scheduler,
+worker or publication, preview, or test-lane holder. It copies to the external project
+directory, verifies every original file by relative path, length, and SHA-256,
+writes a receipt, and retains the legacy source. It never migrates or deletes a
+live runtime automatically. Repository mapping is derived from the canonical
+repository path; the operator does not maintain a project-directory map.
 
 ### `stop`
 
@@ -812,6 +849,18 @@ mutex/PID refusal and must not attempt a second tick while work is in flight.
 The scheduler writes JSONL tick/process records to `scheduler.stdout.log` and
 failure/process-loss records to `scheduler.stderr.log`; use the printed paths
 and `factory doctor` when runnable work is not moving.
+
+A failed tick sets the current `lastError` once and backs off normally. The
+next successful tick clears the current error and returns status to `running`
+without rewriting the historical failure timestamp. Process liveness, not a
+sticky saved `failed` label, determines whether status or wait requests manual
+scheduler recovery.
+
+The global state mutex writes its current owner to private runtime while held
+and appends slow waits/holds plus acquisition timeouts to
+`factory-locks.jsonl`. Use `factory runtime` to find both files. These records
+attribute lock contention; they are best-effort diagnostics and must not alter
+factory behavior.
 
 ### Troubleshooting worker result capture
 

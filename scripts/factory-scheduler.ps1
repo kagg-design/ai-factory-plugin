@@ -207,10 +207,10 @@ function Get-SchedulerStatusResult {
         "stopped"
     }
     $runnableTaskCount = @($state.tasks | Where-Object { [string]$_.status -in @("queued", "approved") }).Count
-    $actionRequired = $runnableTaskCount -gt 0 -and ([bool]$state.paused -or $operationalStatus -in @("stopped", "failed"))
+    $actionRequired = $runnableTaskCount -gt 0 -and ([bool]$state.paused -or -not $running)
     $problem = if ($runnableTaskCount -gt 0 -and [bool]$state.paused) {
         "Factory is paused with $runnableTaskCount runnable task(s); the scheduler will not launch or publish them. Run 'factory resume'."
-    } elseif ($runnableTaskCount -gt 0 -and $operationalStatus -in @("stopped", "failed")) {
+    } elseif ($runnableTaskCount -gt 0 -and -not $running) {
         "Scheduler is $operationalStatus with $runnableTaskCount runnable task(s); run 'factory resume' or inspect the scheduler error log."
     } else { $null }
     return [ordered]@{
@@ -321,6 +321,10 @@ function Invoke-SchedulerTick {
         }
 
         if ($Action -eq "run") { Set-SchedulerActivity -Activity reconciling -Since $tickStartedAt }
+        if ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -and (Test-Path -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER))) {
+            Remove-Item -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER) -Force
+            throw "Synthetic one-shot scheduler loop failure."
+        }
         if ($env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -eq "1") {
             throw "Synthetic scheduler loop failure."
         }
@@ -656,6 +660,7 @@ switch ($Action) {
             while (-not (Test-Path -LiteralPath $stopPath)) {
                 Remove-Item -LiteralPath $wakePath -Force -ErrorAction SilentlyContinue
                 $lastError = $null
+                $failureAt = $null
                 try {
                     $currentConfig = Read-FactoryJson -Path ([string]$context.configPath)
                     if ($null -ne $currentConfig.PSObject.Properties["nativeScheduler"] -and -not [bool]$currentConfig.nativeScheduler.enabled) {
@@ -665,20 +670,21 @@ switch ($Action) {
                     $tick = Invoke-SchedulerTick
                     if (@($tick.errors).Count -gt 0) {
                         $lastError = @($tick.errors) -join "; "
+                        $failureAt = Get-FactoryUtcTimestamp
                         $failureCount++
                     } else {
                         $failureCount = 0
                     }
                 } catch {
                     $lastError = $_.Exception.Message
+                    $failureAt = Get-FactoryUtcTimestamp
                     $failureCount++
                     Write-SchedulerLog -Stream stderr -Event "loop-error" -Values @{ pid = $PID; error = $lastError; failureCount = $failureCount }
                 }
-                Update-SchedulerState -Values @{
+                $schedulerValues = @{
                     status = if ($lastError) { "failed" } else { "running" }
                     heartbeatAt = Get-FactoryUtcTimestamp
                     lastError = $lastError
-                    lastFailureAt = if ($lastError) { Get-FactoryUtcTimestamp } else { $null }
                     failureCount = $failureCount
                     activity = "idle"
                     activityTaskId = $null
@@ -686,6 +692,8 @@ switch ($Action) {
                     activitySince = $null
                     activityHeartbeatAt = $null
                 }
+                if ($failureAt) { $schedulerValues.lastFailureAt = $failureAt }
+                Update-SchedulerState -Values $schedulerValues
                 $delay = if ($failureCount -gt 0) {
                     [Math]::Min($maximumBackoffSeconds, $IntervalSeconds * [Math]::Pow(2, [Math]::Min(5, $failureCount)))
                 } else { $IntervalSeconds }

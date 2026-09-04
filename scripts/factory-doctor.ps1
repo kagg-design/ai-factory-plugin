@@ -150,6 +150,19 @@ Add-DoctorCheck -Name "pluginManifest" -Passed $manifestOk -Detail $manifestDeta
 
 Add-DoctorCheck -Name "repositoryRoot" -Passed (Test-Path -LiteralPath $context.repositoryRoot) -Detail ([string]$context.repositoryRoot)
 Add-DoctorCheck -Name "runtimePath" -Passed (Test-Path -LiteralPath $context.projectData) -Detail ([string]$context.projectData)
+$runtimeInsidePlugin = (
+    (Test-FactorySamePath -Left ([string]$context.runtimeHome) -Right ([string]$context.pluginRoot)) -or
+    (Test-FactoryPathWithin -Path ([string]$context.runtimeHome) -Parent ([string]$context.pluginRoot))
+)
+Add-DoctorCheck `
+    -Name "runtimePlacement" `
+    -Passed (-not $runtimeInsidePlugin) `
+    -Severity "warning" `
+    -Detail $(if ($runtimeInsidePlugin) {
+        "runtime is inside the plugin checkout and ignored by Git; 'git clean -x' can erase it. Run 'factory runtime' before cleanup or migration."
+    } else {
+        "runtime is outside the plugin checkout: $([string]$context.runtimeHome)"
+    })
 Add-DoctorCheck -Name "stateJson" -Passed ($null -ne $state.tasks) -Detail "v$($state.version), $(@($state.tasks).Count) task(s)"
 $codingConcurrency = Get-FactoryCodingConcurrency -Config $config
 $codingConcurrencySource = Get-FactoryCodingConcurrencySource -Config $config

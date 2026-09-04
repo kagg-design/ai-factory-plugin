@@ -37,8 +37,13 @@ integration, and output. Apply these Codex adaptations:
 - `rework` is a queued redelivery, not text for the operator to paste into an
   old chat. `release` is the explicit stale-session escape hatch; use the
   canonical `task-action.ps1 -Action release` flow and never edit state JSON.
-- `factory wait` is the native notification boundary. It waits on atomic state,
-  not logs, and a review is actionable only after its worker session closes.
+- `factory wait` is the native orchestrator notification boundary. It waits on
+  atomic state, not logs; a review is actionable only after its worker session
+  closes, and a current approved review waiting only for the human operator's
+  `go` remains visible in status without waking the orchestrator again.
+- `factory runtime` shows the exact private-state placement and lock
+  diagnostics. `factory runtime migrate` is an explicit offline, verified,
+  copy-only move to LocalAppData; never migrate or delete live runtime state.
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.

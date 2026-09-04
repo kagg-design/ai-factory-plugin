@@ -20,12 +20,6 @@ $repoRoot = if ($mainWorktreeLine) {
     $currentWorktree
 }
 
-$runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
-    [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
-} else {
-    Join-Path $pluginRoot "runtime"
-}
-
 $normalized = $repoRoot.TrimEnd([IO.Path]::DirectorySeparatorChar).ToLowerInvariant()
 $sha = [System.Security.Cryptography.SHA256]::Create()
 try {
@@ -39,6 +33,29 @@ $repoName = Split-Path $repoRoot -Leaf
 $safeRepoName = ($repoName -replace '[^A-Za-z0-9._-]', '-').Trim('-')
 if (-not $safeRepoName) { $safeRepoName = "repository" }
 $projectKey = "$safeRepoName-$hash"
+$legacyRuntimeHome = [IO.Path]::GetFullPath((Join-Path $pluginRoot "runtime"))
+$recommendedRuntimeHome = if ($env:LOCALAPPDATA) {
+    [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ClaudeFactory"))
+} elseif ($env:USERPROFILE) {
+    [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE "AppData\Local\ClaudeFactory"))
+} else {
+    $legacyRuntimeHome
+}
+$legacyProjectData = Join-Path (Join-Path $legacyRuntimeHome "projects") $projectKey
+$recommendedProjectData = Join-Path (Join-Path $recommendedRuntimeHome "projects") $projectKey
+$runtimeSource = "external-default"
+$runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
+    $runtimeSource = "explicit"
+    [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
+} elseif (Test-Path -LiteralPath $recommendedProjectData -PathType Container) {
+    $runtimeSource = "external-existing"
+    $recommendedRuntimeHome
+} elseif (Test-Path -LiteralPath $legacyProjectData -PathType Container) {
+    $runtimeSource = "legacy-existing"
+    $legacyRuntimeHome
+} else {
+    $recommendedRuntimeHome
+}
 $projectData = Join-Path (Join-Path $runtimeHome "projects") $projectKey
 $configPath = Join-Path $projectData "config.json"
 $statePath = Join-Path $projectData "state.json"
@@ -123,6 +140,11 @@ if ($Initialize) {
 [ordered]@{
     pluginRoot = $pluginRoot
     runtimeHome = $runtimeHome
+    runtimeSource = $runtimeSource
+    legacyRuntimeHome = $legacyRuntimeHome
+    legacyProjectData = $legacyProjectData
+    recommendedRuntimeHome = $recommendedRuntimeHome
+    recommendedProjectData = $recommendedProjectData
     repositoryRoot = $repoRoot
     currentWorktree = $currentWorktree
     projectKey = $projectKey

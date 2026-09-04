@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [int]$TimeoutSeconds = 0,
-    [int]$PollMilliseconds = 1000
+    [int]$PollMilliseconds = 1000,
+    [switch]$IncludeOperatorApproval
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,7 +18,10 @@ $deadline = if ($TimeoutSeconds -gt 0) { [DateTime]::UtcNow.AddSeconds($TimeoutS
 while ($true) {
     $state = Read-FactoryJson -Path ([string]$context.statePath)
     $config = Read-FactoryJson -Path ([string]$context.configPath)
-    $actions = @(Get-FactoryOperatorActionEvents -State $state -Config $config)
+    $actions = @(
+        Get-FactoryOperatorActionEvents -State $state -Config $config |
+            Where-Object { $IncludeOperatorApproval -or [string]$_.audience -ne "human" }
+    )
     if ($actions.Count -gt 0) {
         [ordered]@{
             signaled = $true

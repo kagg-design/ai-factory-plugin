@@ -149,7 +149,7 @@ Deterministic operations also have a native fast path:
 !factory completion [status|enable]
 ```
 
-Outside Claude, `factory start`, `factory paths`, `factory config`, and
+Outside Claude, `factory start`, `factory paths`, `factory runtime`, `factory config`, and
 `factory scheduler` replace the old root-script commands. The `.ps1` files
 remain internal implementations and compatibility entry points.
 
@@ -268,10 +268,12 @@ heartbeat, last tick, current activity/task, last error, last exit reason, and
 the two log paths. Long reconciliation, launch, and publication work is shown as
 `busy` with its start time while the heartbeat continues to refresh. `factory
 start` and `factory resume` refuse duplicate ownership while that work is in
-flight. If runnable work exists and the scheduler is stopped or failed, status
-adds a scheduler card to `NEEDS YOUR ACTION`; `doctor` reports the failure and
-stderr path. The status card includes the failure time and exact recovery
-command. The JSONL stdout log contains one entry per tick plus process
+flight. If runnable work exists and the scheduler process is stopped or dead,
+status adds a scheduler card to `NEEDS YOUR ACTION`; `doctor` reports the
+failure and stderr path. A live scheduler after a failed tick remains visible
+as retrying but does not request manual recovery; its next successful tick
+clears `lastError`. The status card for a dead process includes the failure time
+and exact recovery command. The JSONL stdout log contains one entry per tick plus process
 start/exit records, while stderr records tick failures and unexpected process
 loss. No Claude cron job is created.
 
@@ -279,7 +281,9 @@ Use `factory wait [timeout-seconds]` when a shell or orchestrator should sleep
 until Factory needs a decision. It watches atomic state rather than logs and
 returns for input, a closed-session review, blockers, failures, abandoned
 launches, or a dead scheduler with runnable work. `awaiting-review` remains
-waiting while its worker session is still live.
+waiting while its worker session is still live. When the current commit already
+has an approved review, status shows `GO` and `factory wait` does not wake the AI
+orchestrator again; the human operator's `factory go <id>` decision remains.
 
 ## 5. IDs shown in status output
 
@@ -828,6 +832,7 @@ refreshes the file without duplicating the pointer or attempt.
 /factory doctor
 factory scheduler status
 factory wait [timeout-seconds]
+factory runtime [status|migrate]
 ```
 
 - `status` reconciles sessions and summarizes the queue.
@@ -846,7 +851,12 @@ factory wait [timeout-seconds]
   ownership, reports busy activity and its live heartbeat, and prints the tick
   and error log paths without calling AI.
 - `factory wait` blocks without AI or log tailing until an operator action is
-  ready; a timeout is optional and zero/omitted means wait indefinitely.
+  ready; a timeout is optional and zero/omitted means wait indefinitely. It
+  excludes a reviewed task whose only remaining action is human `go`.
+- `factory runtime` shows active/legacy paths, placement risk, stored size, and
+  mutex diagnostics. `runtime migrate` requires the orchestrator and scheduler
+  to be stopped, performs a verified copy-only migration to LocalAppData, and
+  retains the source tree.
 
 A worker session reports `agentResolution: plugin` when Claude resolved the
 session-only plugin agent directly. `inline-fallback` means the launcher safely
@@ -942,11 +952,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
 ```
 
 Every holder heartbeats, and status reports both the holder and heartbeat PIDs.
-A heartbeat older than the configured 30-minute default TTL is reclaimable only
-after the holder PID is gone. Timestamp parsing is invariant and
-culture-independent; an unreadable timestamp is treated as fresh and reported
-by `factory doctor` instead of being reclaimed. A heartbeat process that dies
-or never advances is also a doctor warning, with failures in the private
+A holder is reclaimed immediately when both its owner and recorded heartbeat
+processes are proven dead, even if its last heartbeat is younger than the
+configured 30-minute TTL. A live owner always wins, and a live heartbeat keeps
+the lane conservative. Timestamp parsing is invariant and culture-independent;
+an unreadable timestamp remains fail-closed and is reported by `factory doctor`
+instead of being reclaimed. `status` also removes dead waiter PIDs from both its
+output and the persisted queue. A heartbeat process that dies or never advances
+is a doctor warning, with failures in the private
 `test-lease.heartbeat.log`. Reclaim writes the abandoned task and phase to
 `test-lease.reclaims.jsonl`. Normal code releases from `finally`.
 
@@ -965,6 +978,9 @@ logs and audits.
 - Do not push or merge from a worker branch.
 - Do not run `factory purge -Yes -Force` without reading its preview; it can
   remove uncommitted work.
+- Never run `git clean -x`, `git clean -X`, or an equivalent ignored-file
+  cleanup while active runtime is inside this plugin checkout. Inspect placement
+  with `factory runtime` and migrate it offline first.
 - Do not run `go` before reading `/factory review`.
 
 ## 16. Daily checklist

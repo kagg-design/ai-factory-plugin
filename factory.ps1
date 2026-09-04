@@ -3,7 +3,7 @@ param(
     [Parameter(Position = 0)]
     [ValidateSet(
         "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
-        "cleanup", "concurrency", "completion", "start", "rotate", "paths", "config",
+        "cleanup", "concurrency", "completion", "start", "rotate", "paths", "runtime", "config",
         "scheduler", "tick", "pause", "resume", "stop", "wait", "purge"
     )]
     [string]$Command = "help",
@@ -25,7 +25,7 @@ param(
             "help" {
                 @(
                     "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
-                    "cleanup", "concurrency", "completion", "start", "paths",
+                    "cleanup", "concurrency", "completion", "start", "paths", "runtime",
                     "rotate", "config", "scheduler", "tick", "pause", "resume", "stop", "wait",
                     "purge", "help"
                 )
@@ -40,6 +40,7 @@ param(
             }
             "completion" { "status", "enable" }
             "config" { "path", "edit" }
+            "runtime" { "status", "migrate" }
             "scheduler" { "status", "start", "stop", "tick" }
             "rotate" { "status", "cancel" }
             "preview" { "status", "stop" }
@@ -68,11 +69,6 @@ param(
             } else {
                 [IO.Path]::GetFullPath($currentWorktree)
             }
-            $runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
-                [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
-            } else {
-                Join-Path $pluginRoot "runtime"
-            }
             $normalized = $repositoryRoot.TrimEnd([IO.Path]::DirectorySeparatorChar).ToLowerInvariant()
             $algorithm = [Security.Cryptography.SHA256]::Create()
             try {
@@ -83,6 +79,27 @@ param(
             }
             $safeRepositoryName = ((Split-Path $repositoryRoot -Leaf) -replace '[^A-Za-z0-9._-]', '-').Trim('-')
             if (-not $safeRepositoryName) { $safeRepositoryName = "repository" }
+            $runtimeHome = if ($env:CLAUDE_FACTORY_HOME) {
+                [IO.Path]::GetFullPath($env:CLAUDE_FACTORY_HOME)
+            } else {
+                $legacyRuntimeHome = [IO.Path]::GetFullPath((Join-Path $pluginRoot "runtime"))
+                $recommendedRuntimeHome = if ($env:LOCALAPPDATA) {
+                    [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "ClaudeFactory"))
+                } elseif ($env:USERPROFILE) {
+                    [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE "AppData\Local\ClaudeFactory"))
+                } else {
+                    $legacyRuntimeHome
+                }
+                $legacyProjectData = Join-Path (Join-Path $legacyRuntimeHome "projects") "$safeRepositoryName-$hash"
+                $recommendedProjectData = Join-Path (Join-Path $recommendedRuntimeHome "projects") "$safeRepositoryName-$hash"
+                if (Test-Path -LiteralPath $recommendedProjectData -PathType Container) {
+                    $recommendedRuntimeHome
+                } elseif (Test-Path -LiteralPath $legacyProjectData -PathType Container) {
+                    $legacyRuntimeHome
+                } else {
+                    $recommendedRuntimeHome
+                }
+            }
             $statePath = Join-Path (Join-Path (Join-Path $runtimeHome "projects") "$safeRepositoryName-$hash") "state.json"
             if (-not (Test-Path -LiteralPath $statePath)) { return }
             $state = [IO.File]::ReadAllText($statePath, (New-Object Text.UTF8Encoding($false))) | ConvertFrom-Json

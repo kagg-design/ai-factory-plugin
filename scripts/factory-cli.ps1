@@ -210,6 +210,9 @@ function Get-CliEffectiveStatus {
     if ($status -eq "awaiting-review" -and (Test-FactoryTaskHasActiveSession -Task $Task)) {
         return "review-session-active"
     }
+    if ($status -eq "awaiting-review" -and (Test-FactoryTaskHasCurrentApprovedReview -Task $Task)) {
+        return "awaiting-approval"
+    }
     return $status
 }
 
@@ -272,6 +275,7 @@ function Get-CliStateText {
         "syncing" { "rebased result needs validation" }
         "awaiting-review" { "validated commit is ready for review" }
         "review-session-active" { "validated result captured; worker session is still closing" }
+        "awaiting-approval" { "approved review is waiting for your go decision" }
         "approved" { "approved commit is queued for integration" }
         "integrating" { "integration into development is running" }
         "production" { "production promotion is running" }
@@ -292,6 +296,7 @@ function Get-CliStateLabel {
     $label = switch ($Status) {
         "awaiting-review" { "REVIEW" }
         "review-session-active" { "FINISHING" }
+        "awaiting-approval" { "GO" }
         "awaiting-input" { "INPUT" }
         "syncing" { "SYNC" }
         "integrating" { "INTEGRATING" }
@@ -305,7 +310,7 @@ function Get-CliStateLabel {
 function Get-CliGroup {
     param([string]$Status)
 
-    if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "held", "rejected")) { return "Needs your action" }
+    if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "awaiting-approval", "held", "rejected")) { return "Needs your action" }
     if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production")) { return "Working" }
     if ($Status -in @("queued", "review-session-active")) { return "Waiting" }
     if ($Status -in @("blocked", "failed", "session-blocked")) { return "Problems" }
@@ -429,7 +434,7 @@ function Add-CliTaskTree {
     if ($effectiveStatus -eq "session-blocked") {
         $details.Add("State: worker session blocked for $(Format-CliDuration -Seconds (Get-CliBlockedSessionAge -Task $Task)); task state is $status")
     } else {
-        $details.Add("State: $(Get-CliStateText -Status $status)")
+        $details.Add("State: $(Get-CliStateText -Status $effectiveStatus)")
     }
     $reason = Get-CliTaskReason -Task $Task
     if ($reason) { $details.Add("Reason: $(Get-CliShortSummary -Value $reason -MaximumLength 260)") }
@@ -526,6 +531,7 @@ function Write-CliStatus {
     $schedulerTaskTitle = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activityTaskTitle")
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
+    $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $schedulerState
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
     $scheduler = if ($paused -and $schedulerStatus -in @("running", "busy")) {
@@ -545,7 +551,7 @@ function Write-CliStatus {
     } else {
         "native stopped"
     }
-    $schedulerProblem = $runnable -gt 0 -and ($paused -or $schedulerStatus -in @("stopped", "failed"))
+    $schedulerProblem = $runnable -gt 0 -and ($paused -or -not $schedulerAlive)
     $projectName = Split-Path ([string]$Context.repositoryRoot) -Leaf
 
     $lines = New-Object Collections.Generic.List[string]
@@ -1144,7 +1150,83 @@ function Write-CliPaths {
     )) {
         Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) $($item.Label): $([string]$item.Value)"
     }
-    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Runtime is private and outside the target repository."
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Inspect runtime placement and cleanup risk: factory runtime"
+}
+
+function Write-CliRuntime {
+    param($Context, [string]$Action)
+
+    $runtimeAction = if ($Action) { $Action.ToLowerInvariant() } else { "status" }
+    if ($runtimeAction -notin @("status", "migrate")) { throw "Unknown runtime action '$Action'. Use: factory runtime [status|migrate]" }
+    if ($runtimeAction -eq "migrate") {
+        $result = Invoke-CliJsonScript -ScriptName "migrate-runtime.ps1" -Arguments @(
+            "-Repository", [string]$Context.repositoryRoot,
+            "-ClaudeCommand", $ClaudeCommand
+        )
+        if ([bool](Get-CliProperty -InputObject $result -Name "alreadyExternal" -Default $false)) {
+            Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory runtime already external $($script:Tree.Horizontal) $([string]$Context.projectKey)"
+            Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Location: $([string]$result.destination)"
+            Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Nothing was copied or removed."
+            return
+        }
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory runtime migrated $($script:Tree.Horizontal) $([string]$result.projectKey)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Verified: $([int]$result.files) file(s), $([long]$result.bytes) byte(s)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Active copy: $([string]$result.destination)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Legacy copy retained: $([string]$result.source)"
+        if ([string]$result.warning) { Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Warning: $([string]$result.warning)" }
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Start the factory again after verifying: factory runtime"
+        return
+    }
+
+    $runtimeHome = [IO.Path]::GetFullPath([string]$Context.runtimeHome).TrimEnd('\', '/')
+    $pluginRootPath = [IO.Path]::GetFullPath([string]$Context.pluginRoot).TrimEnd('\', '/')
+    $pluginPrefix = $pluginRootPath + [IO.Path]::DirectorySeparatorChar
+    $insidePluginCheckout = (
+        $runtimeHome.Equals($pluginRootPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $runtimeHome.StartsWith($pluginPrefix, [StringComparison]::OrdinalIgnoreCase)
+    )
+    $bytes = 0L
+    $files = 0
+    if (Test-Path -LiteralPath ([string]$Context.projectData) -PathType Container) {
+        foreach ($item in @(Get-ChildItem -LiteralPath ([string]$Context.projectData) -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+            $bytes += [long]$item.Length
+            $files++
+        }
+    }
+    $size = if ($bytes -ge 1GB) { "{0:N2} GiB" -f ($bytes / 1GB) } elseif ($bytes -ge 1MB) { "{0:N1} MiB" -f ($bytes / 1MB) } elseif ($bytes -ge 1KB) { "{0:N1} KiB" -f ($bytes / 1KB) } else { "$bytes bytes" }
+    $ownerPath = Join-Path ([string]$Context.projectData) "factory-lock-owner.json"
+    $lockLogPath = Join-Path ([string]$Context.projectData) "factory-locks.jsonl"
+    $ownerText = "none"
+    if (Test-Path -LiteralPath $ownerPath -PathType Leaf) {
+        try {
+            $owner = Read-FactoryJson -Path $ownerPath
+            $ownerLiveness = if (Test-FactoryRecordedProcess -ProcessRecord $owner) { "live" } else { "stale record; process is not live" }
+            $ownerText = "PID $([int]$owner.pid), $([string]$owner.caller), since $([string]$owner.acquiredAt) ($ownerLiveness)"
+        } catch {
+            $ownerText = "unreadable: $($_.Exception.Message)"
+        }
+    }
+    $externalHome = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "ClaudeFactory" } else { "an external non-repository directory" }
+
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory runtime $($script:Tree.Horizontal) $([string]$Context.projectKey)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Home: $runtimeHome"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resolution: $([string]$Context.runtimeSource)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Project data: $([string]$Context.projectData)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Stored: $files file(s), $size"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$Context.statePath)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Current state-lock owner: $ownerText"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Slow lock/timeout log: $lockLogPath"
+    if ($insidePluginCheckout) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Risk: runtime is inside the plugin checkout and ignored by Git; git clean -x can erase it."
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Recommended external home: $externalHome"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) No data was moved. Stop and back up the factory before changing CLAUDE_FACTORY_HOME."
+    } else {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Placement: outside the plugin checkout."
+        if (Test-Path -LiteralPath ([string]$Context.legacyProjectData) -PathType Container) {
+            Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Retained legacy copy: $([string]$Context.legacyProjectData)"
+        }
+    }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Project mapping is automatic from the canonical repository path; no manual project-directory mapping is required."
 }
 
 function Write-CliPreview {
@@ -1437,6 +1519,7 @@ function Write-CliHelp {
             "  factory doctor",
             "  factory completion [status|enable]",
             "  factory paths",
+            "  factory runtime [status|migrate]",
             "  factory config [path|edit]",
             "  factory scheduler [status|start|stop|tick]",
             "  factory wait [timeout-seconds]",
@@ -1581,6 +1664,14 @@ function Write-CliHelp {
                 "Shows the repository, private config/state/session paths, and external worktree root."
             ) | Write-Output
         }
+        "runtime" {
+            @(
+                "factory runtime [status|migrate]",
+                "Shows the exact private runtime home/project path, size, current mutex owner, and slow-lock log.",
+                "migrate requires an exited orchestrator, stopped scheduler, no live workers or publication, and a free test lane.",
+                "It copies and SHA-256 verifies the project runtime under LocalAppData, switches automatic resolution, and retains the legacy source copy."
+            ) | Write-Output
+        }
         "config" {
             @(
                 "factory config [path|edit]",
@@ -1696,6 +1787,12 @@ if ($normalizedCommand -eq "rotate") {
 if ($normalizedCommand -eq "paths") {
     if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "paths does not accept arguments." }
     Write-CliPaths -Context $context
+    exit 0
+}
+
+if ($normalizedCommand -eq "runtime") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "runtime accepts only status or migrate." }
+    Write-CliRuntime -Context $context -Action $Target
     exit 0
 }
 

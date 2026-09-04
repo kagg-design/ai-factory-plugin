@@ -130,9 +130,19 @@ function Reclaim-StaleTestLease {
     $ownerPid = [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0)
     if (Test-TestLeaseProcess -ProcessId $ownerPid) { return $null }
     $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
-    if (-not [bool]$heartbeat.readable -or [int]$heartbeat.ageSeconds -le $effectiveTtlSeconds) { return $null }
+    if (-not [bool]$heartbeat.readable) { return $null }
+    $heartbeatPid = [int](Get-FactoryNestedValue -Target $holder -Name "heartbeatPid" -Default 0)
+    if ($heartbeatPid -gt 0 -and (Test-TestLeaseProcess -ProcessId $heartbeatPid)) { return $null }
     $ageSeconds = [int]$heartbeat.ageSeconds
-    $reason = "Test lease heartbeat is $ageSeconds second(s) old; TTL is $effectiveTtlSeconds second(s)."
+    $heartbeatPidWasRecorded = $heartbeatPid -gt 0
+    if ($ageSeconds -le $effectiveTtlSeconds -and (-not $heartbeatPidWasRecorded -or $ownerPid -le 0)) {
+        return $null
+    }
+    $reason = if ($ageSeconds -gt $effectiveTtlSeconds) {
+        "Test lease holder process $ownerPid is not running and its heartbeat is $ageSeconds second(s) old; TTL is $effectiveTtlSeconds second(s)."
+    } else {
+        "Test lease holder process $ownerPid and heartbeat process $heartbeatPid are not running; reclaiming before TTL."
+    }
     $record = Write-TestLeaseReclaimRecord -Holder $holder -Reason $reason
     Set-FactoryProperty -Target $Lease -Name "holder" -Value $null
     Set-FactoryProperty -Target $Lease -Name "lastReclaim" -Value $record
@@ -141,13 +151,15 @@ function Reclaim-StaleTestLease {
 
 function Remove-AbandonedTestLeaseWaiters {
     param([Parameter(Mandatory = $true)]$Lease)
+    $original = @(Get-FactoryNestedValue -Target $Lease -Name "queue" -Default @())
     $remaining = @(
-        @(Get-FactoryNestedValue -Target $Lease -Name "queue" -Default @()) | Where-Object {
+        $original | Where-Object {
             $waiterPid = [int](Get-FactoryNestedValue -Target $_ -Name "waiterPid" -Default 0)
             $waiterPid -eq $PID -or (Test-TestLeaseProcess -ProcessId $waiterPid)
         }
     )
     Set-FactoryProperty -Target $Lease -Name "queue" -Value $remaining
+    return [Math]::Max(0, $original.Count - $remaining.Count)
 }
 
 function Get-SortedTestLeaseQueue {
@@ -236,7 +248,15 @@ if ($Action -eq "heartbeat") {
 }
 
 if ($Action -eq "status") {
-    $lease = Read-TestLeaseState
+    $statusMutex = $null
+    try {
+        $statusMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+        $lease = Read-TestLeaseState
+        $removedWaiters = Remove-AbandonedTestLeaseWaiters -Lease $lease
+        if ($removedWaiters -gt 0) { Write-TestLeaseState -Lease $lease }
+    } finally {
+        Exit-FactoryMutex -Mutex $statusMutex
+    }
     $holder = Get-FactoryNestedValue -Target $lease -Name "holder"
     $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
     $ownerPid = if ($null -ne $holder) { [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0) } else { 0 }
@@ -266,8 +286,13 @@ if ($Action -eq "status") {
         heartbeatPidAlive = $heartbeatPidAlive
         heartbeatChanged = $heartbeatChanged
         heartbeatStalled = $heartbeatStalled
-        stale = ($null -ne $holder -and -not $ownerAlive -and [bool]$heartbeat.readable -and [int]$heartbeat.ageSeconds -gt $effectiveTtlSeconds)
+        stale = (
+            $null -ne $holder -and -not $ownerAlive -and [bool]$heartbeat.readable -and
+            ($heartbeatPid -le 0 -or -not $heartbeatPidAlive) -and
+            ([int]$heartbeat.ageSeconds -gt $effectiveTtlSeconds -or ($ownerPid -gt 0 -and $heartbeatPid -gt 0))
+        )
         ttlSeconds = $effectiveTtlSeconds
+        removedWaiters = $removedWaiters
         queue = @(Get-SortedTestLeaseQueue -Lease $lease)
         lastReclaim = Get-FactoryNestedValue -Target $lease -Name "lastReclaim"
         reclaimLogPath = $reclaimLogPath
@@ -331,7 +356,7 @@ while ($null -eq $acquired) {
         $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
         $lease = Read-TestLeaseState
         $null = Reclaim-StaleTestLease -Lease $lease
-        Remove-AbandonedTestLeaseWaiters -Lease $lease
+        $null = Remove-AbandonedTestLeaseWaiters -Lease $lease
         $queue = @(Get-FactoryNestedValue -Target $lease -Name "queue" -Default @())
         if (@($queue | Where-Object { [string]$_.token -eq $requestToken }).Count -eq 0) {
             $queue += [pscustomobject][ordered]@{

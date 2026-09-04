@@ -1,3 +1,4 @@
 .idea/
+# Legacy runtime only. Fresh and migrated runtime lives under LocalAppData.
 runtime/
 *.tmp

@@ -31,22 +31,30 @@ Required behavior:
 On 2026-09-02 the scheduler recorded a `process-missing` event, but queued work
 did not move until the condition was discovered manually.
 
-When runnable work exists and the scheduler is stopped or failed, `factory
-status` must put the scheduler under `NEEDS YOUR ACTION` with the saved reason,
-detection time, and exact recovery command. A heartbeat stored only in private
-state is insufficient.
+When runnable work exists and the scheduler process is stopped or dead,
+`factory status` must put the scheduler under `NEEDS YOUR ACTION` with the
+saved reason, detection time, and exact recovery command. A live process with
+a failed tick is retrying and must not trigger duplicate recovery. A heartbeat
+stored only in private state is insufficient.
 
-## 3. Long operations must not hold the global state mutex
+## 3. Instrument the unexplained global state-mutex timeouts
+
+Correction from the follow-up audit: the original mechanism stated here was
+wrong. Worktree creation, dependency installation, Git synchronization, and
+test execution were already outside the global state mutex. Do not restructure
+those paths in response to this report.
 
 Between 2026-08-20 and 2026-09-04, 97 of 34,150 scheduler ticks exceeded 60
 seconds; the slowest took 1,811 seconds. The same period contained 88 factory
 state-lock timeouts, 14 tick exceptions, and 16 loop errors.
 
-The global mutex has a 30-second acquisition timeout. Worktree creation,
-dependency installation, Git synchronization, and tests can take minutes, so
-they must run outside it. The lock should cover only short state
-read/modify/write transactions. At minimum, enqueue must atomically add a task
-and return without waiting for worker launch.
+The global mutex has a 30-second acquisition timeout, but the process and call
+site responsible for the measured timeouts are unknown. Record the current
+owner PID, process start time, caller, acquisition time, wait duration, and hold
+duration in private runtime diagnostics. A timeout must include the recorded
+holder and append an audit row. Diagnostics must never become a new failure
+mode. Enqueue must continue to atomically add a task and return without waiting
+for worker launch.
 
 ## 4. Factory needs a native operator-action signal
 
