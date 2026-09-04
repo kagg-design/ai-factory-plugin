@@ -25,6 +25,10 @@ $blockedSessionTimeoutMinutes = [Math]::Max(
     1,
     [int](Get-FactoryNestedValue -Target $config -Name "blockedSessionTimeoutMinutes" -Default 30)
 )
+$workerLaunchTimeoutSeconds = [Math]::Max(
+    1,
+    [int](Get-FactoryNestedValue -Target $config -Name "workerLaunchTimeoutSeconds" -Default 300)
+)
 
 function Get-FactoryBlockedSessionReason {
     param($SessionRow)
@@ -59,12 +63,53 @@ try {
     $state = Read-FactoryJson -Path $context.statePath
 
     foreach ($task in @($state.tasks)) {
-        if ($null -eq $task.backgroundSession -or -not [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "id" -Default "")) {
+        $before = [string]$task.status
+        $taskId = [string]$task.id
+        if (-not (Test-FactoryTaskHasRecordedSession -Task $task)) {
+            if ($before -in @("starting", "planning")) {
+                $launchStartedAt = Get-FactoryNestedValue -Target $task -Name "launchStartedAt"
+                $parsedLaunchStartedAt = ConvertFrom-FactoryRoundtripTimestamp -Value $launchStartedAt
+                if (-not [bool]$parsedLaunchStartedAt.success) {
+                    $fallbackStartedAt = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $task -Name "updatedAt")
+                    $normalizedStartedAt = if ([bool]$fallbackStartedAt.success) {
+                        ConvertTo-FactoryRoundtripTimestamp -Value $fallbackStartedAt.value
+                    } else {
+                        Get-FactoryUtcTimestamp
+                    }
+                    Set-FactoryProperty -Target $task -Name "launchStartedAt" -Value $normalizedStartedAt
+                    $metadataChanged = $true
+                }
+                $stall = Get-FactoryLaunchStallInfo `
+                    -Task $task `
+                    -TimeoutSeconds $workerLaunchTimeoutSeconds
+                if ([bool]$stall.stalled) {
+                    $failure = "Worker launch did not record a background session within $workerLaunchTimeoutSeconds second(s); the launcher process may have exited or been terminated."
+                    $timestamp = Get-FactoryUtcTimestamp
+                    Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+                    Set-FactoryProperty -Target $task -Name "error" -Value $failure
+                    Set-FactoryProperty -Target $task -Name "launchFailedAt" -Value $timestamp
+                    Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+                    Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+                    Set-FactoryProperty -Target $task -Name "updatedAt" -Value $timestamp
+                    $changes.Add([pscustomobject]@{
+                        taskId = $taskId
+                        from = $before
+                        to = "failed"
+                        reason = $failure
+                    })
+                }
+            }
             continue
         }
 
-        $before = [string]$task.status
-        $taskId = [string]$task.id
+        if ($null -ne (Get-FactoryNestedValue -Target $task -Name "launchProcessId")) {
+            Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+            if ($null -eq (Get-FactoryNestedValue -Target $task -Name "launchCompletedAt")) {
+                Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value (Get-FactoryUtcTimestamp)
+            }
+            $metadataChanged = $true
+        }
         $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
         $sessionRuntime = if ($null -ne $task.backgroundSession.PSObject.Properties["runtime"] -and [string]$task.backgroundSession.runtime) {
             [string]$task.backgroundSession.runtime

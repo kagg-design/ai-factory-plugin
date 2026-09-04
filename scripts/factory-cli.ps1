@@ -207,6 +207,9 @@ function Get-CliEffectiveStatus {
     if ($sessionState -eq "blocked" -and $status -in @("starting", "planning", "running")) {
         return "session-blocked"
     }
+    if ($status -eq "awaiting-review" -and (Test-FactoryTaskHasActiveSession -Task $Task)) {
+        return "review-session-active"
+    }
     return $status
 }
 
@@ -268,6 +271,7 @@ function Get-CliStateText {
         "running" { "implementation is running" }
         "syncing" { "rebased result needs validation" }
         "awaiting-review" { "validated commit is ready for review" }
+        "review-session-active" { "validated result captured; worker session is still closing" }
         "approved" { "approved commit is queued for integration" }
         "integrating" { "integration into development is running" }
         "production" { "production promotion is running" }
@@ -287,6 +291,7 @@ function Get-CliStateLabel {
 
     $label = switch ($Status) {
         "awaiting-review" { "REVIEW" }
+        "review-session-active" { "FINISHING" }
         "awaiting-input" { "INPUT" }
         "syncing" { "SYNC" }
         "integrating" { "INTEGRATING" }
@@ -302,7 +307,7 @@ function Get-CliGroup {
 
     if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "held", "rejected")) { return "Needs your action" }
     if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production")) { return "Working" }
-    if ($Status -eq "queued") { return "Waiting" }
+    if ($Status -in @("queued", "review-session-active")) { return "Waiting" }
     if ($Status -in @("blocked", "failed", "session-blocked")) { return "Problems" }
     return "Other"
 }
@@ -321,6 +326,7 @@ function Get-CliNextAction {
     $runtime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
     $prompt = if ($runtime -eq "codex") { "factory" } else { "/factory" }
     $requiresFreshReview = Test-FactoryTaskRequiresFreshReview -Task $Task
+    $reviewSessionActive = $status -eq "awaiting-review" -and (Test-FactoryTaskHasActiveSession -Task $Task)
     $cleanup = Get-CliProperty -InputObject $Task -Name "cleanup"
     $cleanupFailed = [string](Get-CliProperty -InputObject $cleanup -Name "status") -eq "failed"
 
@@ -336,7 +342,9 @@ function Get-CliNextAction {
         "syncing" { "$prompt sync $id" }
         "awaiting-review" {
             $review = Get-CliProperty -InputObject $Task -Name "review"
-            if (-not $requiresFreshReview -and
+            if ($reviewSessionActive) {
+                "$prompt chat $id"
+            } elseif (-not $requiresFreshReview -and
                 [string](Get-CliProperty -InputObject $review -Name "verdict") -eq "approved" -and
                 [string](Get-CliProperty -InputObject $review -Name "commit") -eq $commit -and
                 $null -ne (Get-CliProperty -InputObject $review -Name "integrationPlan")) {
@@ -363,7 +371,7 @@ function Get-CliNextAction {
 
     $alternative = ""
     if ($status -eq "awaiting-input") { $alternative = "$prompt answer $id --text `"...`"" }
-    elseif ($status -eq "awaiting-review") {
+    elseif ($status -eq "awaiting-review" -and -not $reviewSessionActive) {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
         $directReadiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $Task -RepositoryRoot ([string]$Repository)
@@ -501,10 +509,12 @@ function Write-CliStatus {
         }
     )
 
-    $activeStates = @("starting", "planning", "awaiting-input", "running")
     $runnableStates = @("queued", "starting", "planning", "running", "approved", "integrating", "production")
-    $activeWorkers = @($allTasks | Where-Object { [string]$_.status -in $activeStates }).Count
-    $runnable = @($allTasks | Where-Object { [string]$_.status -in $runnableStates }).Count
+    $activeWorkers = Get-FactoryLaunchedWorkerCount -State $State
+    $runnable = @($allTasks | Where-Object {
+        [string]$_.status -in $runnableStates -or
+        ([string]$_.status -eq "awaiting-review" -and (Test-FactoryTaskHasActiveSession -Task $_))
+    }).Count
     $concurrency = Get-FactoryCodingConcurrency -Config $Config
     $paused = [bool](Get-CliProperty -InputObject $State -Name "paused" -Default $false)
     $active = [bool](Get-CliProperty -InputObject $State -Name "active" -Default $false)
@@ -515,6 +525,7 @@ function Write-CliStatus {
     $schedulerTaskId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activityTaskId")
     $schedulerTaskTitle = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "activityTaskTitle")
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
+    $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
     $scheduler = if ($paused -and $schedulerStatus -in @("running", "busy")) {
@@ -605,13 +616,16 @@ function Write-CliStatus {
                 "Factory is paused; the scheduler will not launch or publish tasks."
             } elseif ($schedulerError) { $schedulerError } else { "No live native scheduler owns this project." }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Reason: $schedulerReason"
+            if ($schedulerFailureAt) {
+                Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text "Detected: $schedulerFailureAt"
+            }
             $schedulerDiagnostic = if ($paused -and $schedulerStatus -in @("running", "busy")) {
                 "Process: running (PID $schedulerPid); pause is intentional state, not process failure."
             } else {
                 "Log: $(Join-Path ([string]$Context.projectData) 'scheduler.stderr.log')"
             }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text $schedulerDiagnostic
-            $schedulerNext = if ($paused -or $schedulerStatus -eq "stopped") { "factory resume" } else { "factory scheduler status" }
+            $schedulerNext = if ($paused) { "factory resume" } elseif ($schedulerStatus -in @("stopped", "failed")) { "factory scheduler start" } else { "factory scheduler status" }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix   " -Text "$($script:Tree.Arrow) Next: $schedulerNext"
         }
         for ($index = 0; $index -lt $groupTasks.Count; $index++) {
@@ -858,6 +872,34 @@ function Write-CliHold {
     }
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Resume later: $resume"
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) No AI call was used."
+}
+
+function Write-CliRetry {
+    param($State, [string]$TaskId)
+
+    $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "retry"
+    $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $result = Invoke-CliJsonScript -ScriptName "task-action.ps1" -Arguments @(
+        "-Repository", [string]$Repository,
+        "-Action", "retry",
+        "-TaskId", $TaskId,
+        "-ClaudeCommand", $ClaudeCommand,
+        "-CodexCommand", $CodexCommand
+    )
+    $schedulerResult = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
+        "-Action", "resume",
+        "-Repository", [string]$Repository,
+        "-ClaudeCommand", $ClaudeCommand
+    )
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Retry queued $($script:Tree.Horizontal) $TaskId $($script:Tree.Horizontal) $title"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status)"
+    $schedulerNote = if ([bool](Get-CliProperty -InputObject $schedulerResult -Name "wakeRequested" -Default $false)) {
+        "wake requested"
+    } elseif (-not [bool](Get-CliProperty -InputObject $schedulerResult -Name "resumed" -Default $true)) {
+        "already busy; queued work will be picked up after the current operation"
+    } else { "running" }
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Scheduler: $([string]$schedulerResult.scheduler.status); $schedulerNote"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Monitor: factory inspect $TaskId"
 }
 
 function Write-CliGo {
@@ -1306,6 +1348,40 @@ function Write-CliRotate {
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Next: $nextCommand"
 }
 
+function Write-CliWait {
+    param($Context, [int]$TimeoutSeconds)
+
+    $arguments = @(
+        "-Repository", [string]$Context.repositoryRoot,
+        "-TimeoutSeconds", [string]$TimeoutSeconds
+    )
+    $result = Invoke-CliJsonScript -ScriptName "wait-factory.ps1" -Arguments $arguments
+    if (-not [bool](Get-CliProperty -InputObject $result -Name "signaled" -Default $false)) {
+        Write-Output "No operator action became ready before the wait timeout."
+        return
+    }
+
+    $actions = @(Get-CliProperty -InputObject $result -Name "actions" -Default @())
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory needs attention $($script:Tree.Horizontal) $($actions.Count)"
+    for ($index = 0; $index -lt $actions.Count; $index++) {
+        $action = $actions[$index]
+        $connector = if ($index -eq $actions.Count - 1) { $script:Tree.Last } else { $script:Tree.Branch }
+        $detailPrefix = if ($index -eq $actions.Count - 1) { "   " } else { "$($script:Tree.Vertical)  " }
+        $taskId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $action -Name "taskId")
+        $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $action -Name "title") -Fallback "Factory"
+        $identity = if ($taskId) { "$taskId $($script:Tree.Horizontal) $title" } else { $title }
+        $actionLines = New-Object Collections.Generic.List[string]
+        Add-CliWrappedLine -Lines $actionLines -FirstPrefix "$connector$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "$([string]$action.kind) $($script:Tree.Horizontal) $identity"
+        Add-CliWrappedLine -Lines $actionLines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text "Reason: $([string]$action.reason)"
+        if ([string]$action.occurredAt) {
+            Add-CliWrappedLine -Lines $actionLines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text "Since: $([string]$action.occurredAt)"
+        }
+        Add-CliWrappedLine -Lines $actionLines -FirstPrefix "$detailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "$($script:Tree.Arrow) Next: $([string]$action.command)"
+        $actionLines | Write-Output
+    }
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Signal detected $($script:Tree.Horizontal) $([string]$result.detectedAt)"
+}
+
 function Write-CliPurge {
     param($Context, [bool]$Confirm, [bool]$ForceRemoval)
 
@@ -1354,6 +1430,7 @@ function Write-CliHelp {
             "  factory add --file <task.json>",
             "  factory go <task-id> [--direct]",
             "  factory hold <task-id>",
+            "  factory retry <task-id>",
             "  factory reject <task-id> [-Yes|-Keep] [reason]",
             "  factory cleanup <task-id>",
             "  factory concurrency [number]",
@@ -1362,6 +1439,7 @@ function Write-CliHelp {
             "  factory paths",
             "  factory config [path|edit]",
             "  factory scheduler [status|start|stop|tick]",
+            "  factory wait [timeout-seconds]",
             "  factory pause|resume|stop",
             "  factory purge [-Yes] [-Force]",
             "  factory help [command]",
@@ -1414,6 +1492,14 @@ function Write-CliHelp {
             @(
                 "factory hold <task-id>",
                 "Moves an awaiting-review, approved, or awaiting-input task to held without AI."
+            ) | Write-Output
+        }
+        "retry" {
+            @(
+                "factory retry <task-id>",
+                "Queues another worker attempt for a machine failure without AI.",
+                "It also accepts starting or planning tasks that have no recorded background session.",
+                "The retained worktree is reused when present, and the native scheduler is woken asynchronously."
             ) | Write-Output
         }
         "go" {
@@ -1509,6 +1595,14 @@ function Write-CliHelp {
                 "'tick' reconciles workers, integrates one formally approved commit, and fills worker capacity once."
             ) | Write-Output
         }
+        "wait" {
+            @(
+                "factory wait [timeout-seconds]",
+                "Blocks without AI until a task or scheduler condition requires operator action.",
+                "It returns for awaiting-input, blocked, failed, a stalled launch, a stopped scheduler with runnable work, or awaiting-review after the worker session closes.",
+                "It reads atomic factory state rather than following a log. Omit timeout for an indefinite wait."
+            ) | Write-Output
+        }
         "purge" {
             @(
                 "factory purge [-Yes] [-Force]",
@@ -1520,7 +1614,7 @@ function Write-CliHelp {
             @(
                 "factory tick | factory pause | factory resume | factory stop",
                 "Controls the native scheduler without an AI request.",
-                "pause keeps the process but suspends factory work; resume permits work, starts the process if needed, and ticks immediately.",
+                "pause keeps the process but suspends factory work; resume permits work, starts the process if needed, and requests an asynchronous wake.",
                 "stop ends only the scheduler process and preserves active/paused; start never clears an explicit pause."
             ) | Write-Output
         }
@@ -1634,6 +1728,18 @@ if ($normalizedCommand -eq "scheduler") {
     exit 0
 }
 
+if ($normalizedCommand -eq "wait") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {
+        throw "wait accepts only an optional timeout in seconds."
+    }
+    $waitTimeout = 0
+    if ($Target -and (-not [int]::TryParse($Target, [ref]$waitTimeout) -or $waitTimeout -lt 0)) {
+        throw "wait timeout must be zero or a positive integer number of seconds."
+    }
+    Write-CliWait -Context $context -TimeoutSeconds $waitTimeout
+    exit 0
+}
+
 if ($normalizedCommand -eq "preview") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {
         throw "preview accepts one task ID, 'stop', or no argument; optional -NoOpen only."
@@ -1695,6 +1801,10 @@ switch ($normalizedCommand) {
     "hold" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "hold accepts exactly one task ID." }
         Write-CliHold -State $state -TaskId $Target
+    }
+    "retry" {
+        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "retry accepts exactly one task ID." }
+        Write-CliRetry -State $state -TaskId $Target
     }
     "reject" {
         if ($startOptionsUsed -or $Force) { throw "reject accepts -Yes or -Keep, not -Force or start options." }

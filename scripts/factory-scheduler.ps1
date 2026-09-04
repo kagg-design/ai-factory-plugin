@@ -35,6 +35,7 @@ $maximumBackoffSeconds = [int]$schedulerConfig.maximumBackoffSeconds
 if ($maximumBackoffSeconds -lt $IntervalSeconds) { $maximumBackoffSeconds = $IntervalSeconds }
 
 $stopPath = Join-Path ([string]$context.projectData) "scheduler.stop"
+$wakePath = Join-Path ([string]$context.projectData) "scheduler.wake"
 $stdoutPath = Join-Path ([string]$context.projectData) "scheduler.stdout.log"
 $stderrPath = Join-Path ([string]$context.projectData) "scheduler.stderr.log"
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
@@ -51,6 +52,11 @@ function Initialize-SchedulerLogs {
             }
         }
     }
+}
+
+function Request-SchedulerWake {
+    New-Item -ItemType Directory -Path ([string]$context.projectData) -Force | Out-Null
+    [IO.File]::WriteAllText($wakePath, (Get-FactoryUtcTimestamp), (New-Object Text.UTF8Encoding($false)))
 }
 
 function Write-SchedulerLog {
@@ -228,6 +234,7 @@ function Get-SchedulerStatusResult {
         lastTickAt = Get-CliSafeProperty -InputObject $scheduler -Name "lastTickAt"
         lastTransitionAt = Get-CliSafeProperty -InputObject $scheduler -Name "lastTransitionAt"
         lastError = Get-CliSafeProperty -InputObject $scheduler -Name "lastError"
+        lastFailureAt = Get-CliSafeProperty -InputObject $scheduler -Name "lastFailureAt"
         failureCount = [int](Get-CliSafeProperty -InputObject $scheduler -Name "failureCount" -Default 0)
         activity = $activity
         activityTaskId = Get-CliSafeProperty -InputObject $scheduler -Name "activityTaskId"
@@ -238,6 +245,7 @@ function Get-SchedulerStatusResult {
         ownershipHeld = $ownershipHeld
         stdoutPath = $stdoutPath
         stderrPath = $stderrPath
+        wakePath = $wakePath
     }
 }
 
@@ -403,6 +411,7 @@ function Invoke-SchedulerTick {
             lastError = $tickError
             failureCount = if ($tickError) { $previousFailures + 1 } else { 0 }
         }
+        if ($tickError) { $schedulerValues.lastFailureAt = $now }
         if ($launched.Count -gt 0 -or $integrated.Count -gt 0 -or [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0) -gt 0) {
             $schedulerValues.lastTransitionAt = $now
         }
@@ -439,6 +448,7 @@ function Invoke-SchedulerTick {
             status = "failed"
             heartbeatAt = Get-FactoryUtcTimestamp
             lastError = $failure
+            lastFailureAt = Get-FactoryUtcTimestamp
             failureCount = $previousFailures + 1
             activity = "idle"
             activityTaskId = $null
@@ -479,6 +489,7 @@ function Start-NativeScheduler {
     }
     Initialize-SchedulerLogs
     Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $wakePath -Force -ErrorAction SilentlyContinue
     $argumentLine = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $schedulerScriptPath,
         "-Action", "run",
@@ -547,11 +558,14 @@ switch ($Action) {
         $savedPid = [int](Get-CliSafeProperty -InputObject $savedScheduler -Name "pid" -Default 0)
         if (-not [bool]$statusResult.running -and $savedPid -gt 0 -and $savedStatus -ne "stopped") {
             $failure = "Recorded scheduler process is no longer running; its launcher or an external process may have terminated it."
+            $failureAt = Get-FactoryUtcTimestamp
             Update-SchedulerState -Values @{
                 status = "failed"
                 pid = $null
                 processStartTimeUtc = $null
                 lastError = $failure
+                lastFailureAt = $failureAt
+                lastTransitionAt = $failureAt
                 lastExitReason = "unexpected process termination"
             }
             Write-SchedulerLog -Stream stderr -Event "process-missing" -Values @{
@@ -589,8 +603,14 @@ switch ($Action) {
             break
         }
         $started = Start-NativeScheduler
-        $tick = Invoke-SchedulerTick
-        [ordered]@{ resumed = $true; start = $started; tick = $tick; scheduler = Get-SchedulerStatusResult } | ConvertTo-Json -Depth 30
+        Request-SchedulerWake
+        [ordered]@{
+            resumed = $true
+            start = $started
+            tick = $null
+            wakeRequested = $true
+            scheduler = Get-SchedulerStatusResult
+        } | ConvertTo-Json -Depth 30
     }
     "tick" {
         Invoke-SchedulerTick | ConvertTo-Json -Depth 30
@@ -622,6 +642,7 @@ switch ($Action) {
                 startedAt = $startedAt
                 heartbeatAt = $startedAt
                 lastError = $null
+                lastFailureAt = $null
                 failureCount = 0
                 activity = "idle"
                 activityTaskId = $null
@@ -633,6 +654,7 @@ switch ($Action) {
             Write-SchedulerLog -Stream stdout -Event "process-start" -Values @{ pid = $PID; intervalSeconds = $IntervalSeconds }
             $failureCount = 0
             while (-not (Test-Path -LiteralPath $stopPath)) {
+                Remove-Item -LiteralPath $wakePath -Force -ErrorAction SilentlyContinue
                 $lastError = $null
                 try {
                     $currentConfig = Read-FactoryJson -Path ([string]$context.configPath)
@@ -656,6 +678,7 @@ switch ($Action) {
                     status = if ($lastError) { "failed" } else { "running" }
                     heartbeatAt = Get-FactoryUtcTimestamp
                     lastError = $lastError
+                    lastFailureAt = if ($lastError) { Get-FactoryUtcTimestamp } else { $null }
                     failureCount = $failureCount
                     activity = "idle"
                     activityTaskId = $null
@@ -668,7 +691,11 @@ switch ($Action) {
                 } else { $IntervalSeconds }
                 $remainingMilliseconds = [int]($delay * 1000)
                 $heartbeatMilliseconds = 5000
-                while ($remainingMilliseconds -gt 0 -and -not (Test-Path -LiteralPath $stopPath)) {
+                while (
+                    $remainingMilliseconds -gt 0 -and
+                    -not (Test-Path -LiteralPath $stopPath) -and
+                    -not (Test-Path -LiteralPath $wakePath)
+                ) {
                     $slice = [Math]::Min(500, $remainingMilliseconds)
                     Start-Sleep -Milliseconds $slice
                     $remainingMilliseconds -= $slice
@@ -688,6 +715,7 @@ switch ($Action) {
                         status = "failed"
                         heartbeatAt = Get-FactoryUtcTimestamp
                         lastError = $fatalError
+                        lastFailureAt = Get-FactoryUtcTimestamp
                     }
                     Write-SchedulerLog -Stream stderr -Event "process-error" -Values @{ pid = $PID; error = $fatalError }
                 } catch {}
@@ -701,6 +729,7 @@ switch ($Action) {
                     processStartTimeUtc = $null
                     heartbeatAt = Get-FactoryUtcTimestamp
                     lastError = if ($fatalError) { $fatalError } else { $null }
+                    lastFailureAt = if ($fatalError) { Get-FactoryUtcTimestamp } else { $null }
                     activity = "idle"
                     activityTaskId = $null
                     activityTaskTitle = $null

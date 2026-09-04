@@ -46,6 +46,7 @@ $workerEnvironment = @{}
 $pendingInstructions = ""
 $reworkRequestedAt = ""
 $existingCommit = ""
+$launchedSession = $null
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -102,6 +103,11 @@ $existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -
     Set-FactoryProperty -Target $task -Name "startMode" -Value $Mode
     Set-FactoryProperty -Target $task -Name "status" -Value "starting"
     Set-FactoryProperty -Target $task -Name "attempts" -Value $attempt
+    Set-FactoryProperty -Target $task -Name "launchStartedAt" -Value $now
+    Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $null
+    Set-FactoryProperty -Target $task -Name "launchFailedAt" -Value $null
+    Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $PID
+    Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value ((Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture))
     Set-FactoryProperty -Target $task -Name "branch" -Value $branch
     Set-FactoryProperty -Target $task -Name "worktree" -Value ([IO.Path]::GetFullPath($worktree))
     Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
@@ -386,6 +392,7 @@ $reworkInstruction
             cliVersion = [string]$codexLaunch.cliVersion
             agentResolution = "codex-exec-jsonl"
         }
+        $launchedSession = [pscustomobject]$session
         $metadata.backgroundId = [string]$codexLaunch.id
         $metadata.processId = [int]$codexLaunch.processId
         $metadata.processStartTimeUtc = [string]$codexLaunch.processStartTimeUtc
@@ -400,11 +407,22 @@ $reworkInstruction
         try {
             $state = Read-FactoryJson -Path $context.statePath
             $task = Get-FactoryTask -State $state -TaskId $TaskId
+            if (
+                [string]$task.status -ne "starting" -or
+                [int]$task.attempts -ne $attempt -or
+                (Test-FactoryTaskHasRecordedSession -Task $task)
+            ) {
+                throw "Worker launch reservation for task '$TaskId' attempt $attempt is no longer active."
+            }
+            $launchCompletedAt = Get-FactoryUtcTimestamp
             Set-FactoryProperty -Target $task -Name "backgroundSession" -Value ([pscustomobject]$session)
             Set-FactoryProperty -Target $task -Name "agentId" -Value ([string]$codexLaunch.id)
             Set-FactoryProperty -Target $task -Name "status" -Value $(if ($Mode -eq "interactive") { "planning" } else { "running" })
-            Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
-            Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+            Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $launchCompletedAt
+            Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+            Set-FactoryProperty -Target $task -Name "updatedAt" -Value $launchCompletedAt
+            Set-FactoryProperty -Target $state -Name "updatedAt" -Value $launchCompletedAt
             Write-FactoryJsonAtomic -Path $context.statePath -Value $state
         } finally {
             Exit-FactoryMutex -Mutex $mutex
@@ -509,10 +527,22 @@ $reworkInstruction
             attachCommand = "claude attach $backgroundId"
             agentResolution = [string]$launch.agentResolution
         }
+        $launchedSession = [pscustomobject]$session
+        if (
+            [string]$task.status -ne "starting" -or
+            [int]$task.attempts -ne $attempt -or
+            (Test-FactoryTaskHasRecordedSession -Task $task)
+        ) {
+            throw "Worker launch reservation for task '$TaskId' attempt $attempt is no longer active."
+        }
+        $launchCompletedAt = Get-FactoryUtcTimestamp
         Set-FactoryProperty -Target $task -Name "backgroundSession" -Value ([PSCustomObject]$session)
         Set-FactoryProperty -Target $task -Name "agentId" -Value $backgroundId
         Set-FactoryProperty -Target $task -Name "status" -Value $(if ($Mode -eq "interactive") { "planning" } else { "running" })
-        Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
+        Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $launchCompletedAt
+        Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+        Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+        Set-FactoryProperty -Target $task -Name "updatedAt" -Value $launchCompletedAt
         Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
             schemaVersion = 2
             claudeVersion = $claudeVersion
@@ -526,7 +556,7 @@ $reworkInstruction
                 default { "native plugin agent resolved" }
             }
         })
-        Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+        Set-FactoryProperty -Target $state -Name "updatedAt" -Value $launchCompletedAt
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     } finally {
         Exit-FactoryMutex -Mutex $mutex
@@ -552,15 +582,44 @@ $reworkInstruction
         @($_.Exception.Data["FactoryAgentDefinitionDeviations"])
     } else { @() }
     $failure = $_.Exception.Message
+    if ($null -ne $launchedSession) {
+        try {
+            if ([string]$launchedSession.runtime -eq "codex") {
+                $null = Invoke-FactoryCodexSessionDisposition `
+                    -CodexCommand $CodexCommand `
+                    -Session $launchedSession `
+                    -Disposition "archive"
+            } else {
+                $unclaimedBackgroundId = [string]$launchedSession.id
+                Stop-FactoryClaudeSessionAndWait `
+                    -ClaudeCommand $ClaudeCommand `
+                    -BackgroundId $unclaimedBackgroundId
+                $removeResult = Remove-FactoryAgentSessionRow `
+                    -ClaudeCommand $ClaudeCommand `
+                    -BackgroundId $unclaimedBackgroundId
+                if (-not [bool]$removeResult.removed) { throw ([string]$removeResult.warning) }
+            }
+        } catch {
+            $failure += " Cleanup of the unclaimed worker session also failed: $($_.Exception.Message)"
+        }
+    }
     $mutex = $null
     try {
         $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
+        $sameAttempt = [int](Get-FactoryNestedValue -Target $task -Name "attempts" -Default 0) -eq $attempt
+        $launchStillOwned = [int](Get-FactoryNestedValue -Target $task -Name "launchProcessId" -Default 0) -eq $PID
+        if (-not $sameAttempt -or -not $launchStillOwned -or [string]$task.status -ne "starting") {
+            throw "Worker launch for task '$TaskId' attempt $attempt failed after its state reservation was replaced: $failure"
+        }
         if ($pendingInstructions -and -not [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")) {
             Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $pendingInstructions
         }
         Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+        Set-FactoryProperty -Target $task -Name "launchFailedAt" -Value (Get-FactoryUtcTimestamp)
+        Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+        Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
         if ($null -ne $resolutionOutcomes -and $claudeVersion) {
             Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
                 schemaVersion = 2

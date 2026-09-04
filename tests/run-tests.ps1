@@ -89,6 +89,11 @@ function New-FactoryTestTask {
         status = "queued"
         attempts = 0
         attemptPrepared = $false
+        launchStartedAt = $null
+        launchCompletedAt = $null
+        launchFailedAt = $null
+        launchProcessId = $null
+        launchProcessStartTimeUtc = $null
         agentId = $null
         backgroundSession = $null
         branch = $null
@@ -128,6 +133,7 @@ try {
     Assert-True (@($bundleManifest.files) -contains "skills/factory/SKILL.md") "The bundle manifest omits the Codex factory skill."
     Assert-True (@($bundleManifest.files) -contains "scripts/factory-preview.ps1") "The plugin manifest omits browser preview lifecycle management."
     Assert-True (@($bundleManifest.files) -contains "scripts/test-lease.ps1") "The plugin manifest omits the serialized test-lane lease."
+    Assert-True (@($bundleManifest.files) -contains "scripts/wait-factory.ps1") "The plugin manifest omits the native operator wait command."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -619,6 +625,12 @@ try {
     $capacityState = Read-FactoryJson -Path $context.statePath
     $waitingTask = New-FactoryTestTask -Id "slot-awaiting-input" -Title "Consumes a coding slot" -Now (Get-FactoryUtcTimestamp)
     $waitingTask.status = "awaiting-input"
+    $waitingTask.backgroundSession = [pscustomobject]@{
+        runtime = "codex"; id = "capacity-worker"; sessionId = "capacity-worker-session"
+        name = "factory-slot-awaiting-input"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
+        processId = $PID; processStartTimeUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
+        transcriptPath = $null; lastMessagePath = $null; stderrPath = $null
+    }
     $queuedTask = New-FactoryTestTask -Id "slot-stays-queued" -Title "Must wait for a coding slot" -Now (Get-FactoryUtcTimestamp)
     $capacityState.tasks = @($waitingTask, $queuedTask)
     $capacityState.active = $true
@@ -629,8 +641,36 @@ try {
     Assert-Equal 0 ([int]$capacityTick.launchedCount) "The scheduler exceeded codingConcurrency while a worker awaited input."
     Assert-Equal "queued" ([string](Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "slot-stays-queued").status) "The coding cap did not preserve queued work."
 
+    $orphanLaunchState = Read-FactoryJson -Path $context.statePath
+    $orphanLaunch = New-FactoryTestTask -Id "orphan-launch" -Title "Launcher exited before session creation" -Now ([DateTime]::UtcNow.AddMinutes(-10).ToString("o"))
+    $orphanLaunch.status = "starting"
+    $orphanLaunch.attempts = 1
+    $orphanLaunch.launchStartedAt = [DateTime]::UtcNow.AddMinutes(-10).ToString("o")
+    $orphanLaunch.launchProcessId = 999999
+    $orphanLaunchState.tasks = @($orphanLaunch)
+    $orphanLaunchState.active = $true
+    $orphanLaunchState.paused = $true
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $orphanLaunchState
+    Assert-Equal 0 (Get-FactoryLaunchedWorkerCount -State $orphanLaunchState) "A sessionless starting task permanently consumed coding capacity."
+    $orphanConfig = Read-FactoryJson -Path $context.configPath
+    $orphanConfig.workerLaunchTimeoutSeconds = 1
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $orphanConfig
+    $orphanReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") `
+        -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $orphanAfter = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "orphan-launch"
+    Assert-Equal "failed" ([string]$orphanAfter.status) "A stale sessionless launch was not failed by reconciliation."
+    Assert-True ([string]$orphanAfter.error -match "did not record a background session") "The stale launch failure did not explain the missing session."
+    Assert-True ([string]$orphanAfter.launchFailedAt -ne "") "The stale launch failure did not record its detection time."
+    Assert-True (@($orphanReconcile.transitions | Where-Object { [string]$_.taskId -eq "orphan-launch" }).Count -eq 1) "The stale launch transition was not reported."
+    $orphanRetry = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") `
+        -Repository $repository -Action retry -TaskId "orphan-launch" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "queued" ([string]$orphanRetry.status) "Native retry did not requeue a failed worker launch."
+    $orphanRetriedTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "orphan-launch"
+    Assert-True ($null -eq $orphanRetriedTask.launchStartedAt -and $null -eq $orphanRetriedTask.launchFailedAt) "Retry retained stale launch ownership metadata."
+
     $postLaneConfig = Read-FactoryJson -Path $context.configPath
     $postLaneConfig.codingConcurrency = 8
+    $postLaneConfig.workerLaunchTimeoutSeconds = 300
     Write-FactoryJsonAtomic -Path $context.configPath -Value $postLaneConfig
     $postLaneState = Read-FactoryJson -Path $context.statePath
     $postLaneState.tasks = @()
@@ -793,6 +833,7 @@ try {
         Assert-True ($schedulerFailureLog.Contains('"event":"tick-exception"') -and $schedulerFailureLog.Contains("Synthetic scheduler loop failure")) "Scheduler stderr log omitted the tick failure reason."
         $failedSchedulerCli = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
         Assert-True ($failedSchedulerCli.Contains("NEEDS YOUR ACTION") -and $failedSchedulerCli.Contains("SCHEDULER") -and $failedSchedulerCli.Contains("runnable work is not being processed")) "Factory status rendered a failed scheduler with runnable work as decoration."
+        Assert-True ($failedSchedulerCli.Contains("Detected:") -and $failedSchedulerCli.Contains("factory scheduler start")) "Factory status omitted scheduler failure time or recovery command."
         $failedSchedulerDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
         $failedSchedulerDoctorCheck = @($failedSchedulerDoctor.checks | Where-Object { [string]$_.name -eq "scheduler" })[0]
         Assert-True (-not [bool]$failedSchedulerDoctorCheck.passed -and [string]$failedSchedulerDoctorCheck.detail -match "failed") "Factory doctor did not diagnose the failed scheduler."
@@ -845,6 +886,47 @@ try {
     $schedulerBusyCleanup.paused = $false
     Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerBusyCleanup
 
+    $waitState = Read-FactoryJson -Path $context.statePath
+    $waitTask = New-FactoryTestTask -Id "wait-for-worker-close" -Title "Result captured while worker closes" -Now (Get-FactoryUtcTimestamp)
+    $waitTask.status = "awaiting-review"
+    $waitTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"; id = "wait-worker"; sessionId = "wait-worker-session"
+        name = "factory-wait-for-worker-close"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
+    }
+    $waitState.tasks = @($waitTask)
+    $waitState.active = $true
+    $waitState.paused = $false
+    $waitState.scheduler = [pscustomobject][ordered]@{
+        mode = "native"; status = "running"; pid = $PID
+        processStartTimeUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
+        startedAt = (Get-FactoryUtcTimestamp); heartbeatAt = (Get-FactoryUtcTimestamp)
+        lastTickAt = (Get-FactoryUtcTimestamp); lastTransitionAt = $null; lastFailureAt = $null
+        lastError = $null; failureCount = 0; activity = "idle"; activityTaskId = $null
+        activityTaskTitle = $null; activitySince = $null; activityHeartbeatAt = $null; lastExitReason = $null
+    }
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitState
+    Assert-Equal 1 (Get-FactoryLaunchedWorkerCount -State $waitState) "An awaiting-review task released its slot before its worker session closed."
+    $waitWhileClosing = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
+    Assert-True (-not [bool]$waitWhileClosing.signaled -and [bool]$waitWhileClosing.timedOut) "Factory wait treated awaiting-review with a live worker as actionable."
+    $waitReadyState = Read-FactoryJson -Path $context.statePath
+    $waitReadyTask = Get-FactoryTask -State $waitReadyState -TaskId "wait-for-worker-close"
+    $waitReadyTask.backgroundSession.state = "done"
+    $waitReadyTask.updatedAt = Get-FactoryUtcTimestamp
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitReadyState
+    $waitReady = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
+    Assert-True ([bool]$waitReady.signaled -and -not [bool]$waitReady.timedOut) "Factory wait did not return when review became actionable."
+    $waitReadyAction = @($waitReady.actions)[0]
+    Assert-Equal "awaiting-review" ([string]$waitReadyAction.kind) "Factory wait returned the wrong operator event."
+    $waitCleanup = Read-FactoryJson -Path $context.statePath
+    $waitCleanup.tasks = @()
+    $waitCleanup.active = $false
+    $waitCleanup.scheduler.status = "stopped"
+    $waitCleanup.scheduler.pid = $null
+    $waitCleanup.scheduler.processStartTimeUtc = $null
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitCleanup
+
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
     $legacyConfig.autoPushDevelopment = $false
@@ -853,6 +935,7 @@ try {
     $legacyConfig.PSObject.Properties.Remove("maxConcurrency")
     $legacyConfig.PSObject.Properties.Remove("defaultStartMode")
     $legacyConfig.PSObject.Properties.Remove("conversationLanguage")
+    $legacyConfig.PSObject.Properties.Remove("workerLaunchTimeoutSeconds")
     $legacyConfig.PSObject.Properties.Remove("testDatabaseIsolation")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
@@ -861,6 +944,7 @@ try {
     Assert-Equal 3 ([int]$migratedConfig.codingConcurrency) "The deprecated concurrency alias was not migrated into codingConcurrency."
     Assert-True ((Get-FactoryCodingConcurrencySource -Config $migratedConfig) -match "deprecated concurrency is present but ignored") "Config diagnostics do not identify the retained deprecated alias."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
+    Assert-Equal 300 ([int]$migratedConfig.workerLaunchTimeoutSeconds) "Worker launch timeout default was not migrated."
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
     Assert-Equal $false ([bool]$migratedConfig.testDatabaseIsolation.enabled) "Test database isolation was not migrated safely as opt-in."
@@ -955,6 +1039,8 @@ try {
     Write-FactoryJsonAtomic -Path ([string]$preparedIntake.normalizationPath) -Value $intakeDraft
     $enqueuedIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\enqueue-task.ps1") -Repository $repository -RequestPath ([string]$preparedIntake.requestPath) -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal $intakeTaskId ([string]$enqueuedIntake.taskId) "Native enqueue returned the wrong task."
+    Assert-Equal "queued" ([string]$enqueuedIntake.status) "Native enqueue waited for worker launch instead of returning its atomic queue result."
+    Assert-True ([bool]$enqueuedIntake.scheduler.wakeRequested -and $null -eq $enqueuedIntake.scheduler.tick) "Native enqueue ran an inline scheduler tick instead of requesting an asynchronous wake."
     Assert-True (-not [bool]$enqueuedIntake.duplicate) "Native enqueue treated a fresh task as a duplicate."
     Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.requestPath))) "Native enqueue retained the consumed request."
     Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.normalizationPath))) "Native enqueue retained the consumed draft."
@@ -1050,7 +1136,7 @@ try {
     $automaticLocalDeadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         $automaticLocalTask = @((Read-FactoryJson -Path $context.statePath).tasks | Where-Object { [string]$_.id -eq $automaticLocalId })[0]
-        if ([string]$automaticLocalTask.status -ne "queued") { break }
+        if ($null -ne $automaticLocalTask.backgroundSession -or [string]$automaticLocalTask.status -in @("awaiting-review", "held", "failed")) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $automaticLocalDeadline)
     Assert-Equal "auto" ([string]$automaticLocalTask.startMode) "Automatic local task lost its launch mode."
@@ -1151,12 +1237,16 @@ try {
     Assert-True ($null -ne $migratedState.scheduler) "Native scheduler state was not migrated."
     Assert-Equal "idle" ([string]$migratedState.scheduler.activity) "Legacy scheduler activity state was not migrated."
     Assert-True ($null -ne $migratedState.scheduler.PSObject.Properties["lastExitReason"]) "Legacy scheduler exit diagnostics were not migrated."
+    Assert-True ($null -ne $migratedState.scheduler.PSObject.Properties["lastFailureAt"]) "Legacy scheduler failure timestamp was not migrated."
     Assert-Equal "auto" ([string]$migratedState.tasks[0].startMode) "Legacy task start mode was not defaulted."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["backgroundSession"]) "Legacy task session field was not added."
     Assert-True ($null -ne $migratedState.PSObject.Properties["agentResolutionCache"]) "Legacy state agent resolution cache field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["planRecordedAt"]) "Legacy task plan timestamp field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["source"]) "Legacy task source field was not added."
     Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties["cleanup"]) "Legacy task cleanup audit field was not added."
+    foreach ($launchField in @("launchStartedAt", "launchCompletedAt", "launchFailedAt", "launchProcessId", "launchProcessStartTimeUtc")) {
+        Assert-True ($null -ne $migratedState.tasks[0].PSObject.Properties[$launchField]) "Legacy task launch field '$launchField' was not added."
+    }
 
     $cliScriptPath = Join-Path $pluginRoot "factory.ps1"
     $cliSource = Get-Content -LiteralPath $cliScriptPath -Raw
@@ -1167,6 +1257,7 @@ try {
     Assert-True ($cliSource.Contains('[switch]$Direct')) "Factory CLI does not expose direct approval."
     Assert-True ($cliSource.Contains('"preview"') -and $cliSource.Contains('[switch]$NoOpen')) "Factory CLI does not expose native browser preview."
     Assert-True ($cliSource.Contains('"rotate"')) "Factory CLI does not expose native orchestrator rotation."
+    Assert-True ($cliSource.Contains('"wait"') -and $cliSource.Contains('"retry"')) "Factory CLI does not expose native wait and retry commands."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
 
     $cliState = Read-FactoryJson -Path $context.statePath
@@ -1197,8 +1288,14 @@ try {
         tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
         changedFiles = @()
     }
+    $closingReviewCliTask = New-FactoryTestTask -Id "closing-review-cli-task" -Title "Worker is still closing" -Now $now
+    $closingReviewCliTask.status = "awaiting-review"
+    $closingReviewCliTask.backgroundSession = [pscustomobject]@{
+        runtime = "claude"; id = "closing-review"; sessionId = "closing-review-session"
+        name = "factory-closing-review-cli-task"; state = "working"; lastSeenAt = $now
+    }
     $rejectCliTask = New-FactoryTestTask -Id "reject-cli-task" -Title "Disposable CLI task without artifacts" -Now $now
-    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $doneCliTask, $rejectCliTask)
+    $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $closingReviewCliTask, $doneCliTask, $rejectCliTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
 
     $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
@@ -1206,6 +1303,7 @@ try {
     Assert-True ($cliHelp.Contains("no AI interpretation")) "Factory CLI help hides its deterministic execution model."
     Assert-True ($cliHelp.Contains("factory go <task-id> [--direct]")) "Factory CLI help omits direct approval."
     Assert-True ($cliHelp.Contains("factory rotate [status|cancel]")) "Factory CLI help omits orchestrator rotation."
+    Assert-True ($cliHelp.Contains("factory wait [timeout-seconds]") -and $cliHelp.Contains("factory retry <task-id>")) "Factory CLI help omits native wait or retry."
     $cliGoHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help go | Out-String)
     Assert-True ($cliGoHelp.Contains("skips independent AI code review")) "Factory go help hides direct approval semantics."
     $cliRotateHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help rotate | Out-String)
@@ -1269,6 +1367,8 @@ try {
     Assert-True ($cliStatus.Contains("History: factory status done")) "Factory CLI status does not collapse completed history."
     Assert-True (-not $cliStatus.Contains("Completed CLI history task")) "Factory CLI default status expanded completed history."
     Assert-True ($cliStatus.Contains("coding slots") -and $cliStatus.Contains("test lane free")) "Factory CLI status does not expose both coding capacity and the serialized test lane."
+    Assert-True ($cliStatus.Contains("WAITING") -and $cliStatus.Contains("FINISHING") -and $cliStatus.Contains("closing-review-cli-task")) "Factory status presented an awaiting-review task with a live worker as actionable review."
+    Assert-True (-not $cliStatus.Contains("/factory review closing-review-cli-task")) "Factory status offered review before the worker session closed."
 
     $previousDirectPreflightErrorAction = $ErrorActionPreference
     try {
@@ -1340,7 +1440,7 @@ try {
         try {
             $commandCompletion = @((TabExpansion2 "factory " 8).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($commandCompletion -contains "reject" -and $commandCompletion -contains "completion") "PowerShell did not complete the phase-2 factory commands."
-            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "rotate" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview") "PowerShell did not complete the unified native commands."
+            Assert-True ($commandCompletion -contains "start" -and $commandCompletion -contains "rotate" -and $commandCompletion -contains "scheduler" -and $commandCompletion -contains "purge" -and $commandCompletion -contains "preview" -and $commandCompletion -contains "wait" -and $commandCompletion -contains "retry") "PowerShell did not complete the unified native commands."
             Assert-True (-not ($commandCompletion -contains "d")) "PowerShell completion still exposes noisy one-letter aliases."
             $statusCompletion = @((TabExpansion2 "factory status h" 16).CompletionMatches | ForEach-Object { [string]$_.CompletionText })
             Assert-True ($statusCompletion -contains "held") "PowerShell did not complete a factory status filter."
@@ -1891,8 +1991,39 @@ try {
     & git -C $repository push origin develop 1> $null
     $syncLease = (& powershell -NoProfile -ExecutionPolicy Bypass -File $testLeaseScript `
         -Action acquire -Repository $repository -TaskId "test-task" -Phase verify -OwnerPid $PID -NoHeartbeat) | ConvertFrom-Json
-    $sync = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\sync-task.ps1") `
-        -Repository $repository -TaskId "test-task" -Action prepare -LeaseToken ([string]$syncLease.token)) | ConvertFrom-Json
+    $syncDelayMarker = Join-Path $testRoot "sync-outside-state-lock.marker"
+    $syncStdout = Join-Path $testRoot "sync-outside-state-lock.stdout"
+    $syncStderr = Join-Path $testRoot "sync-outside-state-lock.stderr"
+    $env:CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS = "4000"
+    $env:CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER = $syncDelayMarker
+    $syncArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\sync-task.ps1"),
+        "-Repository", $repository, "-TaskId", "test-task", "-Action", "prepare", "-LeaseToken", ([string]$syncLease.token)
+    ) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+    $syncProcess = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
+        -ArgumentList ($syncArguments -join " ") -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $syncStdout -RedirectStandardError $syncStderr
+    try {
+        $syncMarkerDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $syncDelayMarker) -and [DateTime]::UtcNow -lt $syncMarkerDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-True (Test-Path -LiteralPath $syncDelayMarker) "Long sync fixture did not reach its unlocked work phase."
+        $stateMutexProbe = $null
+        try {
+            $stateMutexProbe = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey) -TimeoutMilliseconds 2000
+        } finally {
+            Exit-FactoryMutex -Mutex $stateMutexProbe
+        }
+        Assert-True ($syncProcess.WaitForExit(30000)) "Long sync fixture did not complete."
+        Assert-Equal 0 ([int]$syncProcess.ExitCode) "Sync outside-lock fixture failed: $(Get-Content -LiteralPath $syncStderr -Raw)"
+        $sync = (Get-Content -LiteralPath $syncStdout -Raw) | ConvertFrom-Json
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER -ErrorAction SilentlyContinue
+        if (-not $syncProcess.HasExited) { Stop-Process -Id $syncProcess.Id -Force -ErrorAction SilentlyContinue }
+        $syncProcess.Dispose()
+    }
     Assert-Equal "syncing" ([string]$sync.status) "Task sync did not require fresh validation."
     Assert-True ([string]$sync.commit -ne $commit) "Task sync did not replace the old commit SHA."
     Assert-True (Test-Path -LiteralPath (Join-Path $launch.worktree "BASE.md")) "Worker worktree did not receive the latest development base."
@@ -3001,6 +3132,8 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_DB_ENV_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue

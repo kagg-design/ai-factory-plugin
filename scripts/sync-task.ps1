@@ -34,11 +34,20 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
 $mutex = $null
+$operationMutex = Enter-FactoryMutex `
+    -ProjectKey "$($context.projectKey)-sync-$(ConvertTo-FactoryTaskArtifactName -TaskId $TaskId)"
 
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-    $state = Read-FactoryJson -Path $context.statePath
-    $task = Get-FactoryTask -State $state -TaskId $TaskId
+    try {
+        $state = Read-FactoryJson -Path $context.statePath
+        $task = Get-FactoryTask -State $state -TaskId $TaskId
+    } finally {
+        Exit-FactoryMutex -Mutex $mutex
+        $mutex = $null
+    }
+    $initialStatus = [string]$task.status
+    $initialAttempt = [int](Get-FactoryNestedValue -Target $task -Name "attempts" -Default 0)
     $workerVerification = $Action -eq "prepare" -and [string]$task.status -in @("starting", "planning", "running")
     $repositoryRoot = [IO.Path]::GetFullPath([string]$context.repositoryRoot)
     $worktreeRoot = [IO.Path]::GetFullPath([string]$context.worktreeRoot)
@@ -65,6 +74,20 @@ try {
         [string](Get-FactoryNestedValue -Target $leaseHolder -Name "phase" -Default "") -notin @("verify", "review")
     ) {
         throw "Sync test lease token does not own this task's verify/review lane."
+    }
+
+    # Regression hook: simulate a long Git/dependency phase after the global
+    # state mutex has been released. The production path has no delay.
+    $testSyncDelay = 0
+    if ([int]::TryParse([string]$env:CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS, [ref]$testSyncDelay) -and $testSyncDelay -gt 0) {
+        if ([string]$env:CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER) {
+            [IO.File]::WriteAllText(
+                [string]$env:CLAUDE_FACTORY_TEST_SYNC_DELAY_MARKER,
+                (Get-FactoryUtcTimestamp),
+                (New-Object Text.UTF8Encoding($false))
+            )
+        }
+        Start-Sleep -Milliseconds $testSyncDelay
     }
 
     if (-not $worktree -or -not (Test-Path -LiteralPath $worktree)) {
@@ -178,18 +201,34 @@ try {
             blockingReason = ""
         }
         $now = Get-FactoryUtcTimestamp
-        Set-FactoryProperty -Target $task -Name "commit" -Value $head
-        Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
-        Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
-        Set-FactoryProperty -Target $task -Name "review" -Value $null
-        Set-FactoryProperty -Target $task -Name "approval" -Value $null
-        Set-FactoryProperty -Target $task -Name "syncPreparation" -Value $null
-        Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
-        Set-FactoryProperty -Target $task -Name "error" -Value $null
-        Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value $now
-        Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
-        Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
-        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+        try {
+            $currentState = Read-FactoryJson -Path $context.statePath
+            $currentTask = Get-FactoryTask -State $currentState -TaskId $TaskId
+            if (
+                [string]$currentTask.status -ne $initialStatus -or
+                [string]$currentTask.branch -ne $branch -or
+                -not (Test-FactorySamePath -Left ([string]$currentTask.worktree) -Right $worktree) -or
+                [string]$currentTask.commit -ne $commit
+            ) {
+                throw "Task '$TaskId' changed while sync validation was running; refusing to overwrite newer factory state."
+            }
+            Set-FactoryProperty -Target $currentTask -Name "commit" -Value $head
+            Set-FactoryProperty -Target $currentTask -Name "workerResult" -Value $result
+            Set-FactoryProperty -Target $currentTask -Name "status" -Value "awaiting-review"
+            Set-FactoryProperty -Target $currentTask -Name "review" -Value $null
+            Set-FactoryProperty -Target $currentTask -Name "approval" -Value $null
+            Set-FactoryProperty -Target $currentTask -Name "syncPreparation" -Value $null
+            Set-FactoryProperty -Target $currentTask -Name "pendingInstructions" -Value $null
+            Set-FactoryProperty -Target $currentTask -Name "error" -Value $null
+            Set-FactoryProperty -Target $currentTask -Name "resultRecordedAt" -Value $now
+            Set-FactoryProperty -Target $currentTask -Name "updatedAt" -Value $now
+            Set-FactoryProperty -Target $currentState -Name "updatedAt" -Value $now
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $currentState
+        } finally {
+            Exit-FactoryMutex -Mutex $mutex
+            $mutex = $null
+        }
         Remove-Item -LiteralPath $resolvedTestsPath -Force
 
         [ordered]@{
@@ -307,15 +346,31 @@ try {
     $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $newCommit)
     $now = Get-FactoryUtcTimestamp
     if ($workerVerification) {
-        Set-FactoryProperty -Target $task -Name "verificationSync" -Value ([pscustomobject][ordered]@{
-            commit = $newCommit
-            baseRef = $baseRef
-            baseCommit = $baseCommit
-            preparedAt = $now
-        })
-        Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
-        Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
-        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+        try {
+            $currentState = Read-FactoryJson -Path $context.statePath
+            $currentTask = Get-FactoryTask -State $currentState -TaskId $TaskId
+            if (
+                [string]$currentTask.status -notin @("starting", "planning", "running") -or
+                [int](Get-FactoryNestedValue -Target $currentTask -Name "attempts" -Default 0) -ne $initialAttempt -or
+                [string]$currentTask.branch -ne $branch -or
+                -not (Test-FactorySamePath -Left ([string]$currentTask.worktree) -Right $worktree)
+            ) {
+                throw "Task '$TaskId' changed while worker sync was running; refusing to overwrite newer factory state."
+            }
+            Set-FactoryProperty -Target $currentTask -Name "verificationSync" -Value ([pscustomobject][ordered]@{
+                commit = $newCommit
+                baseRef = $baseRef
+                baseCommit = $baseCommit
+                preparedAt = $now
+            })
+            Set-FactoryProperty -Target $currentTask -Name "updatedAt" -Value $now
+            Set-FactoryProperty -Target $currentState -Name "updatedAt" -Value $now
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $currentState
+        } finally {
+            Exit-FactoryMutex -Mutex $mutex
+            $mutex = $null
+        }
         [ordered]@{
             taskId = $TaskId
             status = [string]$task.status
@@ -332,23 +387,39 @@ try {
         } | ConvertTo-Json -Depth 20
         exit 0
     }
-    Set-FactoryProperty -Target $task -Name "commit" -Value $newCommit
-    Set-FactoryProperty -Target $task -Name "workerResult" -Value $null
-    Set-FactoryProperty -Target $task -Name "review" -Value $null
-    Set-FactoryProperty -Target $task -Name "approval" -Value $null
-    Set-FactoryProperty -Target $task -Name "syncPreparation" -Value ([pscustomobject][ordered]@{
-        commit = $newCommit
-        baseRef = $baseRef
-        baseCommit = $baseCommit
-        previousTests = @($previousTests)
-        preparedAt = $now
-    })
-    Set-FactoryProperty -Target $task -Name "status" -Value "syncing"
-    Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value "Re-run appropriate checks after synchronization with $baseRef, then finalize sync validation."
-    Set-FactoryProperty -Target $task -Name "error" -Value $null
-    Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
-    Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+    try {
+        $currentState = Read-FactoryJson -Path $context.statePath
+        $currentTask = Get-FactoryTask -State $currentState -TaskId $TaskId
+        if (
+            [string]$currentTask.status -ne $initialStatus -or
+            [string]$currentTask.branch -ne $branch -or
+            -not (Test-FactorySamePath -Left ([string]$currentTask.worktree) -Right $worktree) -or
+            [string]$currentTask.commit -ne $oldCommit
+        ) {
+            throw "Task '$TaskId' changed while sync was running; refusing to overwrite newer factory state."
+        }
+        Set-FactoryProperty -Target $currentTask -Name "commit" -Value $newCommit
+        Set-FactoryProperty -Target $currentTask -Name "workerResult" -Value $null
+        Set-FactoryProperty -Target $currentTask -Name "review" -Value $null
+        Set-FactoryProperty -Target $currentTask -Name "approval" -Value $null
+        Set-FactoryProperty -Target $currentTask -Name "syncPreparation" -Value ([pscustomobject][ordered]@{
+            commit = $newCommit
+            baseRef = $baseRef
+            baseCommit = $baseCommit
+            previousTests = @($previousTests)
+            preparedAt = $now
+        })
+        Set-FactoryProperty -Target $currentTask -Name "status" -Value "syncing"
+        Set-FactoryProperty -Target $currentTask -Name "pendingInstructions" -Value "Re-run appropriate checks after synchronization with $baseRef, then finalize sync validation."
+        Set-FactoryProperty -Target $currentTask -Name "error" -Value $null
+        Set-FactoryProperty -Target $currentTask -Name "updatedAt" -Value $now
+        Set-FactoryProperty -Target $currentState -Name "updatedAt" -Value $now
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $currentState
+    } finally {
+        Exit-FactoryMutex -Mutex $mutex
+        $mutex = $null
+    }
 
     [ordered]@{
         taskId = $TaskId
@@ -365,4 +436,5 @@ try {
     } | ConvertTo-Json -Depth 20
 } finally {
     Exit-FactoryMutex -Mutex $mutex
+    Exit-FactoryMutex -Mutex $operationMutex
 }

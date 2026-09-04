@@ -60,6 +60,8 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory add --file PATH import normalized task without AI
   !factory go <id> [--direct] approve, optionally skipping AI review
   !factory hold <id>       retain task on hold
+  !factory retry <id>      retry a recoverable worker/launch failure
+  !factory wait [seconds]  wait until operator action is ready
   !factory reject <id>     preview; add -Yes or -Keep
   !factory cleanup <id>    remove published artifacts
   !factory concurrency [N] show or change worker limit
@@ -82,6 +84,7 @@ Open and understand
   inspect <id>             full task details
   preview <id>             run Laravel/Vite from that worktree in a browser
   transcript <id>          worker conversation summary
+  wait [seconds]           block natively until action is required
 
 Prepare and decide
   sync <id>                update worktree from development
@@ -95,7 +98,7 @@ Prepare and decide
   cleanup <id>             remove published worker artifacts
 
 Control
-  retry <id>               retry blocked/failed/machine-held task
+  retry <id>               retry blocked/failed/machine-held/stalled launch
   concurrency [N]          show or change worker limit
   rotate                   hand off to a fresh orchestrator conversation
   pause|resume|stop        control orchestration
@@ -250,8 +253,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 The enqueue script revalidates the immutable request identity and mode, rejects
 unknown or oversized fields, repeats deduplication under the state mutex,
 creates the complete task object atomically, consumes the two private intake
-files, and wakes the native scheduler for queued work. AI must never edit
-`state.json` or launch a worker directly. Do not wait for workers to finish.
+files, and requests an asynchronous native scheduler wake for queued work. It
+returns the queued result without waiting for worktree/session creation. AI
+must never edit `state.json` or launch a worker directly. Do not wait for
+workers to start or finish.
 
 For a manually normalized task or a future source adapter, the operator can
 bypass AI and Asana completely:
@@ -263,13 +268,9 @@ bypass AI and Asana completely:
 That file must satisfy `resources/intake.schema.json`. Non-Asana IDs are stored
 as `adapter:id`; Asana retains its numeric task ID for compatibility.
 
-Re-read state after the tick and show, for every launched task:
-
-- task ID and mode;
-- background session name and short ID;
-- `claude attach <short-id>`;
-- that `←` opens Agent View, where Enter attaches and `Esc`/`Ctrl+C`
-  interrupts a running turn.
+Report the task ID, mode, queued/blocked result, and `factory inspect <id>` as
+the monitoring command. If a session already appears in a fresh state read,
+also show its exact attach command; never wait for that session to appear.
 
 ### `preview [<task-id>|stop]`
 
@@ -346,7 +347,7 @@ Default `status` rules:
    scheduler in plain language only when no runnable work exists. If runnable
    work exists while the scheduler is stopped or failed, include the native
    scheduler problem under `NEEDS YOUR ACTION` with its saved reason, stderr log
-   path, and exact recovery/diagnostic command. A busy scheduler is healthy:
+   path, failure time, and exact recovery command. A busy scheduler is healthy:
    show its activity and task, and never recommend starting or resuming another.
 
 The tree layout is mandatory and must follow this shape:
@@ -386,7 +387,10 @@ Choose `Next:` from the actual task data:
 - `awaiting-input`: `/factory chat <id>`; alternative
   `/factory answer <id> --text "..."` when a fresh attempt is appropriate.
 - `syncing`: `/factory sync <id>`.
-- `awaiting-review`: `/factory review <id>`. Also show
+- `awaiting-review` with a live non-terminal worker session: put it under
+  `WAITING`, label it `FINISHING`, keep the session in coding capacity, and use
+  `/factory chat <id>`; review is not actionable until the session closes.
+- `awaiting-review` with a closed/terminal session: `/factory review <id>`. Also show
   `!factory go <id> --direct` as an alternative only when no existing review
   says `changes-required` or `blocked`. If the task is known to be behind the
   development branch, make `/factory sync <id>` primary and explain why.
@@ -743,17 +747,30 @@ operator control that suspends new worker launches and publication.
 ### `resume`
 
 Run `factory-scheduler.ps1 -Action resume`. It sets `paused: false` and
-`active: true`, starts the scheduler if needed, and fills capacity immediately.
+`active: true`, starts the scheduler if needed, and writes an asynchronous wake
+request. It returns without running launch or publication inline; the scheduler
+fills capacity in its own process.
 This resumes orchestration, not a specific worker conversation.
 
 ### `retry <task-id>`
 
-Run `task-action.ps1 -Action retry`. It accepts `blocked`, `failed`, and `held`
-only when `holdReason` identifies a background session that stopped without a
-`FACTORY_RESULT`. It refuses tasks with a validated result/commit or a missing
-worktree, clears obsolete session/error fields, retains the branch/worktree,
-and queues the task. Run `factory-scheduler.ps1 -Action resume` afterward. A manual
+Run `task-action.ps1 -Action retry`. It accepts `blocked`, `failed`, `held` only
+when `holdReason` identifies a background session that stopped without a
+`FACTORY_RESULT`, and `starting`/`planning` when no session was recorded. It
+refuses tasks with a validated result/commit. A failed launch may lack a
+worktree; the other retry paths require their retained worktree. It clears
+obsolete session/error/launch ownership fields, retains safe artifacts, and
+queues the task. Run `factory-scheduler.ps1 -Action resume` afterward. A manual
 `hold` is never retryable through this path.
+
+### `wait [timeout-seconds]`
+
+Run native `factory wait [timeout-seconds]`. It blocks without AI and without
+tailing scheduler logs until input, a closed-session review, a blocker, a
+failure, a stale sessionless launch, or a dead scheduler with runnable work
+requires the operator. Omit the timeout (or use zero) to wait indefinitely.
+Do not treat `awaiting-review` as actionable while its worker session remains
+non-terminal.
 
 ### `stop`
 
@@ -774,6 +791,11 @@ and the recorded PID/start time enforce one scheduler per project. It reconciles
 worker sessions, publishes at most one formally approved task, and fills queued
 capacity without AI calls. It sleeps cheaply when idle and starts automatically
 with `factory start`/`start-factory.ps1`.
+
+Worker launch writes `launchStartedAt` before slow work begins. Reconciliation
+changes `starting`/`planning` without a recorded session to `failed` after
+private `workerLaunchTimeoutSeconds` (300 by default), recording the failure
+time and reason. A sessionless launch never consumes coding capacity.
 
 Use `factory scheduler status` for process identity and heartbeat. New tasks,
 `answer`, `retry`, `go`, `resume`, or a concurrency increase wake or start the

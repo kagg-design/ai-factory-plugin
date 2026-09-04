@@ -269,6 +269,11 @@ try {
             status = if ($sourceError) { "blocked" } else { "queued" }
             attempts = 0
             attemptPrepared = $false
+            launchStartedAt = $null
+            launchCompletedAt = $null
+            launchFailedAt = $null
+            launchProcessId = $null
+            launchProcessStartTimeUtc = $null
             agentId = $null
             backgroundSession = $null
             branch = $null

@@ -270,9 +270,16 @@ the two log paths. Long reconciliation, launch, and publication work is shown as
 start` and `factory resume` refuse duplicate ownership while that work is in
 flight. If runnable work exists and the scheduler is stopped or failed, status
 adds a scheduler card to `NEEDS YOUR ACTION`; `doctor` reports the failure and
-stderr path. The JSONL stdout log contains one entry per tick plus process
+stderr path. The status card includes the failure time and exact recovery
+command. The JSONL stdout log contains one entry per tick plus process
 start/exit records, while stderr records tick failures and unexpected process
 loss. No Claude cron job is created.
+
+Use `factory wait [timeout-seconds]` when a shell or orchestrator should sleep
+until Factory needs a decision. It watches atomic state rather than logs and
+returns for input, a closed-session review, blockers, failures, abandoned
+launches, or a dead scheduler with runnable work. `awaiting-review` remains
+waiting while its worker session is still live.
 
 ## 5. IDs shown in status output
 
@@ -320,7 +327,7 @@ active factory tasks.
 | Status            | Meaning                                       | Operator action                     |
 |-------------------|-----------------------------------------------|-------------------------------------|
 | `queued`          | waiting for capacity                          | usually none                        |
-| `starting`        | worktree and session are being created        | wait                                |
+| `starting`        | worktree and session are being created        | wait; retry if launch is abandoned  |
 | `planning`        | worker is inspecting the task                 | wait for its plan                   |
 | `awaiting-input`  | worker needs a reply                          | open its conversation               |
 | `running`         | implementation or tests are in progress       | monitor or steer                    |
@@ -342,8 +349,9 @@ A Claude session state shown in parentheses is a separate concept:
   `SESSION BLOCKED` with its age and captured wait reason;
 - `(done)` means the background session finished its turn.
 
-A session may be `(done)` while its factory task remains `awaiting-review`
-until a human reviews and approves its commit.
+A task may enter `awaiting-review` before its worker process fully closes. It
+remains under `WAITING` and still owns its coding slot until the session is
+terminal; only then does review become an operator action.
 
 ## 7. Opening a specific task
 
@@ -476,7 +484,9 @@ The orchestrator does not write queue state. Native preparation validates the
 Asana URL and checks duplicates before the connector is called. AI reads Asana
 and fills only semantic fields in a private versioned envelope. Native enqueue
 then validates `resources/intake.schema.json`, repeats deduplication while
-holding the state lock, atomically creates the task, and wakes the scheduler.
+holding the state lock, atomically creates the task, and requests an
+asynchronous scheduler wake. Enqueue returns the queued result without waiting
+for worktree creation or worker launch.
 
 To import a normalized envelope without AI or Asana:
 
@@ -671,6 +681,12 @@ The preparation marker includes the exact fetched development SHA. If that tip
 moves before validation completes, another `sync` re-rebases and updates the
 marker instead of returning `alreadyPrepared` for stale work.
 
+Fetch, Git inspection/rebase, dependency alignment, and test-result validation
+run outside the global state mutex. Sync uses a separate per-task operation
+mutex, then reacquires the global mutex only to verify that the task has not
+changed and atomically save the result. Other task and status commands therefore
+remain responsive during a long synchronization.
+
 Every operation that creates, resets, merges into, or rebases a factory
 worktree aligns dependencies in that worktree before checks or worker launch.
 Composer runs `composer install --no-interaction --no-progress`, including dev
@@ -739,6 +755,9 @@ Resume orchestration:
 factory resume
 ```
 
+Resume starts the scheduler if needed and writes an asynchronous wake request;
+it does not run worker launch, Git, or publication inline in the command.
+
 Stop only the scheduler process while retaining the factory's current
 active/paused permission and all sessions, branches, commits, and worktrees:
 
@@ -769,7 +788,12 @@ sets `held` with a machine `holdReason`. Continue the retained worktree with:
 ```
 
 A manual hold has a different reason and is not accepted by `retry`. Retry also
-refuses a missing worktree or a task that already has a validated commit/result.
+accepts `starting` or `planning` when no session was ever recorded. An abandoned
+launch becomes `failed` after private config `workerLaunchTimeoutSeconds` (300
+seconds by default), records its start/failure timestamps, and does not consume
+capacity. A failed launch may be retried even if worktree creation never
+completed; other retry paths still require their retained worktree. Every retry
+refuses a task that already has a validated commit/result.
 
 Before stopping a Claude worker that appears stuck in `working`, inspect
 `runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
@@ -803,6 +827,7 @@ refreshes the file without duplicating the pointer or attempt.
 /factory transcript <task-id>
 /factory doctor
 factory scheduler status
+factory wait [timeout-seconds]
 ```
 
 - `status` reconciles sessions and summarizes the queue.
@@ -820,6 +845,8 @@ factory scheduler status
 - `factory scheduler status` validates the recorded PID/start time and named
   ownership, reports busy activity and its live heartbeat, and prints the tick
   and error log paths without calling AI.
+- `factory wait` blocks without AI or log tailing until an operator action is
+  ready; a timeout is optional and zero/omitted means wait indefinitely.
 
 A worker session reports `agentResolution: plugin` when Claude resolved the
 session-only plugin agent directly. `inline-fallback` means the launcher safely
@@ -891,8 +918,10 @@ running and unpaused scheduler start additional queued tasks. It never clears
 an operator pause; use `/factory resume` separately. Decreasing the limit never
 kills workers that are already running.
 
-`starting`, `planning`, `awaiting-input`, and `running` consume coding capacity.
-`awaiting-review` does not. Use `/factory hold <task-id>` on a queued task to
+Those worker states consume coding capacity only when a non-terminal recorded
+session exists. Sessionless `starting`/`planning` entries never hold a slot.
+`awaiting-review` keeps its slot only until its worker session closes. Use
+`/factory hold <task-id>` on a queued task to
 exclude it before any session or worktree exists; `/factory release <task-id>`
 returns that cheap hold to `queued` without unpausing the factory.
 

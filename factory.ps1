@@ -2,9 +2,9 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
+        "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
         "cleanup", "concurrency", "completion", "start", "rotate", "paths", "config",
-        "scheduler", "tick", "pause", "resume", "stop", "purge"
+        "scheduler", "tick", "pause", "resume", "stop", "wait", "purge"
     )]
     [string]$Command = "help",
 
@@ -24,9 +24,9 @@ param(
         $staticValues = @(switch ($typedCommand) {
             "help" {
                 @(
-                    "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "reject",
+                    "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
                     "cleanup", "concurrency", "completion", "start", "paths",
-                    "rotate", "config", "scheduler", "tick", "pause", "resume", "stop",
+                    "rotate", "config", "scheduler", "tick", "pause", "resume", "stop", "wait",
                     "purge", "help"
                 )
             }
@@ -52,7 +52,7 @@ param(
             if ($typedCommand -ne "preview") { return }
         }
 
-        if ($typedCommand -notin @("inspect", "preview", "chat", "go", "hold", "reject", "cleanup")) { return }
+        if ($typedCommand -notin @("inspect", "preview", "chat", "go", "hold", "reject", "cleanup", "retry")) { return }
 
         try {
             $commandInfo = Get-Command $CommandName -ErrorAction Stop

@@ -551,8 +551,11 @@ available coding slots. It never resumes or starts a paused/stopped factory;
 run `factory resume` as a separate decision. Decreasing the limit never kills
 workers already running; the scheduler simply waits before starting more.
 
-`starting`, `planning`, `awaiting-input`, and `running` tasks consume coding
-capacity because each represents a launched worker. `awaiting-review` does not.
+`starting`, `planning`, `awaiting-input`, and `running` consume coding capacity
+only while they have a recorded non-terminal worker session. A sessionless
+launch therefore cannot permanently occupy a slot. `awaiting-review` continues
+to consume its slot only while the worker session is still closing; afterward
+it becomes an operator review action.
 Targeted tests may run during coding without the test lease. A worker's final
 full suite, review full suites, and native publication checks serialize through
 the one test lane. Publication waiters outrank verification/review waiters.
@@ -584,6 +587,7 @@ doctor` reports both fresh and timed-out blocked worker sessions.
 /factory reject <task-id> [reason] [--yes|--keep]
 /factory cleanup <task-id>
 /factory retry <task-id>
+/factory wait [timeout-seconds]
 /factory rotate
 /factory pause
 /factory resume
@@ -594,8 +598,9 @@ Scheduler process control and factory permission are deliberately separate.
 `factory scheduler stop`/`start` (and the top-level `factory stop`) stop or
 start only the native process and preserve both `active` and `paused`. Use
 `factory pause` to suspend new launches/publication while keeping the process,
-and `factory resume` to permit work, start the scheduler if necessary, and tick
-immediately. Starting a scheduler while an explicit pause remains set does not
+and `factory resume` to permit work, start the scheduler if necessary, and
+request an asynchronous wake. The command returns without running worker launch
+or publication inline. Starting a scheduler while an explicit pause remains set does not
 clear that pause: the command warns that the process is running but inert and
 names `factory resume`. With runnable work, both scheduler and factory status
 show this combination as an actionable problem.
@@ -632,7 +637,15 @@ is in flight. Every tick is appended as one JSON line to
 `scheduler.stderr.log`. Both paths are shown by `factory scheduler status`.
 If runnable work exists while the scheduler is stopped or failed, `factory
 status` places the scheduler under `NEEDS YOUR ACTION` instead of describing it
-as sleeping, and `factory doctor` reports the same failure and log path.
+as sleeping. The card includes the saved reason, detection time, error log, and
+exact recovery command; `factory doctor` reports the same failure and log path.
+
+`factory wait` is the native, log-free notification boundary. It reads the
+atomic state snapshot until input, a closed-session review, a blocker, a
+failure, a stale sessionless launch, or a dead scheduler with runnable work
+needs the operator. An optional timeout returns cleanly when nothing changes.
+It deliberately does not signal for `awaiting-review` while that task's worker
+session is still live.
 
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,
@@ -644,6 +657,9 @@ commit directly on the recorded worker branch, with the current development
 tip as its parent; rerunning `/factory sync <task-id>` validates and adopts that
 HEAD. An interrupted validation remains `syncing` and cannot be approved until
 the same command successfully finalizes it.
+Git, rebase, dependency alignment, and validation run outside the global state
+mutex. A per-task sync mutex prevents two sync operations for the same task;
+the global mutex is reacquired only for guarded atomic state updates.
 The preparation marker records the exact remote development SHA. Running
 `sync` again after that tip moves re-rebases the task onto the new tip instead
 of trusting the older marker.
@@ -692,7 +708,11 @@ error is never treated as permission to run a prohibited Git operation.
 
 
 A session that stops without `FACTORY_RESULT` is machine-held and can be resumed
-with `retry`, or supplied durable decisions with `answer`. `answer` refreshes an
+with `retry`, or supplied durable decisions with `answer`. A `starting` or
+`planning` task with no recorded session is also retryable. Reconciliation uses
+`workerLaunchTimeoutSeconds` (300 by default) to turn an abandoned launch into
+an explicit `failed` task with timestamps, while sessionless launch state never
+blocks capacity. `answer` refreshes an
 ignored `FACTORY-DECISIONS.md` in the retained worktree, removes the superseded
 Agent View rows without deleting their transcripts, and queues one attempt.
 Manual holds remain distinct and are not automatically retryable.

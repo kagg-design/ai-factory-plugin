@@ -105,6 +105,11 @@ if ($Initialize) {
                 answerHash = $null
                 testDatabase = $null
                 syncPreparation = $null
+                launchStartedAt = $null
+                launchCompletedAt = $null
+                launchFailedAt = $null
+                launchProcessId = $null
+                launchProcessStartTimeUtc = $null
             }.GetEnumerator()) {
                 if ($null -eq $task.PSObject.Properties[$property.Key]) {
                     $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value

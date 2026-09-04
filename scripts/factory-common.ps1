@@ -268,13 +268,147 @@ function Get-FactoryCodingConcurrencySource {
 function Get-FactoryLaunchedWorkerCount {
     param([Parameter(Mandatory = $true)]$State)
 
-    # awaiting-input retains a live coding slot. It represents a launched
-    # worker/conversation, even while the operator is deciding what to answer.
+    # A task state is not proof that a worker exists. In particular, a launcher
+    # can be terminated after writing `starting` but before recording a session.
+    # Count only recorded, non-terminal sessions so an orphaned launch cannot
+    # permanently consume capacity. An awaiting-review worker continues to own
+    # its slot until the runtime confirms that the session has closed.
     return @(
         $State.tasks | Where-Object {
-            [string]$_.status -in @("starting", "planning", "awaiting-input", "running")
+            [string]$_.status -in @("starting", "planning", "awaiting-input", "running", "awaiting-review") -and
+            (Test-FactoryTaskHasActiveSession -Task $_)
         }
     ).Count
+}
+
+function Test-FactoryTaskHasRecordedSession {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    $session = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
+    return $null -ne $session -and [string](Get-FactoryNestedValue -Target $session -Name "id" -Default "")
+}
+
+function Test-FactoryTaskHasActiveSession {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    if (-not (Test-FactoryTaskHasRecordedSession -Task $Task)) { return $false }
+    $session = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
+    $sessionState = [string](Get-FactoryNestedValue -Target $session -Name "state" -Default (
+        Get-FactoryNestedValue -Target $session -Name "status" -Default ""
+    ))
+    return $sessionState -notin @("done", "stopped", "failed")
+}
+
+function Get-FactoryLaunchStallInfo {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [int]$TimeoutSeconds = 300,
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    $status = [string](Get-FactoryNestedValue -Target $Task -Name "status" -Default "")
+    $eligible = $status -in @("starting", "planning") -and -not (Test-FactoryTaskHasRecordedSession -Task $Task)
+    $startedAt = Get-FactoryNestedValue -Target $Task -Name "launchStartedAt"
+    if ($null -eq $startedAt) { $startedAt = Get-FactoryNestedValue -Target $Task -Name "updatedAt" }
+    $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $startedAt
+    $ageSeconds = if ([bool]$parsed.success) {
+        [Math]::Max(0, [int]($NowUtc.ToUniversalTime() - ([DateTime]$parsed.value)).TotalSeconds)
+    } else { 0 }
+    return [pscustomobject][ordered]@{
+        eligible = $eligible
+        stalled = $eligible -and [bool]$parsed.success -and $ageSeconds -ge [Math]::Max(1, $TimeoutSeconds)
+        ageSeconds = $ageSeconds
+        timeoutSeconds = [Math]::Max(1, $TimeoutSeconds)
+        startedAt = if ([bool]$parsed.success) { ConvertTo-FactoryRoundtripTimestamp -Value $parsed.value } else { $null }
+        timestampReadable = [bool]$parsed.success
+        timestampError = if ([bool]$parsed.success) { $null } else { [string]$parsed.error }
+    }
+}
+
+function Test-FactoryRecordedProcess {
+    param($ProcessRecord)
+
+    if ($null -eq $ProcessRecord) { return $false }
+    $processId = [int](Get-FactoryNestedValue -Target $ProcessRecord -Name "pid" -Default 0)
+    if ($processId -le 0) { return $false }
+    try {
+        $process = Get-Process -Id $processId -ErrorAction Stop
+        $expectedStart = Get-FactoryNestedValue -Target $ProcessRecord -Name "processStartTimeUtc"
+        if ($null -eq $expectedStart -or -not [string]$expectedStart) { return $true }
+        $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $expectedStart
+        if (-not [bool]$parsed.success) { return $false }
+        return [Math]::Abs(($process.StartTime.ToUniversalTime() - ([DateTime]$parsed.value)).TotalSeconds) -lt 1
+    } catch {
+        return $false
+    }
+}
+
+function Get-FactoryOperatorActionEvents {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]$Config,
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    $events = New-Object Collections.Generic.List[object]
+    $launchTimeout = [Math]::Max(1, [int](Get-FactoryNestedValue -Target $Config -Name "workerLaunchTimeoutSeconds" -Default 300))
+    foreach ($task in @($State.tasks)) {
+        $status = [string](Get-FactoryNestedValue -Target $task -Name "status" -Default "")
+        $taskId = [string](Get-FactoryNestedValue -Target $task -Name "id" -Default "")
+        $title = [string](Get-FactoryNestedValue -Target $task -Name "title" -Default "Untitled task")
+        $occurredAt = [string](Get-FactoryNestedValue -Target $task -Name "updatedAt" -Default "")
+        $stall = Get-FactoryLaunchStallInfo -Task $task -TimeoutSeconds $launchTimeout -NowUtc $NowUtc
+        if ([bool]$stall.stalled) {
+            $events.Add([pscustomobject][ordered]@{
+                kind = "stalled-launch"; taskId = $taskId; title = $title; status = $status
+                reason = "Worker launch has no recorded session after $([int]$stall.ageSeconds) second(s)."
+                occurredAt = [string]$stall.startedAt; command = "factory retry $taskId"
+            })
+            continue
+        }
+        if ($status -eq "awaiting-input") {
+            $events.Add([pscustomobject][ordered]@{
+                kind = "awaiting-input"; taskId = $taskId; title = $title; status = $status
+                reason = "Worker needs operator input."; occurredAt = $occurredAt; command = "factory chat $taskId"
+            })
+        } elseif ($status -eq "awaiting-review" -and -not (Test-FactoryTaskHasActiveSession -Task $task)) {
+            $events.Add([pscustomobject][ordered]@{
+                kind = "awaiting-review"; taskId = $taskId; title = $title; status = $status
+                reason = "Validated result is ready and the worker session is closed."; occurredAt = $occurredAt; command = "factory inspect $taskId"
+            })
+        } elseif ($status -in @("blocked", "failed")) {
+            $reason = [string](Get-FactoryNestedValue -Target $task -Name "error" -Default (
+                Get-FactoryNestedValue -Target $task -Name "holdReason" -Default "Operator inspection is required."
+            ))
+            $events.Add([pscustomobject][ordered]@{
+                kind = $status; taskId = $taskId; title = $title; status = $status
+                reason = $reason; occurredAt = $occurredAt; command = "factory inspect $taskId"
+            })
+        }
+    }
+
+    $scheduler = Get-FactoryNestedValue -Target $State -Name "scheduler"
+    $schedulerStatus = [string](Get-FactoryNestedValue -Target $scheduler -Name "status" -Default "stopped")
+    $runnable = @($State.tasks | Where-Object {
+        [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -in
+            @("queued", "starting", "planning", "running", "approved", "integrating", "production") -or
+        ([string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -eq "awaiting-review" -and
+            (Test-FactoryTaskHasActiveSession -Task $_))
+    }).Count
+    $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $scheduler
+    if ($runnable -gt 0 -and ($schedulerStatus -in @("failed", "stopped") -or -not $schedulerAlive)) {
+        $reason = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastError" -Default "")
+        if (-not $reason) { $reason = "Runnable work exists, but the native scheduler process is not running." }
+        $events.Add([pscustomobject][ordered]@{
+            kind = "scheduler"; taskId = $null; title = "Native scheduler"; status = if ($schedulerAlive) { $schedulerStatus } else { "stopped" }
+            reason = $reason
+            occurredAt = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastFailureAt" -Default (
+                Get-FactoryNestedValue -Target $scheduler -Name "heartbeatAt" -Default ""
+            ))
+            command = if ([bool](Get-FactoryNestedValue -Target $State -Name "paused" -Default $false)) { "factory resume" } else { "factory scheduler start" }
+        })
+    }
+    return @($events.ToArray())
 }
 
 function Enter-FactoryMutex {

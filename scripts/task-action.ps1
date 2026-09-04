@@ -146,14 +146,38 @@ try {
         }
         "retry" {
             $machineHoldReason = "background session stopped without a FACTORY_RESULT"
-            $retryable = [string]$task.status -in @("blocked", "failed") -or (
+            $missingSessionLaunch = (
+                [string]$task.status -in @("starting", "planning") -and
+                -not (Test-FactoryTaskHasRecordedSession -Task $task)
+            )
+            $recordedLaunchFailure = (
+                [string]$task.status -eq "failed" -and
+                (
+                    $null -ne (Get-FactoryNestedValue -Target $task -Name "launchFailedAt") -or
+                    [string](Get-FactoryNestedValue -Target $task -Name "error" -Default "") -match "(?i)worker launch"
+                )
+            )
+            if ($missingSessionLaunch) {
+                $launchProcess = [pscustomobject]@{
+                    pid = Get-FactoryNestedValue -Target $task -Name "launchProcessId" -Default 0
+                    processStartTimeUtc = Get-FactoryNestedValue -Target $task -Name "launchProcessStartTimeUtc"
+                }
+                if (Test-FactoryRecordedProcess -ProcessRecord $launchProcess) {
+                    throw "Task '$TaskId' still has an active launcher process. Wait for launch completion or the configured launch timeout before retrying."
+                }
+            }
+            $retryable = $missingSessionLaunch -or [string]$task.status -in @("blocked", "failed") -or (
                 [string]$task.status -eq "held" -and [string]$task.holdReason -eq $machineHoldReason
             )
             if (-not $retryable) { throw "Task '$TaskId' is not in a retryable machine state." }
             if ([string]$task.commit -or $null -ne $task.workerResult) {
                 throw "Task '$TaskId' has a validated result or commit and cannot be retried."
             }
-            if (-not [string]$task.worktree -or -not (Test-Path -LiteralPath ([string]$task.worktree))) {
+            if (
+                -not $missingSessionLaunch -and
+                -not $recordedLaunchFailure -and
+                (-not [string]$task.worktree -or -not (Test-Path -LiteralPath ([string]$task.worktree)))
+            ) {
                 throw "Task '$TaskId' has no usable retained worktree."
             }
             $oldBackgroundId = if ($null -ne $task.backgroundSession) { [string]$task.backgroundSession.id } else { "" }
@@ -179,6 +203,11 @@ try {
             Set-FactoryProperty -Target $task -Name "approval" -Value $null
             Set-FactoryProperty -Target $task -Name "error" -Value $null
             Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchStartedAt" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchFailedAt" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+            Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
             Set-FactoryProperty -Target $task -Name "status" -Value "queued"
             Set-FactoryProperty -Target $state -Name "active" -Value $true
             Set-FactoryProperty -Target $state -Name "paused" -Value $false

@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Added launch-liveness recovery and a native operator signal. Sessionless
+  `starting`/`planning` tasks no longer consume worker capacity, launches carry
+  ownership timestamps and fail after a configurable timeout, and native
+  `retry` can requeue an abandoned launch. `factory wait` blocks on atomic state
+  until a real operator action is ready, while a live worker that has just
+  produced an `awaiting-review` result remains in `WAITING`. Scheduler failures
+  now retain their detection time and status prints the exact recovery command.
+  Enqueue wakes the scheduler asynchronously, and synchronization keeps Git,
+  dependency, and validation work outside the global state mutex.
 - Made the serialized test lease culture-safe and fail-closed: round-trip UTC
   timestamps no longer turn into locale-dependent dates, unreadable heartbeats
   are never reclaimed, a live holder PID prevents reclaim, and heartbeat PID,
