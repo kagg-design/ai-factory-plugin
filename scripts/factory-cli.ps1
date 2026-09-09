@@ -1384,6 +1384,109 @@ function Start-CliFactory {
     $script:CliExitCode = $LASTEXITCODE
 }
 
+function Restart-CliFactoryOrchestrator {
+    param($Context)
+
+    if ($env:CLAUDECODE) {
+        throw "'factory restart' cannot run inside a Claude orchestrator tool call because CLAUDECODE is set. Exit the orchestrator TUI to PowerShell, then run 'factory restart'; no session ID is required."
+    }
+    if ($env:CLAUDE_FACTORY_ORCHESTRATOR) {
+        throw "'factory restart' cannot run inside an orchestrator. CLAUDE_FACTORY_ORCHESTRATOR is set in this shell. If the TUI is closed, this is a stale value from an earlier 'factory start' in this window - clear it and retry: Remove-Item Env:CLAUDE_FACTORY_ORCHESTRATOR. Or open a new PowerShell window. No session ID is required."
+    }
+
+    $config = Read-FactoryJson -Path ([string]$Context.configPath)
+    $runtime = [string](Get-CliProperty -InputObject $config -Name "workerAgent" -Default "claude")
+    if ($runtime -notin @("claude", "codex")) { throw "Unsupported orchestrator runtime '$runtime'." }
+
+    $pendingRotation = Get-FactoryPendingOrchestratorRotation -Context $Context -Runtime $runtime
+    if ($null -ne $pendingRotation) {
+        throw "A $runtime orchestrator rotation is pending. Run 'factory rotate cancel' to restart the same conversation, or exit the TUI and run the start command printed by 'factory rotate status' to activate the fresh handoff."
+    }
+
+    if ($runtime -eq "claude") {
+        $identityPath = Get-FactoryOrchestratorIdentityPath -Context $Context -Runtime "claude"
+        $identity = if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
+            try { Read-FactoryJson -Path $identityPath } catch { $null }
+        } else { $null }
+        $name = if (
+            $null -ne $identity -and
+            [string](Get-CliProperty -InputObject $identity -Name "name") -and
+            (Test-FactorySamePath `
+                -Left ([string](Get-CliProperty -InputObject $identity -Name "repositoryRoot")) `
+                -Right ([string]$Context.repositoryRoot))
+        ) { [string]$identity.name } else { "Claude Factory Orchestrator" }
+        $storedSessionId = if (
+            $null -ne $identity -and
+            [string](Get-CliProperty -InputObject $identity -Name "sessionId") -and
+            [string](Get-CliProperty -InputObject $identity -Name "name") -ceq $name -and
+            (Test-FactorySamePath `
+                -Left ([string](Get-CliProperty -InputObject $identity -Name "repositoryRoot")) `
+                -Right ([string]$Context.repositoryRoot))
+        ) { [string]$identity.sessionId } else { "" }
+
+        $rows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
+        $matchingRows = @(Get-FactoryMatchingOrchestratorRows `
+            -Rows $rows `
+            -RepositoryRoot ([string]$Context.repositoryRoot) `
+            -Name $name)
+        $interactiveRows = @($matchingRows | Where-Object {
+            [string](Get-CliProperty -InputObject $_ -Name "kind") -eq "interactive" -and
+            -not (Test-FactoryTerminalAgentRow -Row $_)
+        })
+        if ($interactiveRows.Count -gt 0) {
+            throw "The Claude orchestrator is still open interactively. Exit that TUI to PowerShell, then run 'factory restart' again; no session ID is required."
+        }
+
+        $liveBackgroundRows = @($matchingRows | Where-Object {
+            [string](Get-CliProperty -InputObject $_ -Name "kind") -eq "background" -and
+            [string](Get-CliProperty -InputObject $_ -Name "id") -and
+            -not (Test-FactoryTerminalAgentRow -Row $_)
+        })
+        $selected = Select-FactoryBackgroundOrchestrator -Rows $matchingRows -PreferredSessionId $storedSessionId
+        if (-not $storedSessionId -and $null -ne $selected) {
+            $storedSessionId = [string](Get-CliProperty -InputObject $selected -Name "sessionId")
+        }
+        if ($liveBackgroundRows.Count -gt 0 -and -not $storedSessionId) {
+            throw "The live Claude orchestrator has no resumable session UUID. Stop it manually only after preserving its conversation; Factory refused to replace it."
+        }
+
+        foreach ($row in $liveBackgroundRows) {
+            Stop-FactoryClaudeSessionAndWait `
+                -ClaudeCommand $ClaudeCommand `
+                -BackgroundId ([string]$row.id)
+        }
+        if ($storedSessionId) {
+            Write-FactoryOrchestratorIdentity `
+                -Path $identityPath `
+                -RepositoryRoot ([string]$Context.repositoryRoot) `
+                -Name $name `
+                -SessionId $storedSessionId
+        }
+
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory orchestrator restart $($script:Tree.Horizontal) claude"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Stopped: $(if ($liveBackgroundRows.Count -gt 0) { @($liveBackgroundRows | ForEach-Object { [string]$_.id }) -join ', ' } else { 'no live background row' })"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Conversation: $(if ($storedSessionId) { "resume $storedSessionId" } else { 'start a new stored conversation' })"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Preserved: scheduler, workers, tasks, worktrees, and previews"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Starting the orchestrator with the currently resolved Claude executable..."
+    } else {
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Factory orchestrator restart $($script:Tree.Horizontal) codex"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Codex has no external Agent View process to stop by ID."
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Preserved: scheduler, workers, tasks, worktrees, and previews"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Resuming the stored Codex orchestrator thread..."
+    }
+
+    $arguments = @{
+        Repository = [string]$Context.repositoryRoot
+        ClaudeCommand = $ClaudeCommand
+        CodexCommand = $CodexCommand
+        RuntimeHome = [string]$Context.runtimeHome
+        Agent = $runtime
+    }
+    if ($runtime -eq "claude") { $arguments.Name = $name }
+    & (Join-Path $pluginRoot "start-factory.ps1") @arguments
+    $script:CliExitCode = $LASTEXITCODE
+}
+
 function Write-CliRotate {
     param($Context, [string]$Action)
 
@@ -1503,6 +1606,7 @@ function Write-CliHelp {
             "",
             "PowerShell:",
             "  factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
+            "  factory restart",
             "  factory rotate [status|cancel]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
@@ -1649,6 +1753,15 @@ function Write-CliHelp {
                 "Run this from PowerShell, not from inside an already open orchestrator."
             ) | Write-Output
         }
+        "restart" {
+            @(
+                "factory restart",
+                "Restarts only this repository's selected orchestrator and resumes its exact stored conversation.",
+                "For Claude, it discovers and stops the matching background orchestrator itself; no Agent View ID is required.",
+                "Scheduler, workers, tasks, worktrees, and previews stay intact.",
+                "Exit the current orchestrator TUI first and run this command from PowerShell."
+            ) | Write-Output
+        }
         "rotate" {
             @(
                 "factory rotate [status|cancel]",
@@ -1775,6 +1888,12 @@ if ($normalizedCommand -eq "start") {
     if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, -Model, -Agent, and -CodexCommand." }
     if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
     Start-CliFactory -Context $context
+    exit $script:CliExitCode
+}
+
+if ($normalizedCommand -eq "restart") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "restart does not accept arguments. Use: factory restart" }
+    Restart-CliFactoryOrchestrator -Context $context
     exit $script:CliExitCode
 }
 

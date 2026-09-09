@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added `factory restart` for update-safe orchestrator replacement. It finds
+  the current repository's Claude orchestrator without an operator-supplied
+  Agent View ID, stops only matching background rows, resumes the exact stored
+  conversation with the current CLI executable, and leaves scheduler, workers,
+  tasks, worktrees, and previews intact. Stored terminal rows are no longer
+  selected for reattachment.
 - Move fresh factory runtime outside Git worktrees by default while preserving
   automatic legacy discovery; add guarded, SHA-256-verified `factory runtime
   migrate`, placement diagnostics, repository cleanup instructions, scoped

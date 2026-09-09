@@ -169,6 +169,10 @@ public static class FakeClaude
             string liveTerminalId = Env("CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID");
             List<string> jsonRows = new List<string>();
             jsonRows.Add("{\"sessionId\":\"interactive-session\",\"status\":\"idle\",\"kind\":\"interactive\",\"name\":\"unrelated interactive session\",\"cwd\":\"" + cwd + "\"}");
+            if (Env("CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR") == "1")
+            {
+                jsonRows.Add("{\"sessionId\":\"interactive-orchestrator-session\",\"status\":\"working\",\"kind\":\"interactive\",\"name\":\"Claude Factory Orchestrator\",\"cwd\":\"" + cwd + "\"}");
+            }
             foreach (SessionRow row in sessions.Values)
             {
                 if (!String.IsNullOrEmpty(status) && row.Id == "test1234") row.State = status;
@@ -266,7 +270,10 @@ public static class FakeClaude
                 " not found; using default agent template"
             );
         }
-        Console.Error.WriteLine("Warning: benign background-launch warning");
+        if (Env("CLAUDE_FACTORY_TEST_SILENT") != "1")
+        {
+            Console.Error.WriteLine("Warning: benign background-launch warning");
+        }
         Console.WriteLine("backgrounded - " + backgroundId + " - factory-test-task");
         Console.WriteLine("claude attach " + backgroundId);
         if (systemFailure) return 1;

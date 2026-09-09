@@ -85,6 +85,7 @@ operations that do not need AI interpretation:
 ```powershell
 cd D:\Projects\MotiveHR
 factory start
+factory restart
 factory status
 factory inspect 1216632072822682
 factory preview 1216632072822682
@@ -154,6 +155,26 @@ rejection. The leading `!` explicitly selects native shell execution inside
 either TUI. Without it, the text is handled by the orchestrator. Both
 launchers are available when the plugin root is on `PATH`, as required by the
 installation steps above.
+
+### Restart after a CLI update
+
+To apply an installed Claude/Codex CLI update without starting a new Factory
+conversation, exit the orchestrator TUI to PowerShell and run:
+
+```powershell
+factory restart
+```
+
+For Claude, Factory discovers the exact repository-owned background
+orchestrator and stops it itself; no `claude agents` lookup or copied ID is
+needed. It then resumes the stored conversation using the currently resolved
+CLI executable. Codex resumes its stored thread after its foreground TUI has
+exited. The native scheduler, task workers, queue, worktrees, and browser
+preview are not restarted. Run this in PowerShell, not through `!factory
+restart` inside the process being replaced.
+
+Use `factory rotate` instead when the goal is a fresh context window with a
+durable handoff. A process restart deliberately preserves the current context.
 
 Override the lead session name when needed:
 

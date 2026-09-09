@@ -162,6 +162,8 @@ try {
     Assert-True ($publicSkill.Contains('!factory go <id> [--direct]')) "Factory help does not advertise direct approval."
     Assert-True ($publicSkill.Contains('!factory preview <id>')) "Factory help does not advertise native browser preview."
     Assert-True ($publicSkill.Contains('!factory rotate')) "Factory help does not advertise safe orchestrator rotation."
+    Assert-True ($publicSkill.Contains('factory restart')) "Factory help does not advertise same-conversation orchestrator restart."
+    Assert-True ($publicSkill.Contains('### `restart`')) "The public skill does not define orchestrator restart semantics."
     Assert-True ($publicSkill.Contains('### `rotate`')) "The public skill does not define orchestrator rotation semantics."
     Assert-True ($publicSkill.Contains('### `go <task-id> [--direct]`')) "The public skill does not document direct approval safeguards."
     Assert-True ($publicSkill.Contains('### `status [state|all]`')) "Factory status does not support actionable filters."
@@ -201,6 +203,9 @@ try {
     Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
     Assert-True ($launcherSource.Contains('Get-FactoryPendingOrchestratorRotation')) "Launcher does not consume pending orchestrator rotation."
     Assert-True ($launcherSource.Contains('Complete-FactoryOrchestratorRotation')) "Launcher does not finalize orchestrator rotation after assigning a new session."
+    Assert-True ($launcherSource.Contains('$env:CLAUDE_FACTORY_ORCHESTRATOR = "1"')) "Launcher does not mark child shells as running inside the orchestrator TUI."
+    Assert-True ($launcherSource.Contains('$orchestratorEnvironmentWasSet = Test-Path Env:\CLAUDE_FACTORY_ORCHESTRATOR')) "Launcher does not remember whether its caller owned the orchestrator environment marker."
+    Assert-True ($launcherSource.Contains('Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue')) "Launcher does not clear its temporary orchestrator environment marker."
 
     $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export"
     Assert-Equal "factory-local-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
@@ -222,6 +227,8 @@ try {
     Assert-Equal "newbg" ([string]$newestOrchestrator.id) "Launcher did not choose the newest live background orchestrator."
     $preferredOrchestrator = Select-FactoryBackgroundOrchestrator -Rows $matchingOrchestrators -PreferredSessionId "11111111-1111-4111-8111-111111111111"
     Assert-Equal "oldbg" ([string]$preferredOrchestrator.id) "Launcher ignored the stored orchestrator identity."
+    $terminalPreferredOrchestrator = Select-FactoryBackgroundOrchestrator -Rows $matchingOrchestrators -PreferredSessionId "33333333-3333-4333-8333-333333333333"
+    Assert-Equal "newbg" ([string]$terminalPreferredOrchestrator.id) "Launcher selected a terminal stored orchestrator row for attachment."
 
     $workerLauncherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Raw
     $workerLaunchHelperSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\worker-launch.ps1") -Raw
@@ -839,6 +846,27 @@ try {
     Assert-True ($resumeIndex -ge 0 -and $resumeIndex + 1 -lt $resumedOrchestratorArgs.Count) "Repeated launcher did not resume the stored orchestrator."
     Assert-Equal $orchestratorSessionId $resumedOrchestratorArgs[$resumeIndex + 1] "Repeated launcher resumed a different conversation."
 
+    $launcherCallerLocation = Get-Location
+    $launcherCallerErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $env:CLAUDE_FACTORY_TEST_SILENT = "1"
+        Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue
+        & (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime *> $null
+        Assert-Equal 0 $LASTEXITCODE "Factory launcher marker cleanup probe failed."
+        Assert-True (-not (Test-Path Env:\CLAUDE_FACTORY_ORCHESTRATOR)) "Factory launcher leaked its orchestrator marker into the calling shell."
+
+        $env:CLAUDE_FACTORY_ORCHESTRATOR = "caller-owned"
+        & (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime *> $null
+        Assert-Equal 0 $LASTEXITCODE "Factory launcher marker restoration probe failed."
+        Assert-Equal "caller-owned" ([string]$env:CLAUDE_FACTORY_ORCHESTRATOR) "Factory launcher did not restore a marker owned by its caller."
+    } finally {
+        $ErrorActionPreference = $launcherCallerErrorAction
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SILENT -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue
+        Set-Location $launcherCallerLocation
+    }
+
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = $repository
     $env:CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID = $orchestratorSessionId
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
@@ -847,6 +875,55 @@ try {
     Assert-Equal "attach" $attachedOrchestratorArgs[0] "Launcher did not attach the existing background orchestrator."
     Assert-Equal "orch1234" $attachedOrchestratorArgs[1] "Launcher attached the wrong background orchestrator."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
+
+    $restartSessionId = "11111111-2222-4333-8444-555555555555"
+    Write-FactoryOrchestratorIdentity `
+        -Path $orchestratorIdentityPath `
+        -RepositoryRoot $repository `
+        -Name "Claude Factory Orchestrator" `
+        -SessionId $restartSessionId `
+        -BackgroundId "test1234"
+    [IO.File]::AppendAllText(
+        $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
+        "launch`ttest1234`t$repository`tClaude Factory Orchestrator`tblocked" + [Environment]::NewLine +
+        "launch`tother-orchestrator`t$repository-other`tClaude Factory Orchestrator`tworking" + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $restartStopCapture = Join-Path $testRoot "restart-orchestrator-stops.txt"
+    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $restartStopCapture
+    $restartOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") restart `
+        -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
+    Assert-Equal 0 $LASTEXITCODE "Factory orchestrator restart failed."
+    Assert-True ($restartOutput.Contains("Factory orchestrator restart") -and $restartOutput.Contains("Preserved: scheduler, workers, tasks, worktrees, and previews")) "Factory restart did not describe its narrow lifecycle scope."
+    $restartStops = @([IO.File]::ReadAllLines($restartStopCapture, [Text.Encoding]::UTF8))
+    Assert-True ($restartStops -contains "test1234" -and $restartStops -contains "orchestrator-static") "Factory restart did not stop every matching live Claude orchestrator row."
+    Assert-True (-not ($restartStops -contains "other-orchestrator")) "Factory restart stopped an orchestrator owned by another repository."
+    $restartArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
+    $restartResumeIndex = [Array]::IndexOf($restartArgs, "--resume")
+    Assert-True ($restartResumeIndex -ge 0 -and $restartResumeIndex + 1 -lt $restartArgs.Count) "Factory restart did not resume the stored Claude conversation."
+    Assert-Equal $restartSessionId $restartArgs[$restartResumeIndex + 1] "Factory restart resumed the wrong Claude conversation."
+    $restartIdentity = Read-FactoryJson -Path $orchestratorIdentityPath
+    Assert-Equal $restartSessionId ([string]$restartIdentity.sessionId) "Factory restart replaced the stored Claude conversation UUID."
+    Assert-True (-not [string]$restartIdentity.backgroundId) "Factory restart retained a stopped background row ID."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+
+    $env:CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR = "1"
+    $interactiveRestartStopCapture = Join-Path $testRoot "interactive-restart-stops.txt"
+    $env:CLAUDE_FACTORY_TEST_STOP_FILE = $interactiveRestartStopCapture
+    $previousRestartErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $interactiveRestartOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") restart `
+            -Repository $repository -ClaudeCommand $fakeClaude 2>&1) | Out-String
+        $interactiveRestartExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousRestartErrorAction
+    }
+    Assert-True ($interactiveRestartExitCode -ne 0) "Factory restart replaced a live interactive Claude orchestrator."
+    Assert-True ($interactiveRestartOutput.Contains("still open interactively") -and $interactiveRestartOutput.Contains("no session ID is required")) "Interactive restart refusal did not explain the safe recovery."
+    Assert-True (-not (Test-Path -LiteralPath $interactiveRestartStopCapture)) "Interactive restart refusal stopped a background session before aborting."
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
 
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -New 1> $null
@@ -1456,6 +1533,7 @@ try {
     Assert-True ($cliSource.Contains('[switch]$Direct')) "Factory CLI does not expose direct approval."
     Assert-True ($cliSource.Contains('"preview"') -and $cliSource.Contains('[switch]$NoOpen')) "Factory CLI does not expose native browser preview."
     Assert-True ($cliSource.Contains('"rotate"')) "Factory CLI does not expose native orchestrator rotation."
+    Assert-True ($cliSource.Contains('"restart"')) "Factory CLI does not expose native orchestrator restart."
     Assert-True ($cliSource.Contains('"wait"') -and $cliSource.Contains('"retry"')) "Factory CLI does not expose native wait and retry commands."
     Assert-True ($cliSource.Contains('"runtime"')) "Factory CLI does not expose runtime safety diagnostics."
     Assert-True ($cliSource.Contains("[ArgumentCompleter({")) "Factory CLI does not expose contextual argument completion."
@@ -1511,12 +1589,40 @@ try {
     Assert-True ($cliHelp.Contains("no AI interpretation")) "Factory CLI help hides its deterministic execution model."
     Assert-True ($cliHelp.Contains("factory go <task-id> [--direct]")) "Factory CLI help omits direct approval."
     Assert-True ($cliHelp.Contains("factory rotate [status|cancel]")) "Factory CLI help omits orchestrator rotation."
+    Assert-True ($cliHelp.Contains("factory restart")) "Factory CLI help omits orchestrator restart."
     Assert-True ($cliHelp.Contains("factory wait [timeout-seconds]") -and $cliHelp.Contains("factory retry <task-id>")) "Factory CLI help omits native wait or retry."
     Assert-True ($cliHelp.Contains("factory runtime [status|migrate]")) "Factory CLI help omits runtime safety and migration."
     $cliGoHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help go | Out-String)
     Assert-True ($cliGoHelp.Contains("skips independent AI code review")) "Factory go help hides direct approval semantics."
     $cliRotateHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help rotate | Out-String)
     Assert-True ($cliRotateHelp.Contains("fresh orchestrator conversation") -and $cliRotateHelp.Contains("previous resumable conversation")) "Factory rotate help hides its rollover or retention semantics."
+    $cliRestartHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help restart | Out-String)
+    Assert-True ($cliRestartHelp.Contains("no Agent View ID is required") -and $cliRestartHelp.Contains("Scheduler, workers, tasks, worktrees, and previews stay intact")) "Factory restart help hides discovery or preservation semantics."
+
+    $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
+    $previousRestartGuardErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $staleMarkerGuardOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath restart -Repository $repository -ClaudeCommand $fakeClaude 2>&1) | Out-String
+        $staleMarkerGuardExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousRestartGuardErrorAction
+        Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue
+    }
+    Assert-True ($staleMarkerGuardExitCode -ne 0) "Factory restart ignored a live-or-stale orchestrator marker."
+    Assert-True ($staleMarkerGuardOutput.Contains("CLAUDE_FACTORY_ORCHESTRATOR") -and $staleMarkerGuardOutput.Contains("Remove-Item Env:CLAUDE_FACTORY_ORCHESTRATOR")) "Stale marker refusal did not print the direct recovery command."
+
+    $env:CLAUDECODE = "1"
+    try {
+        $ErrorActionPreference = "Continue"
+        $claudeToolGuardOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath restart -Repository $repository -ClaudeCommand $fakeClaude 2>&1) | Out-String
+        $claudeToolGuardExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousRestartGuardErrorAction
+        Remove-Item Env:\CLAUDECODE -ErrorAction SilentlyContinue
+    }
+    Assert-True ($claudeToolGuardExitCode -ne 0) "Factory restart ignored the Claude tool-call environment."
+    Assert-True ($claudeToolGuardOutput.Contains("CLAUDECODE") -and -not $claudeToolGuardOutput.Contains("Remove-Item Env:CLAUDECODE")) "Claude tool-call refusal gave stale-marker advice for a true nested invocation."
 
     $claudeIdentityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
     $preRotationIdentity = Read-FactoryJson -Path $claudeIdentityPath
@@ -3313,6 +3419,7 @@ try {
     }
     $missingAgentFailed = $missingAgentExitCode -ne 0
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SILENT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
     Assert-True $missingAgentFailed "Missing-agent warning did not abort launch."
@@ -3331,6 +3438,7 @@ try {
     } catch {}
     Remove-Item Env:\CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_NO_AGENTS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE -ErrorAction SilentlyContinue
@@ -3361,6 +3469,8 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_MISSING_AGENT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_PROMPT_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_CODEX_SKILL_HOME -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDECODE -ErrorAction SilentlyContinue
     if ($KeepTemp) {
         Write-Host "Kept test directory: $testRoot" -ForegroundColor Yellow
     } elseif (

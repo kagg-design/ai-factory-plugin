@@ -109,6 +109,28 @@ Use `factory start -New` only to deliberately replace the stored
 conversation. The launcher still refuses to create a new one while a matching
 interactive or background orchestrator is live.
 
+### Restart the orchestrator process without losing its conversation
+
+When Claude Code reports `Update installed · Restart to update`, or when only
+the orchestrator TUI needs a clean process, exit that TUI to PowerShell and run:
+
+```powershell
+factory restart
+```
+
+No Agent View ID is needed. For Claude, the command finds only live
+`Claude Factory Orchestrator` rows whose canonical working directory matches
+this repository, stops them, and resumes the exact stored conversation with
+the currently resolved Claude executable. For Codex, run it after exiting the
+foreground Codex TUI and it resumes the stored thread. It does not stop or
+restart the native scheduler, workers, task worktrees, or browser preview.
+
+Do not run `!factory restart` inside the orchestrator being replaced: an
+interactive child process cannot safely replace its own parent TUI. If the
+orchestrator is still open in another terminal, exit it there first. A pending
+`factory rotate` also must be cancelled or activated before a same-conversation
+restart.
+
 For a routine context-window rollover, prefer the guarded handoff command:
 
 ```text
@@ -149,7 +171,7 @@ Deterministic operations also have a native fast path:
 !factory completion [status|enable]
 ```
 
-Outside Claude, `factory start`, `factory paths`, `factory runtime`, `factory config`, and
+Outside Claude, `factory start`, `factory restart`, `factory paths`, `factory runtime`, `factory config`, and
 `factory scheduler` replace the old root-script commands. The `.ps1` files
 remain internal implementations and compatibility entry points.
 

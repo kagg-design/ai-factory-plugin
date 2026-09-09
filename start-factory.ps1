@@ -75,6 +75,8 @@ $workerAgent = $selectedAgent
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")
 $ownsMutex = $false
+$orchestratorEnvironmentWasSet = Test-Path Env:\CLAUDE_FACTORY_ORCHESTRATOR
+$previousOrchestratorEnvironment = [Environment]::GetEnvironmentVariable("CLAUDE_FACTORY_ORCHESTRATOR", "Process")
 try {
     try {
         $ownsMutex = $sessionMutex.WaitOne(0)
@@ -114,6 +116,7 @@ try {
 
     if ($selectedAgent -eq "codex") {
         Start-FactoryLauncherScheduler -Context $context -PluginRoot $pluginRoot -ClaudeCommand $ClaudeCommand
+        $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
         $factoryCodexExitCode = 1
         Start-FactoryCodexOrchestrator `
             -CodexCommand $resolvedCodexCommand `
@@ -190,6 +193,7 @@ try {
         }
         Write-Host "Reusing background orchestrator: $backgroundId" -ForegroundColor Green
         Set-Location $context.repositoryRoot
+        $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
         & $ClaudeCommand attach $backgroundId
         exit $LASTEXITCODE
     }
@@ -231,9 +235,15 @@ try {
     }
 
     Set-Location $context.repositoryRoot
+    $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
     & $ClaudeCommand @claudeArguments
     exit $LASTEXITCODE
 } finally {
+    if ($orchestratorEnvironmentWasSet) {
+        $env:CLAUDE_FACTORY_ORCHESTRATOR = $previousOrchestratorEnvironment
+    } else {
+        Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue
+    }
     if ($ownsMutex) {
         try { $sessionMutex.ReleaseMutex() } catch {}
     }

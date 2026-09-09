@@ -71,6 +71,7 @@ Fast local commands (prefix with !; no AI interpretation)
 
 PowerShell entry point (outside Claude)
   factory start [-Agent]   open/reuse orchestrator + scheduler; select workers
+  factory restart          restart orchestrator; resume the same conversation
   factory paths|config     inspect private project runtime
   factory runtime          show placement; migrate only while fully stopped
   factory scheduler        native process status/control
@@ -102,6 +103,7 @@ Prepare and decide
 Control
   retry <id>               retry blocked/failed/machine-held/stalled launch
   concurrency [N]          show or change worker limit
+  restart                  replace orchestrator process, keep its conversation
   rotate                   hand off to a fresh orchestrator conversation
   pause|resume|stop        control orchestration
   doctor                   diagnose factory setup
@@ -124,6 +126,32 @@ this skill. Include:
 Accept aliases such as `add` for `start` and explain the canonical form. If the
 name is unknown, say so and show the compact grouped summary. Never execute the
 command while explaining it.
+
+### `restart`
+
+An orchestrator process restart is a deterministic native PowerShell command:
+
+```powershell
+factory restart
+```
+
+It is intended for applying an installed Claude/Codex CLI update or recovering
+the TUI without rotating its context. The operator must first exit the current
+orchestrator TUI to PowerShell. Do not execute `!factory restart` as a child of
+the orchestrator that it is meant to replace.
+
+For Claude, native code queries Agent View, matches only the exact orchestrator
+name and canonical repository path, stops every live matching background row,
+and resumes the stored conversation UUID with the currently resolved `claude`
+executable. The operator never needs to find or copy a background ID. For
+Codex, after its foreground TUI has exited, the command resumes the stored
+orchestrator thread. Scheduler, worker sessions, tasks, worktrees, previews,
+and a pending workload remain untouched.
+
+This differs from `rotate`: `restart` preserves the current conversation and
+only replaces its process, while `rotate` deliberately creates a fresh
+conversation from a durable handoff. If a rotation is already pending,
+`restart` must refuse until the operator either cancels or activates it.
 
 ### `rotate`
 

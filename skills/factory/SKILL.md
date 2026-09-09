@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, retry, wait, rework, release, reject, cleanup, sync, preview, chat, rotate, scheduler, or asks to manage factory tasks and workers.
+description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, retry, wait, rework, release, reject, cleanup, sync, preview, chat, restart, rotate, scheduler, or asks to manage factory tasks and workers.
 ---
 
 # Factory orchestrator for Codex
@@ -44,6 +44,11 @@ integration, and output. Apply these Codex adaptations:
 - `factory runtime` shows the exact private-state placement and lock
   diagnostics. `factory runtime migrate` is an explicit offline, verified,
   copy-only move to LocalAppData; never migrate or delete live runtime state.
+- `factory restart` is run from PowerShell after the orchestrator TUI exits. It
+  resumes the same stored conversation while leaving scheduler, workers,
+  tasks, worktrees, and previews alone. Do not run it as a nested shell command
+  from the process being replaced; use `factory rotate` only for a fresh
+  handoff conversation.
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.

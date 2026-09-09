@@ -32,7 +32,8 @@ function Select-FactoryBackgroundOrchestrator {
     if ($PreferredSessionId) {
         $preferred = @($backgroundRows | Where-Object {
             $null -ne $_.PSObject.Properties["sessionId"] -and
-            [string]$_.sessionId -eq $PreferredSessionId
+            [string]$_.sessionId -eq $PreferredSessionId -and
+            -not (Test-FactoryTerminalAgentRow -Row $_)
         } | Select-Object -First 1)
         if ($preferred.Count -eq 1) { return $preferred[0] }
     }
