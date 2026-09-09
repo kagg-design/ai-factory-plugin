@@ -54,6 +54,12 @@ Omitting `-Agent` always selects Claude. The selection is stored in private
 project `config.json` and affects only new attempts. Existing Claude and Codex
 workers keep their original runtime and can coexist while they finish.
 
+The Codex form creates or reuses `Factory Orchestrator - <repository>` as an
+app-backed Codex task. It is visible in Codex Desktop and connected phone
+clients while the same thread remains attached to the terminal. The first
+start after upgrading replaces a saved standalone Codex orchestrator with one
+app-backed task; subsequent starts validate and reuse it without duplicates.
+
 Then check its state without waiting for AI interpretation:
 
 ```powershell

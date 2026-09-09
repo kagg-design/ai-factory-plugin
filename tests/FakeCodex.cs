@@ -11,6 +11,61 @@ public static class FakeCodex
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
     }
 
+    private static string Extract(string input, string pattern, string fallback = "")
+    {
+        var match = Regex.Match(input, pattern);
+        return match.Success ? match.Groups[1].Value : fallback;
+    }
+
+    private static int RunAppServer()
+    {
+        var threadId = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_THREAD_ID") ??
+            "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        var repository = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_REPOSITORY") ?? Directory.GetCurrentDirectory();
+        var log = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_LOG");
+        string line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            if (!String.IsNullOrEmpty(log))
+                File.AppendAllText(log, "app-server-request\t" + line + Environment.NewLine, new UTF8Encoding(false));
+            var method = Extract(line, "\\\"method\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+            var requestId = Extract(line, "\\\"id\\\"\\s*:\\s*(\\d+)");
+            if (method == "initialized")
+                continue;
+            if (String.IsNullOrEmpty(requestId))
+                continue;
+            var failMethod = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD");
+            if (!String.IsNullOrEmpty(failMethod) && method == failMethod)
+            {
+                Console.WriteLine("{\"id\":" + requestId + ",\"error\":{\"code\":-32000,\"message\":\"injected app-server failure\"}}");
+                Console.Out.Flush();
+                continue;
+            }
+            if (method == "initialize")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{\"serverInfo\":{\"name\":\"fake-codex\",\"version\":\"test\"}}}");
+            else if (method == "project/list")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{\"data\":[{\"id\":\"test-project\",\"roots\":[{\"path\":\"" + Escape(repository) + "\"}]}],\"nextCursor\":null}}");
+            else if (method == "thread/start")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{\"thread\":{\"id\":\"" + Escape(threadId) + "\"}}}");
+            else if (method == "turn/start")
+            {
+                const string turnId = "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb";
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{\"turn\":{\"id\":\"" + turnId + "\",\"status\":\"inProgress\",\"items\":[]}}}");
+                Console.WriteLine("{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"" + Escape(threadId) + "\",\"turn\":{\"id\":\"" + turnId + "\",\"status\":\"completed\",\"items\":[]}}}");
+            }
+            else if (method == "thread/name/set")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{}}");
+            else if (method == "thread/read")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{\"thread\":{\"id\":\"" + Escape(threadId) + "\"}}}");
+            else if (method == "thread/archive")
+                Console.WriteLine("{\"id\":" + requestId + ",\"result\":{}}");
+            else
+                Console.WriteLine("{\"id\":" + requestId + ",\"error\":{\"code\":-32601,\"message\":\"unsupported fake method\"}}");
+            Console.Out.Flush();
+        }
+        return 0;
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
@@ -31,10 +86,14 @@ public static class FakeCodex
                 Console.WriteLine("Usage: codex exec [OPTIONS]\n      --json\n  -o, --output-last-message <FILE>");
             else if (args[0] == "resume")
                 Console.WriteLine("Usage: codex resume [OPTIONS] [SESSION_ID]\n      --include-non-interactive");
+            else if (args[0] == "app-server")
+                Console.WriteLine("Usage: codex app-server [OPTIONS]\n      --stdio");
             else
                 Console.WriteLine("fake help");
             return 0;
         }
+        if (args.Length > 0 && args[0] == "app-server")
+            return RunAppServer();
         if (args.Length > 0 && (args[0] == "archive" || args[0] == "delete"))
             return 0;
         if (args.Length == 0 || args[0] != "exec")

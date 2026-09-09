@@ -2,7 +2,7 @@ if ($null -eq (Get-Command Invoke-FactoryNativeProcess -ErrorAction SilentlyCont
     . (Join-Path $PSScriptRoot "factory-common.ps1")
 }
 
-function Resolve-FactoryCodexCommand {
+function Get-FactoryConfiguredCodexCommand {
     param($Config, [string]$ExplicitCommand = "")
 
     if ($ExplicitCommand) { return $ExplicitCommand }
@@ -13,6 +13,71 @@ function Resolve-FactoryCodexCommand {
     return "codex"
 }
 
+function Resolve-FactoryCodexCommand {
+    param(
+        $Config,
+        [string]$ExplicitCommand = "",
+        [string]$DiscoveryRoot = ""
+    )
+
+    $configuredCommand = Get-FactoryConfiguredCodexCommand -Config $Config -ExplicitCommand $ExplicitCommand
+    if ($env:OS -ne "Windows_NT") { return $configuredCommand }
+
+    $leafName = Split-Path -Leaf $configuredCommand
+    if ($leafName -notin @("codex", "codex.cmd", "codex.bat")) {
+        return $configuredCommand
+    }
+
+    # The desktop installer may leave a stable, older executable beside newer
+    # versioned installations. A user-provided codex.cmd commonly selects the
+    # newest one for interactive use, but Codex auto-review must be launched as
+    # a real executable so its child processes inherit a valid image path.
+    $candidatePaths = New-Object Collections.Generic.List[string]
+    foreach ($commandName in @($configuredCommand, "codex.exe")) {
+        foreach ($command in @(Get-Command -Name $commandName -All -ErrorAction SilentlyContinue)) {
+            $path = if ([string]$command.Source) { [string]$command.Source } else { [string]$command.Path }
+            if ($path -and [IO.Path]::GetExtension($path) -ieq ".exe" -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+                $candidatePaths.Add([IO.Path]::GetFullPath($path))
+            }
+        }
+    }
+
+    $installationRoot = $DiscoveryRoot
+    if (-not $installationRoot) {
+        $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+        if ($localAppData) { $installationRoot = Join-Path $localAppData "OpenAI\Codex\bin" }
+    }
+    if ($installationRoot -and (Test-Path -LiteralPath $installationRoot -PathType Container)) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $installationRoot -Filter "codex.exe" -File -Recurse -ErrorAction SilentlyContinue)) {
+            $candidatePaths.Add([IO.Path]::GetFullPath([string]$item.FullName))
+        }
+    }
+
+    $viable = @()
+    foreach ($path in @($candidatePaths | Sort-Object -Unique)) {
+        try {
+            $probe = Invoke-FactoryNativeProcess -Command $path -Arguments @("--version")
+            if ([int]$probe.exitCode -ne 0) { continue }
+            $match = [regex]::Match([string]$probe.output, '(?<!\d)(?<version>\d+\.\d+\.\d+)')
+            $version = if ($match.Success) { [version]$match.Groups["version"].Value } else { [version]"0.0.0" }
+            $viable += [pscustomobject]@{
+                path = $path
+                version = $version
+                modifiedUtc = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+            }
+        } catch {
+            continue
+        }
+    }
+    $selected = @($viable | Sort-Object -Property @(
+        @{ Expression = { $_.version }; Descending = $true },
+        @{ Expression = { $_.modifiedUtc }; Descending = $true }
+    ) | Select-Object -First 1)
+    if ($selected.Count -gt 0) { return [string]$selected[0].path }
+
+    return $configuredCommand
+}
+
 function Get-FactoryCodexCapabilities {
     param([Parameter(Mandatory = $true)][string]$CodexCommand)
 
@@ -21,18 +86,20 @@ function Get-FactoryCodexCapabilities {
         $exec = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("exec", "--help")
         $execResume = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("exec", "resume", "--help")
         $resume = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("resume", "--help")
+        $appServer = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("app-server", "--help")
         $supported = (
             [int]$version.exitCode -eq 0 -and
             [int]$exec.exitCode -eq 0 -and [string]$exec.stdout -match '(?m)^\s+--json\b' -and
             [string]$exec.stdout -match '--output-last-message' -and
             [int]$execResume.exitCode -eq 0 -and [string]$execResume.stdout -match '\[SESSION_ID\]' -and
-            [int]$resume.exitCode -eq 0 -and [string]$resume.stdout -match '--include-non-interactive'
+            [int]$resume.exitCode -eq 0 -and [string]$resume.stdout -match '--include-non-interactive' -and
+            [int]$appServer.exitCode -eq 0 -and [string]$appServer.stdout -match '--stdio'
         )
         return [pscustomobject]@{
             supported = $supported
             version = ([string]$version.stdout).Trim()
             command = $CodexCommand
-            detail = if ($supported) { "exec JSONL, exec resume, and interactive resume are available" } else { "required Codex CLI session capabilities are missing" }
+            detail = if ($supported) { "exec JSONL, app-server stdio, exec resume, and interactive resume are available" } else { "required Codex CLI session capabilities are missing" }
         }
     } catch {
         return [pscustomobject]@{ supported = $false; version = ""; command = $CodexCommand; detail = $_.Exception.Message }
@@ -71,7 +138,7 @@ function Start-FactoryCodexWorkerProcess {
     }
 
     $arguments = @(
-        "exec", "--json", "--sandbox", "workspace-write", "--approve-for-me",
+        "exec", "--json", "--approve-for-me",
         "-C", [IO.Path]::GetFullPath($Worktree),
         "--output-last-message", $lastMessagePath
     )

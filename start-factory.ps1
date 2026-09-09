@@ -62,12 +62,15 @@ $factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
 $selectedAgent = if ($Agent) { $Agent } else { "claude" }
 $resolvedCodexCommand = ""
 if ($selectedAgent -eq "codex") {
-    $resolvedCodexCommand = Resolve-FactoryCodexCommand -Config $factoryConfig -ExplicitCommand $CodexCommand
+    $configuredCodexCommand = Get-FactoryConfiguredCodexCommand -Config $factoryConfig -ExplicitCommand $CodexCommand
+    $resolvedCodexCommand = Resolve-FactoryCodexCommand -Config $factoryConfig -ExplicitCommand $configuredCodexCommand
     $capabilities = Get-FactoryCodexCapabilities -CodexCommand $resolvedCodexCommand
     if (-not [bool]$capabilities.supported) {
         throw "Cannot start the Codex factory runtime: $($capabilities.detail)"
     }
-    Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $resolvedCodexCommand
+    # Persist the portable setting, not an installer-version directory that will
+    # become stale after the next Codex update.
+    Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $configuredCodexCommand
 }
 Set-FactoryProperty -Target $factoryConfig -Name "workerAgent" -Value $selectedAgent
 $workerAgent = $selectedAgent
@@ -104,7 +107,8 @@ try {
     if ($selectedAgent -eq "claude") {
         Write-Host "Session view: claude agents" -ForegroundColor Cyan
     } else {
-        Write-Host "Session view: the stored Codex thread is resumed directly" -ForegroundColor Cyan
+        Write-Host "Session view: Codex app/phone task plus this terminal" -ForegroundColor Cyan
+        Write-Host "Codex CLI: $resolvedCodexCommand" -ForegroundColor Cyan
     }
     Write-Host "Worker runtime: $workerAgent" -ForegroundColor Cyan
     Write-Host "Command: $(if ($selectedAgent -eq 'claude') { '/factory' } else { 'factory' })" -ForegroundColor Cyan

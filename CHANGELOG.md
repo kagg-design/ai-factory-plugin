@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Made the Codex orchestrator app-backed and remotely visible. `factory start
+  -Agent codex` now creates a named, project-rooted task through the bounded
+  app-server protocol, exposes it in Codex Desktop and connected phone clients,
+  attaches the terminal to the same thread, validates it before later resumes,
+  migrates a legacy standalone identity once, and archives a partially created
+  thread when bootstrap fails instead of persisting a broken replacement.
 - Added `factory restart` for update-safe orchestrator replacement. It finds
   the current repository's Claude orchestrator without an operator-supplied
   Agent View ID, stops only matching background rows, resumes the exact stored

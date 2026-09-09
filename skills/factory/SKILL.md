@@ -13,11 +13,18 @@ factory protocol completely from:
 
 `$env:CLAUDE_FACTORY_PLUGIN_ROOT\standalone\.claude\skills\factory\SKILL.md`
 
+Phone-hosted app turns may not inherit the terminal environment. When
+`CLAUDE_FACTORY_PLUGIN_ROOT` is empty, resolve the current `$CLAUDE_SKILL_DIR`
+junction or symbolic-link target, then take the parent of its `skills`
+directory as the plugin root. The app-backed orchestrator's persistent
+developer instructions also contain the exact plugin root. Do not guess a
+different checkout and do not write anything into the target repository.
+
 Treat that document as authoritative for commands, state transitions, review,
 integration, and output. Apply these Codex adaptations:
 
-- `$CLAUDE_SKILL_DIR` means
-  `$env:CLAUDE_FACTORY_PLUGIN_ROOT\standalone\.claude\skills\factory`.
+- `$CLAUDE_SKILL_DIR` means the canonical skill directory beneath the resolved
+  plugin root: `standalone\.claude\skills\factory`.
 - `$CLAUDE_PROJECT_DIR` means `$env:CLAUDE_FACTORY_REPOSITORY`; if it is empty,
   use the current working directory.
 - A user prompt beginning with `factory ` is equivalent to the canonical

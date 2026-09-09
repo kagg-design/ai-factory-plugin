@@ -45,7 +45,7 @@ try {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, "Process")
     }
 
-    & $CodexCommand resume -C $worktree --sandbox workspace-write --approve-for-me $threadId
+    & $CodexCommand resume -C $worktree --approve-for-me $threadId
     $interactiveExit = $LASTEXITCODE
     if ($interactiveExit -ne 0) { throw "Codex interactive resume exited with code $interactiveExit." }
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 public static class FakePsql
 {
@@ -29,7 +30,26 @@ public static class FakePsql
     {
         string path = Env("CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE");
         if (String.IsNullOrEmpty(path)) return;
-        File.AppendAllText(path, operation + "\t" + database + Environment.NewLine, new UTF8Encoding(false));
+        AppendWithRetry(path, operation + "\t" + database + Environment.NewLine);
+    }
+
+    private static void AppendWithRetry(string path, string text)
+    {
+        IOException failure = null;
+        for (int attempt = 0; attempt < 200; attempt++)
+        {
+            try
+            {
+                File.AppendAllText(path, text, new UTF8Encoding(false));
+                return;
+            }
+            catch (IOException exception)
+            {
+                failure = exception;
+                Thread.Sleep(10);
+            }
+        }
+        throw failure ?? new IOException("Could not append the fake PostgreSQL audit record.");
     }
 
     public static int Main(string[] args)
@@ -41,7 +61,7 @@ public static class FakePsql
         if (!String.IsNullOrEmpty(audit))
         {
             string passwordState = String.IsNullOrEmpty(Env("PGPASSWORD")) ? "missing-password" : "password-present";
-            File.AppendAllText(audit, sql + "\t" + passwordState + Environment.NewLine, new UTF8Encoding(false));
+            AppendWithRetry(audit, sql + "\t" + passwordState + Environment.NewLine);
         }
 
         string registry = Env("CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE");

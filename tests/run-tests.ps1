@@ -20,6 +20,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 . (Join-Path $pluginRoot "scripts\worker-event.ps1")
+. (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -137,6 +138,8 @@ try {
     Assert-True (@($bundleManifest.files) -contains "scripts/migrate-runtime.ps1") "The plugin manifest omits safe runtime migration."
     Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "AGENTS.md")) "The repository omits the Codex runtime-cleanup guard."
     Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "CLAUDE.md")) "The repository omits the Claude runtime-cleanup guard."
+    $codexSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\factory\SKILL.md") -Raw
+    Assert-True ($codexSkill.Contains("Phone-hosted app turns may not inherit the terminal environment")) "The Codex factory skill cannot resolve the plugin from a phone-hosted turn."
 
     $publicSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "standalone\.claude\skills\factory\SKILL.md") -Raw
     Assert-True ($publicSkill -match '(?m)^name: factory\s*$') "The /factory standalone skill is missing or misnamed."
@@ -201,11 +204,15 @@ try {
     Assert-True ($launcherSource.Contains('& $ClaudeCommand attach $backgroundId')) "Launcher does not attach an existing background orchestrator."
     Assert-True ($launcherSource.Contains('Start-FactoryCodexOrchestrator')) "Launcher cannot start a Codex orchestrator."
     Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
+    Assert-True ($launcherSource.Contains('Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $configuredCodexCommand')) "Launcher persists an update-specific resolved Codex path."
     Assert-True ($launcherSource.Contains('Get-FactoryPendingOrchestratorRotation')) "Launcher does not consume pending orchestrator rotation."
     Assert-True ($launcherSource.Contains('Complete-FactoryOrchestratorRotation')) "Launcher does not finalize orchestrator rotation after assigning a new session."
     Assert-True ($launcherSource.Contains('$env:CLAUDE_FACTORY_ORCHESTRATOR = "1"')) "Launcher does not mark child shells as running inside the orchestrator TUI."
     Assert-True ($launcherSource.Contains('$orchestratorEnvironmentWasSet = Test-Path Env:\CLAUDE_FACTORY_ORCHESTRATOR')) "Launcher does not remember whether its caller owned the orchestrator environment marker."
     Assert-True ($launcherSource.Contains('Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue')) "Launcher does not clear its temporary orchestrator environment marker."
+    $codexOrchestratorSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1") -Raw
+    Assert-True ($codexOrchestratorSource.Contains('This bootstrap turn only establishes a resumable conversation.')) "Codex bootstrap may perform expensive operational work before opening the TUI."
+    Assert-True ($codexOrchestratorSource.Contains('Do not load a skill, read a file, run a command, call a tool')) "Codex bootstrap does not prohibit eager factory skill loading."
 
     $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export"
     Assert-Equal "factory-local-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
@@ -371,6 +378,24 @@ try {
     Add-Type -Path (Join-Path $PSScriptRoot "FakeClaude.cs") -OutputAssembly $fakeClaude -OutputType ConsoleApplication
     Add-Type -Path (Join-Path $PSScriptRoot "FakeCodex.cs") -OutputAssembly $fakeCodex -OutputType ConsoleApplication
     Add-Type -Path (Join-Path $PSScriptRoot "FakePsql.cs") -OutputAssembly $fakePsql -OutputType ConsoleApplication
+
+    $codexWrapperDirectory = Join-Path $testRoot "codex-wrapper"
+    $codexDiscoveryRoot = Join-Path $testRoot "codex-installation"
+    $codexVersionDirectory = Join-Path $codexDiscoveryRoot "version-current"
+    New-Item -ItemType Directory -Path $codexWrapperDirectory, $codexVersionDirectory -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $codexWrapperDirectory "codex.cmd"), "@exit /b 1`r`n", (New-Object Text.ASCIIEncoding))
+    $installedFakeCodex = Join-Path $codexVersionDirectory "codex.exe"
+    Copy-Item -LiteralPath $fakeCodex -Destination $installedFakeCodex -Force
+    $previousPath = $env:PATH
+    try {
+        $env:PATH = $codexWrapperDirectory
+        $resolvedInstalledCodex = Resolve-FactoryCodexCommand `
+            -Config ([pscustomobject]@{ codexCommand = "codex" }) `
+            -DiscoveryRoot $codexDiscoveryRoot
+        Assert-Equal ([IO.Path]::GetFullPath($installedFakeCodex)) $resolvedInstalledCodex "Codex resolution did not bypass the batch wrapper."
+    } finally {
+        $env:PATH = $previousPath
+    }
 
     $unicodeFixture = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0KLQtdGB0YIg0LrQuNGA0LjQu9C70LjRhtGLIOKAlCDQs9C+0YLQvtCy0L4="))
     $utf8Probe = Invoke-FactoryNativeProcess -Command $fakeClaude -Arguments @("utf8-probe")
@@ -3289,18 +3314,49 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $codexConfig
     $codexLog = Join-Path $testRoot "codex-events.tsv"
     $env:CLAUDE_FACTORY_TEST_CODEX_LOG = $codexLog
+    $codexIdentityPath = Join-Path ([string]$context.projectData) "codex-orchestrator-session.json"
+    Write-FactoryJsonAtomic -Path $codexIdentityPath -Value ([ordered]@{
+        version = 1
+        runtime = "codex"
+        repositoryRoot = [string]$context.repositoryRoot
+        sessionId = "11111111-2222-4333-8444-555555555555"
+        updatedAt = Get-FactoryUtcTimestamp
+    })
+    $env:CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD = "turn/start"
+    $previousAppServerFailureErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 2>&1)
+        $failedAppServerStartExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousAppServerFailureErrorAction
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD -ErrorAction SilentlyContinue
+    }
+    Assert-True ($failedAppServerStartExitCode -ne 0) "Injected app-server bootstrap failure did not fail startup."
+    $identityAfterAppServerFailure = Read-FactoryJson -Path $codexIdentityPath
+    Assert-Equal 1 ([int]$identityAfterAppServerFailure.version) "Failed app-server bootstrap replaced the last usable orchestrator identity."
+    Assert-Equal "11111111-2222-4333-8444-555555555555" ([string]$identityAfterAppServerFailure.sessionId) "Failed app-server bootstrap lost the legacy orchestrator ID."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/archive\"' }).Count -eq 1) "Failed app-server bootstrap left its partially created thread unarchived."
+    Remove-Item -LiteralPath $codexLog -Force
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Public factory start could not select the Codex worker runtime."
     $codexConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal "codex" ([string]$codexConfig.workerAgent) "Public factory start did not persist the private Codex selection."
-    $codexOrchestratorIdentity = Read-FactoryJson -Path (Join-Path ([string]$context.projectData) "codex-orchestrator-session.json")
+    $codexOrchestratorIdentity = Read-FactoryJson -Path $codexIdentityPath
     Assert-Equal "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" ([string]$codexOrchestratorIdentity.sessionId) "Codex orchestrator thread UUID was not persisted."
+    Assert-Equal 2 ([int]$codexOrchestratorIdentity.version) "Codex orchestrator identity was not upgraded to the app-backed schema."
+    Assert-Equal "app-server" ([string]$codexOrchestratorIdentity.backend) "Codex orchestrator identity did not record its app-server backend."
+    Assert-Equal "11111111-2222-4333-8444-555555555555" ([string]$codexOrchestratorIdentity.legacySessionId) "Codex orchestrator migration did not retain the standalone thread ID."
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDE_FACTORY_CODEX_SKILL_HOME "factory")) "Codex factory skill was not linked into the private test skill home."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 1) "First Codex startup did not bootstrap exactly one orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 1) "First Codex startup did not create exactly one app-backed orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"project/list\"' }).Count -eq 1) "Codex app-backed startup did not resolve the repository project."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\".*\"threadSource\":\"vscode\"' }).Count -eq 1) "Codex orchestrator was not created with an app-visible source."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/name/set\".*Factory Orchestrator - repository' }).Count -eq 1) "Codex app task did not receive a readable repository title."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 1) "First Codex startup did not resume the bootstrapped orchestrator."
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Stored Codex orchestrator resume failed."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 1) "Repeated Codex startup created a duplicate orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 1) "Repeated Codex startup created a duplicate app-backed orchestrator thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/read\"' }).Count -eq 1) "Repeated Codex startup did not validate the stored app task."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 2) "Repeated Codex startup did not resume the stored thread."
     $codexRotate = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") rotate -Repository $repository | Out-String)
     Assert-True ($codexRotate.Contains("Orchestrator rotation prepared") -and $codexRotate.Contains("factory start -Agent codex")) "Codex rotation did not print its runtime-specific restart command."
@@ -3312,7 +3368,7 @@ try {
     Assert-Equal 0 $LASTEXITCODE "Pending Codex orchestrator rotation could not be activated."
     $rotatedCodexIdentity = Read-FactoryJson -Path (Join-Path ([string]$context.projectData) "codex-orchestrator-session.json")
     Assert-Equal "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" ([string]$rotatedCodexIdentity.sessionId) "Codex rotation resumed the context-heavy thread."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' }).Count -eq 2) "Codex rotation did not bootstrap exactly one replacement thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 2) "Codex rotation did not create exactly one app-backed replacement thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match 'freshly rotated Factory Orchestrator' }).Count -ge 1) "Codex replacement bootstrap did not receive the deterministic handoff directive."
     Assert-True (-not (Test-Path -LiteralPath $codexPendingPath)) "Codex rotation left a pending marker that would rotate every subsequent start."
     $activatedCodexRotation = Read-FactoryJson -Path ([string]$codexPendingRotation.recordPath)
@@ -3333,6 +3389,7 @@ try {
     $codexLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "codex-task" -Mode interactive -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-Equal "codex" ([string]$codexLaunch.runtime) "Codex worker launch did not report its runtime."
     Assert-Equal "codex" ([string]$codexLaunch.backgroundSession.runtime) "Codex worker session lost its runtime identity."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\t--json\t' -and $_ -match '--approve-for-me' -and $_ -match '--sandbox' }).Count -eq 0) "Codex worker combined --approve-for-me with the conflicting --sandbox option."
     Assert-True ([int]$codexLaunch.backgroundSession.processId -gt 0) "Codex worker did not record a process ID."
     $codexDeadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
@@ -3356,6 +3413,7 @@ try {
     $codexResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\resume-codex-worker.ps1") -Repository $repository -TaskId "codex-task" -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-Equal "awaiting-input" ([string]$codexResume.status) "Capture-aware Codex resume changed a still-pending plan incorrectly."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t-C.*aaaaaaaa-' }).Count -eq 1) "Codex worker wrapper did not open the exact interactive thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t-C.*aaaaaaaa-' -and $_ -match '--approve-for-me' -and $_ -match '--sandbox' }).Count -eq 0) "Codex worker resume combined --approve-for-me with the conflicting --sandbox option."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^exec\tresume\t--json.*aaaaaaaa-' }).Count -eq 1) "Codex worker wrapper did not capture the post-chat state."
     $codexDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
     $codexDoctorCheck = @($codexDoctor.checks | Where-Object { [string]$_.name -eq "codexWorkerRuntime" })[0]

@@ -74,8 +74,10 @@ can run separate factory sessions at the same time.
 `factory start` always selects the full Claude runtime. Use `factory start
 -Agent codex` to select Codex for both the orchestrator and new workers. Normal
 startup reuses the selected runtime's exact stored conversation. Claude may
-attach an existing background Agent View row; Codex resumes its stored thread
-UUID directly. Use `-New` only when a genuinely new conversation is required.
+attach an existing background Agent View row. Codex creates an app-backed task
+named `Factory Orchestrator - <repository>`, so the same conversation appears
+in Codex Desktop and on connected phone clients, then resumes that exact thread
+in the terminal. Use `-New` only when a genuinely new conversation is required.
 
 ## Fast local commands
 
@@ -265,8 +267,12 @@ user-level Codex skill directory. The link points back to this plugin; no
 commands use `factory status`, `factory new`, `factory review <id>`, and so on;
 `$factory` is an internal explicit skill name, not the operator interface.
 
-Codex orchestrator bootstrap and workers use the supported resumable session
-interfaces. Worker
+Codex orchestrator bootstrap uses a bounded one-shot app-server connection to
+create, name, and validate an app-visible task before attaching the terminal
+TUI. A pre-upgrade standalone orchestrator ID is retained in the versioned
+identity while the first post-upgrade start creates one app-backed replacement.
+Later starts validate the saved task and never silently create a duplicate.
+Codex workers use the supported resumable session interfaces. Worker
 thread UUID, PID, transcript, and exact resume command are stored in private
 runtime state. They do not appear in Claude Agent View. Use `factory chat
 <task-id>` to obtain the capture-aware PowerShell command; it opens `codex
