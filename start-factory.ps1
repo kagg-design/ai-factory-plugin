@@ -107,7 +107,7 @@ try {
     if ($selectedAgent -eq "claude") {
         Write-Host "Session view: claude agents" -ForegroundColor Cyan
     } else {
-        Write-Host "Session view: Codex app/phone task plus this terminal" -ForegroundColor Cyan
+        Write-Host "Session view: Codex app/phone or this terminal (one active writer at a time)" -ForegroundColor Cyan
         Write-Host "Codex CLI: $resolvedCodexCommand" -ForegroundColor Cyan
     }
     Write-Host "Worker runtime: $workerAgent" -ForegroundColor Cyan

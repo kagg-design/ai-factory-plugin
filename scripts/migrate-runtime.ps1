@@ -173,7 +173,7 @@ function Get-RuntimeInventory {
             [pscustomobject]@{
                 path = $relative
                 length = [long]$_.Length
-                sha256 = [string](Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                sha256 = Get-FactoryFileSha256 -Path $_.FullName
             }
         } | Sort-Object path
     )

@@ -565,8 +565,8 @@ Run a code review first:
 
 The orchestrator checks the requirements, plan, transcript, exact diff,
 reported tests, and current commit SHA. It then records a formal private review
-containing the verdict, residual risks, trusted integration/release checks,
-current development and production tips, and a hash of that immutable plan.
+containing the verdict, residual risks, trusted checks, current configured
+branch tips, and a hash of that immutable plan.
 
 If the result is acceptable:
 
@@ -576,16 +576,32 @@ If the result is acceptable:
 
 `go` approves only the exact clean worker SHA and matching formal plan hash. It
 is also available directly as `factory go <id>` or `!factory go <id>`; those
-forms do not invoke AI. The native scheduler prepares development and production
-candidates in its existing isolated integrator/release worktrees and runs both
-recorded check sets concurrently in separate processes and isolated test
-databases under one publication-priority test-lane lease. Only after both pass
-does it re-fetch the reviewed bases and push the
-exact tested development and production candidates sequentially, without force.
-It then verifies both remotes and performs guarded cleanup. If either remote
-moved since review, the worker HEAD changed, a check failed, or a conflict
-occurred, publication stops with an exact saved reason instead of asking AI to
-repair it implicitly.
+forms do not invoke AI. The native scheduler always prepares and checks the
+development candidate in its isolated integrator worktree. When
+`productionBranch` is non-empty, it also prepares the production candidate in
+the release worktree and runs both recorded check sets concurrently in separate
+processes and isolated test databases under one publication-priority test-lane
+lease. It then re-fetches the reviewed bases and pushes the exact tested
+configured candidates sequentially, without force. When `productionBranch` is
+empty, it checks and pushes development only: no production fetch, candidate,
+check, audit, or push occurs. After verifying every configured remote it
+performs guarded cleanup. If a configured remote moved since review, the worker
+HEAD changed, a check failed, or a conflict occurred, publication stops with an
+exact saved reason instead of asking AI to repair it implicitly.
+
+Development-only configuration:
+
+```json
+{
+  "remote": "origin",
+  "developmentBranch": "develop",
+  "productionBranch": "",
+  "autoPushDevelopment": true
+}
+```
+
+`autoPromoteToProduction`, `productionMode`, and `releaseTestCommands` are
+ignored while the production branch is empty.
 
 Both generated merge commits are recognizable in normal Git history. The
 subject is `Merge task <task-id> into <develop|production branch>`, never an

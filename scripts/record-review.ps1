@@ -101,19 +101,28 @@ try {
     $now = Get-FactoryUtcTimestamp
     $integrationPlan = $null
     if ($verdict -eq "approved") {
-        if (-not [bool]$config.autoPushDevelopment -or -not [bool]$config.autoPromoteToProduction) {
-            throw "Native approval requires autoPushDevelopment and autoPromoteToProduction to be enabled."
+        if (-not [bool]$config.autoPushDevelopment) {
+            throw "Native approval requires autoPushDevelopment to be enabled."
         }
         $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
-        $developmentBranch = [string]$config.developmentBranch
-        $productionBranch = [string]$config.productionBranch
-        if (-not $developmentBranch -or -not $productionBranch) {
-            throw "Development and production branches must be configured."
+        $developmentBranch = ([string]$config.developmentBranch).Trim()
+        $productionBranch = ([string]$config.productionBranch).Trim()
+        $developmentOnly = -not [bool]$productionBranch
+        if (-not $developmentBranch) {
+            throw "A development branch must be configured."
         }
-        & git -C ([string]$context.repositoryRoot) fetch $remote $developmentBranch $productionBranch 1> $null
+        if (-not $developmentOnly -and -not [bool]$config.autoPromoteToProduction) {
+            throw "Native production approval requires autoPromoteToProduction to be enabled."
+        }
+        if (-not $developmentOnly -and $developmentBranch.Equals($productionBranch, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Development and production branches must be different; leave productionBranch empty for development-only publication."
+        }
+        $reviewBranches = @($developmentBranch)
+        if (-not $developmentOnly) { $reviewBranches += $productionBranch }
+        & git -C ([string]$context.repositoryRoot) fetch $remote @reviewBranches 1> $null
         if ($LASTEXITCODE -ne 0) { throw "Failed to fetch '$remote' review bases." }
         $developmentBase = (& git -C ([string]$context.repositoryRoot) rev-parse "$remote/$developmentBranch").Trim()
-        $productionBase = (& git -C ([string]$context.repositoryRoot) rev-parse "$remote/$productionBranch").Trim()
+        $productionBase = if ($developmentOnly) { "" } else { (& git -C ([string]$context.repositoryRoot) rev-parse "$remote/$productionBranch").Trim() }
         $parentLine = (& git -C $worktree rev-list --parents -n 1 $reviewCommit).Trim()
         $parentParts = @($parentLine -split '\s+' | Where-Object { $_ })
         if ($parentParts.Count -ne 2) {
@@ -137,20 +146,25 @@ try {
             }
             throw "Approved review requires at least one integration test command."
         }
-        $releaseCommands = @(Resolve-FactoryReviewCommands `
-            -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "releaseTestCommands" -Default @()) `
-            -ConfigValue (Get-FactoryNestedValue -Target $config -Name "releaseTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
-            -RepositoryRoot ([string]$context.repositoryRoot))
-        if ($releaseCommands.Count -eq 0) { $releaseCommands = @($integrationCommands) }
-
-        $productionMode = [string](Get-FactoryNestedValue -Target $config -Name "productionMode" -Default "merge-develop")
-        if ($productionMode -notin @("merge-develop", "task-only")) {
-            throw "Unsupported productionMode '$productionMode'."
+        $releaseCommands = @()
+        if (-not $developmentOnly) {
+            $releaseCommands = @(Resolve-FactoryReviewCommands `
+                -InputValue (Get-FactoryNestedValue -Target $reviewInput -Name "releaseTestCommands" -Default @()) `
+                -ConfigValue (Get-FactoryNestedValue -Target $config -Name "releaseTestCommands" -Default @()) `
+                -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
+                -RepositoryRoot ([string]$context.repositoryRoot))
+            if ($releaseCommands.Count -eq 0) { $releaseCommands = @($integrationCommands) }
         }
-        $allowsUnrelatedDevelopment = [bool]$config.allowUnrelatedDevelopCommitsToProduction
-        if (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment) {
-            throw "productionMode '$productionMode' conflicts with allowUnrelatedDevelopCommitsToProduction=$allowsUnrelatedDevelopment. Use merge-develop/true or task-only/false."
+
+        $productionMode = if ($developmentOnly) { "development-only" } else { [string](Get-FactoryNestedValue -Target $config -Name "productionMode" -Default "merge-develop") }
+        $allowsUnrelatedDevelopment = if ($developmentOnly) { $false } else { [bool]$config.allowUnrelatedDevelopCommitsToProduction }
+        if (-not $developmentOnly) {
+            if ($productionMode -notin @("merge-develop", "task-only")) {
+                throw "Unsupported productionMode '$productionMode'."
+            }
+            if (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment) {
+                throw "productionMode '$productionMode' conflicts with allowUnrelatedDevelopCommitsToProduction=$allowsUnrelatedDevelopment. Use merge-develop/true or task-only/false."
+            }
         }
         $integrationPlan = [pscustomobject][ordered]@{
             version = 1
@@ -166,13 +180,15 @@ try {
             integrationTestCommands = @($integrationCommands)
             releaseTestCommands = @($releaseCommands)
             autoPushDevelopment = [bool]$config.autoPushDevelopment
-            autoPromoteToProduction = [bool]$config.autoPromoteToProduction
+            autoPromoteToProduction = (-not $developmentOnly -and [bool]$config.autoPromoteToProduction)
             createdAt = $now
             planHash = ""
         }
         $integrationPlan.planHash = Get-FactoryIntegrationPlanHash -Plan $integrationPlan
         Set-FactoryProperty -Target $state.resolvedCommands -Name "integration" -Value @($integrationCommands)
-        Set-FactoryProperty -Target $state.resolvedCommands -Name "release" -Value @($releaseCommands)
+        if (-not $developmentOnly) {
+            Set-FactoryProperty -Target $state.resolvedCommands -Name "release" -Value @($releaseCommands)
+        }
     }
 
     Set-FactoryProperty -Target $task -Name "review" -Value ([pscustomobject]@{

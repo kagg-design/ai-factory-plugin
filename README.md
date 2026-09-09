@@ -27,8 +27,8 @@ directory, `CLAUDE.md`, or `.gitignore`.
 - Claude Code 2.1.139 or newer; the current Agent View release is recommended
 - an authenticated Asana connector available to Claude Code for Asana-backed
   intake (`factory add --file` does not require it)
-- remote development and production branches (`develop` and `master` by
-  default)
+- a remote development branch (`develop` by default); the production branch is
+  optional and an empty `productionBranch` enables development-only publication
 
 Check Claude Code before starting:
 
@@ -843,16 +843,34 @@ factory:
 4. runs integration tests;
 5. fetches again and stops before development push if its reviewed base moved;
 6. pushes without force;
-7. promotes in the separate `factory-release` worktree, rebuilding and
-   retesting when a release input races;
-8. runs release tests and verifies remote reachability;
-9. cleans the worker only after verification and releases the lease in a
+7. when `productionBranch` is configured, promotes in the separate
+   `factory-release` worktree, rebuilding and retesting when a release input
+   races;
+8. when enabled, runs release tests and verifies production reachability;
+9. cleans the worker after every configured publication target is verified and releases the lease in a
    `finally` path.
 
-Cleanup is audited as a separate stage after both remote pushes are verified.
-If it fails, development and production remain recorded as `published`, the
-task becomes `blocked` with `cleanup: failed`, and `factory cleanup <task-id>`
-retries only artifact cleanup without republishing anything.
+Cleanup is audited as a separate stage after every configured remote push is
+verified. If it fails, completed publications remain recorded as `published`,
+the task becomes `blocked` with `cleanup: failed`, and `factory cleanup
+<task-id>` retries only artifact cleanup without republishing anything.
+
+Leave the production branch empty when the repository has only a development
+publication target:
+
+```json
+{
+  "remote": "origin",
+  "developmentBranch": "develop",
+  "productionBranch": "",
+  "autoPushDevelopment": true
+}
+```
+
+This development-only mode does not fetch a production branch, create or reset
+the release worktree, run release checks, create a production audit, or push a
+production ref. `autoPromoteToProduction`, `productionMode`, and
+`releaseTestCommands` are ignored while `productionBranch` is empty.
 
 `merge-develop` promotes the complete current development branch:
 

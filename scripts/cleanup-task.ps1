@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$ClaudeCommand = "",
     [string]$CodexCommand = "",
-    [switch]$FinalizeProduction
+    [Alias("FinalizeProduction")][switch]$FinalizePublication
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,18 +116,20 @@ try {
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
 
-    if ([string]$task.status -in @(
+    $taskStatus = [string]$task.status
+    $integrationStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "integration") -Name "status" -Default "")
+    $productionStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "production") -Name "status" -Default "")
+    $developmentOnly = -not [bool](([string]$config.productionBranch).Trim())
+    $finalizablePublication = (
+        $FinalizePublication -and
+        $integrationStatus -eq "published" -and
+        (($developmentOnly -and $taskStatus -eq "integrating") -or (-not $developmentOnly -and $taskStatus -eq "production" -and $productionStatus -eq "published"))
+    )
+    if ($taskStatus -in @(
         "queued", "starting", "planning", "running", "approved",
-        "integrating", "syncing"
-    )) {
-        throw "Task '$TaskId' is '$($task.status)' and cannot be cleaned up while active."
-    }
-    if ([string]$task.status -eq "production") {
-        $integrationStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "integration") -Name "status" -Default "")
-        $productionStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "production") -Name "status" -Default "")
-        if (-not $FinalizeProduction -or $integrationStatus -ne "published" -or $productionStatus -ne "published") {
-            throw "Task '$TaskId' is in production and has not completed the native publication pipeline."
-        }
+        "integrating", "syncing", "production"
+    ) -and -not $finalizablePublication) {
+        throw "Task '$TaskId' is '$taskStatus' and has not completed the native publication pipeline."
     }
     if (
         $null -ne $task.backgroundSession -and
@@ -170,9 +172,11 @@ try {
 
     $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
     $requiredBranches = @(
-        [string]$config.developmentBranch,
-        [string]$config.productionBranch
-    ) | Where-Object { $_ } | Select-Object -Unique
+        @(
+            [string]$config.developmentBranch,
+            [string]$config.productionBranch
+        ) | Where-Object { $_ } | Select-Object -Unique
+    )
     if ($requiredBranches.Count -eq 0) {
         throw "No development or production branch is configured."
     }

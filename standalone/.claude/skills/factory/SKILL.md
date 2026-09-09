@@ -643,12 +643,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 `go` makes no new code judgment. It accepts only an `awaiting-review` or held
 task whose formal review verdict, exact worker SHA, and integration-plan hash
 all match. It records immutable approval and starts the native scheduler. The
-scheduler acquires one publication-priority test lease, builds both immutable
-candidates, runs the integrator and release check sets in parallel under that
-one lease, pushes without force, verifies reachability, releases from a
-`finally`, and performs guarded cleanup. A moved pre-integration branch, dirty worker,
-hash mismatch, merge conflict, or failed check stops publication and records
-the exact error; AI never repairs a conflict implicitly.
+scheduler acquires one publication-priority test lease, builds the immutable
+development candidate, pushes it without force after checks pass, verifies
+reachability, releases from a `finally`, and performs guarded cleanup. When
+`productionBranch` is non-empty it also builds a release candidate, runs the
+integrator and release check sets in parallel, and pushes production only after
+both pass. An empty `productionBranch` is development-only mode: the scheduler
+does not fetch, build, check, audit, or push production. A moved configured
+branch, dirty worker, hash mismatch, merge conflict, or failed check stops
+publication and records the exact error; AI never repairs a conflict implicitly.
 
 With `--direct`, the operator explicitly skips the independent AI code-review
 turn. Pass `-Direct` to the native PowerShell command. Native validation still
@@ -760,11 +763,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 Cleanup is a published-work artifact-removal command with strict safeguards. It
 must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
-from both configured remote development and production branches. After those
+from every configured remote publication branch. With an empty
+`productionBranch`, only development reachability is required. After those
 checks, it must stop and verify every live process belonging to the task before
 touching the worktree, remove every matching Agent View row, and drop the exact
-isolated worker test database when configured. A stop or database failure
-must abort before artifact removal. It removes only the task's external worker
+isolated worker test database when configured. A stop or database failure must
+abort before artifact removal. It removes only the task's external worker
 worktree and local `factory-worker/*` branch. Preserve the factory's result
 metadata in private state and report the task as `done`. If an individual Agent
 View `rm` fails, report the returned `agentSessionWarning`; the Git cleanup and

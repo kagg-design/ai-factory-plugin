@@ -171,7 +171,11 @@ Add-DoctorCheck -Name "configJson" -Passed ($codingConcurrency -ge 1 -and $worke
 $publicationReadiness = Get-FactoryPublicationReadiness -Config $config -State $state -RepositoryRoot ([string]$context.repositoryRoot)
 $publicationDetail = if ([bool]$publicationReadiness.ready) {
     $remoteName = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
-    "ready for $remoteName/$($config.developmentBranch) -> $remoteName/$($config.productionBranch); $(@($publicationReadiness.integrationTestCommands).Count) integration and $(@($publicationReadiness.releaseTestCommands).Count) release check(s)"
+    if ([bool]$publicationReadiness.developmentOnly) {
+        "development-only: ready for $remoteName/$($config.developmentBranch); $(@($publicationReadiness.integrationTestCommands).Count) integration check(s); production disabled"
+    } else {
+        "ready for $remoteName/$($config.developmentBranch) -> $remoteName/$($config.productionBranch); $(@($publicationReadiness.integrationTestCommands).Count) integration and $(@($publicationReadiness.releaseTestCommands).Count) release check(s)"
+    }
 } else {
     "not ready: $(@($publicationReadiness.blockers) -join '; '); run 'factory config edit'"
 }

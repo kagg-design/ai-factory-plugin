@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added development-only publication: an empty `productionBranch` now makes
+  review, direct approval, integration, verification, and cleanup operate only
+  on the configured development branch, without fetching or pushing a
+  production ref or touching the release worktree. Codex startup now also says
+  explicitly that app/phone and terminal share one active writer at a time.
+- Removed runtime migration's dependency on the ambient `Get-FileHash` cmdlet;
+  copy verification now uses Factory's module-independent SHA-256 helper.
+  Config migration also preserves missing JSON array defaults as arrays under
+  Windows PowerShell 5.1 instead of serializing them as `{ value, Count }`.
 - Made the Codex orchestrator app-backed and remotely visible. `factory start
   -Agent codex` now creates a named, project-rooted task through the bounded
   app-server protocol, exposes it in Codex Desktop and connected phone clients,

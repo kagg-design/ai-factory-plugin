@@ -207,6 +207,13 @@ function Add-MissingFactoryProperties {
             $copy = $defaultProperty.Value |
                 ConvertTo-Json -Depth 100 |
                 ConvertFrom-Json
+            if ($copy -is [Array]) {
+                # Windows PowerShell 5.1 can attach collection-adapter metadata
+                # to a JSON array returned from the pipeline. If that wrapped
+                # value is added directly as a note property, ConvertTo-Json
+                # later emits { value, Count } instead of the JSON array.
+                $copy = @($copy | ForEach-Object { $_ })
+            }
             $Target | Add-Member -NotePropertyName $defaultProperty.Name -NotePropertyValue $copy
             continue
         }
@@ -930,21 +937,25 @@ function Get-FactoryPublicationReadiness {
     if (-not [bool](Get-FactoryNestedValue -Target $Config -Name "autoPushDevelopment" -Default $false)) {
         $blockers.Add("autoPushDevelopment=false")
     }
-    if (-not [bool](Get-FactoryNestedValue -Target $Config -Name "autoPromoteToProduction" -Default $false)) {
-        $blockers.Add("autoPromoteToProduction=false")
-    }
-
     $developmentBranch = ([string](Get-FactoryNestedValue -Target $Config -Name "developmentBranch" -Default "")).Trim()
     $productionBranch = ([string](Get-FactoryNestedValue -Target $Config -Name "productionBranch" -Default "")).Trim()
+    $developmentOnly = -not [bool]$productionBranch
     if (-not $developmentBranch) { $blockers.Add("developmentBranch is not configured") }
-    if (-not $productionBranch) { $blockers.Add("productionBranch is not configured") }
+    if (-not $developmentOnly -and -not [bool](Get-FactoryNestedValue -Target $Config -Name "autoPromoteToProduction" -Default $false)) {
+        $blockers.Add("autoPromoteToProduction=false")
+    }
+    if (-not $developmentOnly -and $developmentBranch.Equals($productionBranch, [StringComparison]::OrdinalIgnoreCase)) {
+        $blockers.Add("developmentBranch and productionBranch must be different; leave productionBranch empty for development-only publication")
+    }
 
     $productionMode = [string](Get-FactoryNestedValue -Target $Config -Name "productionMode" -Default "merge-develop")
     $allowsUnrelatedDevelopment = [bool](Get-FactoryNestedValue -Target $Config -Name "allowUnrelatedDevelopCommitsToProduction" -Default $false)
-    if ($productionMode -notin @("merge-develop", "task-only")) {
-        $blockers.Add("productionMode '$productionMode' is unsupported")
-    } elseif (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment) {
-        $blockers.Add("productionMode '$productionMode' conflicts with allowUnrelatedDevelopCommitsToProduction=$allowsUnrelatedDevelopment")
+    if (-not $developmentOnly) {
+        if ($productionMode -notin @("merge-develop", "task-only")) {
+            $blockers.Add("productionMode '$productionMode' is unsupported")
+        } elseif (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment) {
+            $blockers.Add("productionMode '$productionMode' conflicts with allowUnrelatedDevelopCommitsToProduction=$allowsUnrelatedDevelopment")
+        }
     }
 
     $savedCommands = Get-FactoryNestedValue -Target $State -Name "resolvedCommands"
@@ -958,12 +969,14 @@ function Get-FactoryPublicationReadiness {
         if ($integrationCommands.Count -eq 0) {
             $blockers.Add("no trusted integration test commands are configured or saved")
         }
-        $releaseCommands = @(Resolve-FactoryReviewCommands `
-            -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "releaseTestCommands" -Default @()) `
-            -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
-            -RepositoryRoot $RepositoryRoot)
-        if ($releaseCommands.Count -eq 0 -and $integrationCommands.Count -gt 0) {
-            $releaseCommands = @($integrationCommands)
+        if (-not $developmentOnly) {
+            $releaseCommands = @(Resolve-FactoryReviewCommands `
+                -ConfigValue (Get-FactoryNestedValue -Target $Config -Name "releaseTestCommands" -Default @()) `
+                -SavedValue (Get-FactoryNestedValue -Target $savedCommands -Name "release" -Default @()) `
+                -RepositoryRoot $RepositoryRoot)
+            if ($releaseCommands.Count -eq 0 -and $integrationCommands.Count -gt 0) {
+                $releaseCommands = @($integrationCommands)
+            }
         }
     } catch {
         $blockers.Add($_.Exception.Message)
@@ -972,6 +985,7 @@ function Get-FactoryPublicationReadiness {
     return [pscustomobject]@{
         ready = ($blockers.Count -eq 0)
         blockers = @($blockers | ForEach-Object { $_ })
+        developmentOnly = $developmentOnly
         integrationTestCommands = @($integrationCommands)
         releaseTestCommands = @($releaseCommands)
     }
@@ -1157,8 +1171,42 @@ function Assert-FactoryIntegrationPlan {
     if (@(Get-FactoryNestedValue -Target $Plan -Name "integrationTestCommands" -Default @()).Count -eq 0) {
         throw "Task '$TaskId' integration plan has no integration checks. Run review again."
     }
-    if (@(Get-FactoryNestedValue -Target $Plan -Name "releaseTestCommands" -Default @()).Count -eq 0) {
-        throw "Task '$TaskId' integration plan has no release checks. Run review again."
+    if (-not [bool](Get-FactoryNestedValue -Target $Plan -Name "autoPushDevelopment" -Default $false)) {
+        throw "Task '$TaskId' integration plan does not authorize the development push. Run review again."
+    }
+    $remote = ([string](Get-FactoryNestedValue -Target $Plan -Name "remote" -Default "")).Trim()
+    $developmentBranch = ([string](Get-FactoryNestedValue -Target $Plan -Name "developmentBranch" -Default "")).Trim()
+    $developmentBase = ([string](Get-FactoryNestedValue -Target $Plan -Name "developmentBase" -Default "")).Trim()
+    if (-not $remote -or -not $developmentBranch -or -not $developmentBase) {
+        throw "Task '$TaskId' integration plan has an incomplete development target. Run review again."
+    }
+    $productionBranch = ([string](Get-FactoryNestedValue -Target $Plan -Name "productionBranch" -Default "")).Trim()
+    $productionMode = ([string](Get-FactoryNestedValue -Target $Plan -Name "productionMode" -Default "")).Trim()
+    $allowsUnrelatedDevelopment = [bool](Get-FactoryNestedValue -Target $Plan -Name "allowUnrelatedDevelopCommitsToProduction" -Default $false)
+    if ($productionBranch) {
+        if ($developmentBranch.Equals($productionBranch, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Task '$TaskId' integration plan targets the same development and production branch. Run review again."
+        }
+        if (-not [bool](Get-FactoryNestedValue -Target $Plan -Name "autoPromoteToProduction" -Default $false)) {
+            throw "Task '$TaskId' integration plan does not authorize the production push. Run review again."
+        }
+        if (-not ([string](Get-FactoryNestedValue -Target $Plan -Name "productionBase" -Default "")).Trim()) {
+            throw "Task '$TaskId' integration plan has no production base. Run review again."
+        }
+        if (@(Get-FactoryNestedValue -Target $Plan -Name "releaseTestCommands" -Default @()).Count -eq 0) {
+            throw "Task '$TaskId' integration plan has no release checks. Run review again."
+        }
+        if ($productionMode -notin @("merge-develop", "task-only") -or (($productionMode -eq "merge-develop") -ne $allowsUnrelatedDevelopment)) {
+            throw "Task '$TaskId' integration plan has inconsistent production settings. Run review again."
+        }
+    } elseif (
+        ([string](Get-FactoryNestedValue -Target $Plan -Name "productionBase" -Default "")).Trim() -or
+        @(Get-FactoryNestedValue -Target $Plan -Name "releaseTestCommands" -Default @()).Count -gt 0 -or
+        [bool](Get-FactoryNestedValue -Target $Plan -Name "autoPromoteToProduction" -Default $false) -or
+        $productionMode -ne "development-only" -or
+        $allowsUnrelatedDevelopment
+    ) {
+        throw "Task '$TaskId' development-only plan contains production inputs. Run review again."
     }
     return $computedHash
 }

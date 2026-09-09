@@ -312,8 +312,13 @@ try {
     if ($null -eq $approval -or [string]$approval.commit -ne $taskCommit -or [string]$approval.planHash -ne $planHash) {
         throw "Task '$TaskId' approval does not match its immutable review plan."
     }
-    if (-not [bool]$plan.autoPushDevelopment -or -not [bool]$plan.autoPromoteToProduction) {
-        throw "Task '$TaskId' plan does not authorize both configured publication stages."
+    $productionBranch = ([string]$plan.productionBranch).Trim()
+    $developmentOnly = -not [bool]$productionBranch
+    if (-not [bool]$plan.autoPushDevelopment) {
+        throw "Task '$TaskId' plan does not authorize the development push."
+    }
+    if (-not $developmentOnly -and -not [bool]$plan.autoPromoteToProduction) {
+        throw "Task '$TaskId' plan does not authorize the configured production push."
     }
     if (-not (Test-Path -LiteralPath ([string]$task.worktree) -PathType Container)) { throw "Worker worktree is missing." }
     $workerHead = Invoke-PipelineGit -WorkingDirectory ([string]$task.worktree) -Arguments @("rev-parse", "HEAD") -Failure "Cannot inspect worker HEAD"
@@ -354,12 +359,13 @@ try {
 
     $remote = [string]$plan.remote
     $developmentBranch = [string]$plan.developmentBranch
-    $productionBranch = [string]$plan.productionBranch
     $repositoryRoot = [string]$context.repositoryRoot
-    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $developmentBranch, $productionBranch) -Failure "Could not fetch pipeline branches"
+    $pipelineBranches = @($developmentBranch)
+    if (-not $developmentOnly) { $pipelineBranches += $productionBranch }
+    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments (@("fetch", $remote) + $pipelineBranches) -Failure "Could not fetch pipeline branches"
     $remoteDevelopment = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot resolve development branch"
-    $remoteProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot resolve production branch"
-    if ($remoteDevelopment -ne [string]$plan.developmentBase -or $remoteProduction -ne [string]$plan.productionBase) {
+    $remoteProduction = if ($developmentOnly) { "" } else { Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot resolve production branch" }
+    if ($remoteDevelopment -ne [string]$plan.developmentBase -or (-not $developmentOnly -and $remoteProduction -ne [string]$plan.productionBase)) {
         throw "Remote branch tips moved after review. Run sync and review again before go."
     }
 
@@ -367,41 +373,48 @@ try {
     $integrationMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $developmentBranch
     $integrationMerge = Invoke-PipelineMerge -Worktree $integrator -Commit $taskCommit -Label "Development" -Message $integrationMessage
     $null = @(Sync-FactoryWorktreeDependencies -Worktree $integrator)
-    $productionSource = if ([string]$plan.productionMode -eq "task-only") { $taskCommit } else { $integrationMerge }
-
-    $currentStage = "production"
-    $release = Reset-PipelineWorktree -RepositoryRoot $repositoryRoot -WorktreeRoot ([string]$context.worktreeRoot) -Scope release -BaseCommit $remoteProduction -Config $config
-    $promoting = if ([string]$plan.productionMode -eq "task-only") {
-        "this task's commit only"
-    } else {
-        "$developmentBranch (may include commits from other tasks)"
+    $release = $null
+    $releaseMerge = ""
+    if (-not $developmentOnly) {
+        $productionSource = if ([string]$plan.productionMode -eq "task-only") { $taskCommit } else { $integrationMerge }
+        $currentStage = "production"
+        $release = Reset-PipelineWorktree -RepositoryRoot $repositoryRoot -WorktreeRoot ([string]$context.worktreeRoot) -Scope release -BaseCommit $remoteProduction -Config $config
+        $promoting = if ([string]$plan.productionMode -eq "task-only") {
+            "this task's commit only"
+        } else {
+            "$developmentBranch (may include commits from other tasks)"
+        }
+        $productionMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $productionBranch -Promoting $promoting
+        $releaseMerge = Invoke-PipelineMerge -Worktree $release -Commit $productionSource -Label "Production" -Message $productionMessage
+        $null = @(Sync-FactoryWorktreeDependencies -Worktree $release)
     }
-    $productionMessage = New-PipelineMergeMessage -Task $task -TaskCommit $taskCommit -TargetBranch $productionBranch -Promoting $promoting
-    $releaseMerge = Invoke-PipelineMerge -Worktree $release -Commit $productionSource -Label "Production" -Message $productionMessage
-    $null = @(Sync-FactoryWorktreeDependencies -Worktree $release)
 
     $integrationCheckHandle = $null
     $releaseCheckHandle = $null
     try {
         $integrationCheckHandle = Start-PipelineCheckSet -Scope integrator -Worktree $integrator -Commands @($plan.integrationTestCommands)
-        $releaseCheckHandle = Start-PipelineCheckSet -Scope release -Worktree $release -Commands @($plan.releaseTestCommands)
+        if (-not $developmentOnly) {
+            $releaseCheckHandle = Start-PipelineCheckSet -Scope release -Worktree $release -Commands @($plan.releaseTestCommands)
+        }
         $currentStage = "integration"
         $integrationCheckSet = Complete-PipelineCheckSet -Handle $integrationCheckHandle
-        $currentStage = "production"
-        $releaseCheckSet = Complete-PipelineCheckSet -Handle $releaseCheckHandle
+        if (-not $developmentOnly) {
+            $currentStage = "production"
+            $releaseCheckSet = Complete-PipelineCheckSet -Handle $releaseCheckHandle
+        }
     } finally {
         Close-PipelineCheckSet -Handle $integrationCheckHandle
         Close-PipelineCheckSet -Handle $releaseCheckHandle
     }
     $integrationTests = @($integrationCheckSet.tests)
-    $releaseTests = @($releaseCheckSet.tests)
+    $releaseTests = if ($developmentOnly) { @() } else { @($releaseCheckSet.tests) }
     $integrationAudit = [pscustomobject]@{
         status = "validated"
         taskCommit = $taskCommit
         baseCommit = $remoteDevelopment
         mergeCommit = $integrationMerge
         tests = @($integrationTests)
-        checksParallel = $true
+        checksParallel = (-not $developmentOnly)
         validatedAt = Get-FactoryUtcTimestamp
     }
     if (-not [bool]$integrationCheckSet.success) {
@@ -410,33 +423,35 @@ try {
         $failureMessage = [string]$integrationCheckSet.failure
         throw $failureMessage
     }
-    if (-not [bool]$releaseCheckSet.success) {
+    if (-not $developmentOnly -and -not [bool]$releaseCheckSet.success) {
         $currentStage = "production"
         $script:LastCheckResults = @($releaseTests)
         $failureMessage = [string]$releaseCheckSet.failure
         throw $failureMessage
     }
-    $productionAudit = [pscustomobject]@{
-        status = "validated"
-        mode = [string]$plan.productionMode
-        taskCommit = $taskCommit
-        baseCommit = $remoteProduction
-        sourceCommit = $productionSource
-        mergeCommit = $releaseMerge
-        tests = @($releaseTests)
-        checksParallel = $true
-        validatedAt = Get-FactoryUtcTimestamp
+    if (-not $developmentOnly) {
+        $productionAudit = [pscustomobject]@{
+            status = "validated"
+            mode = [string]$plan.productionMode
+            taskCommit = $taskCommit
+            baseCommit = $remoteProduction
+            sourceCommit = $productionSource
+            mergeCommit = $releaseMerge
+            tests = @($releaseTests)
+            checksParallel = $true
+            validatedAt = Get-FactoryUtcTimestamp
+        }
     }
 
-    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $developmentBranch, $productionBranch) -Failure "Could not refresh tested branch bases"
+    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments (@("fetch", $remote) + $pipelineBranches) -Failure "Could not refresh tested branch bases"
     $developmentBeforePush = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot recheck development before push"
-    $productionBeforePush = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production before push"
+    $productionBeforePush = if ($developmentOnly) { "" } else { Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production before push" }
     if ($developmentBeforePush -ne $remoteDevelopment) {
         $currentStage = "integration"
         $script:LastCheckResults = @($integrationTests)
-        throw "Development moved while parallel checks were running. Run sync and review again."
+        throw "Development moved while publication checks were running. Run sync and review again."
     }
-    if ($productionBeforePush -ne $remoteProduction) {
+    if (-not $developmentOnly -and $productionBeforePush -ne $remoteProduction) {
         $currentStage = "production"
         $script:LastCheckResults = @($releaseTests)
         throw "Production moved while parallel checks were running. Run review again."
@@ -445,9 +460,9 @@ try {
     $currentStage = "integration"
     $script:LastCheckResults = @($integrationTests)
     $null = Invoke-PipelineGit -WorkingDirectory $integrator -Arguments @("push", $remote, "HEAD:$developmentBranch") -Failure "Development push was rejected"
-    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $developmentBranch, $productionBranch) -Failure "Could not verify development push"
+    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments (@("fetch", $remote) + $pipelineBranches) -Failure "Could not verify development push"
     $publishedDevelopment = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot resolve published development"
-    $productionAfterDevelopment = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production after development push"
+    $productionAfterDevelopment = if ($developmentOnly) { "" } else { Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production after development push" }
     if ($publishedDevelopment -ne $integrationMerge -or -not (Test-PipelineAncestor -RepositoryRoot $repositoryRoot -Ancestor $taskCommit -Descendant "$remote/$developmentBranch")) {
         throw "Published development does not match the tested integration candidate."
     }
@@ -455,34 +470,37 @@ try {
     $integrationAudit.status = "published"
     $integrationAudit.mergeCommit = $publishedDevelopment
     Set-FactoryProperty -Target $integrationAudit -Name "publishedAt" -Value (Get-FactoryUtcTimestamp)
+    Set-FactoryProperty -Target $integrationAudit -Name "summary" -Value "Approved commit was published to $remote/$developmentBranch after its integration checks passed."
 
-    $currentStage = "production"
-    $script:LastCheckResults = @($releaseTests)
-    $productionAudit.status = "ready-to-push"
-    Update-PipelineTask -Status "production" -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit
-    if ($productionAfterDevelopment -ne $remoteProduction) {
-        throw "Production moved after validation and before push. Run review again."
+    if (-not $developmentOnly) {
+        $currentStage = "production"
+        $script:LastCheckResults = @($releaseTests)
+        $productionAudit.status = "ready-to-push"
+        Update-PipelineTask -Status "production" -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit
+        if ($productionAfterDevelopment -ne $remoteProduction) {
+            throw "Production moved after validation and before push. Run review again."
+        }
+        $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments (@("fetch", $remote) + $pipelineBranches) -Failure "Could not refresh branches before production push"
+        $developmentBeforeProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot recheck development before production push"
+        $productionBeforeProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production before push"
+        if ($developmentBeforeProduction -ne $integrationMerge) {
+            throw "Development moved after its tested candidate was published; production was not pushed."
+        }
+        if ($productionBeforeProduction -ne $remoteProduction) {
+            throw "Production moved after validation and before push. Run review again."
+        }
+        $null = Invoke-PipelineGit -WorkingDirectory $release -Arguments @("push", $remote, "HEAD:$productionBranch") -Failure "Production push was rejected"
+        $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $productionBranch) -Failure "Could not verify production push"
+        $publishedProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot resolve published production"
+        if ($publishedProduction -ne $releaseMerge -or -not (Test-PipelineAncestor -RepositoryRoot $repositoryRoot -Ancestor $taskCommit -Descendant "$remote/$productionBranch")) {
+            throw "Published production does not match the tested release candidate."
+        }
+        $productionAudit.status = "published"
+        $productionAudit.mergeCommit = $publishedProduction
+        Set-FactoryProperty -Target $productionAudit -Name "attempts" -Value 1
+        Set-FactoryProperty -Target $productionAudit -Name "publishedAt" -Value (Get-FactoryUtcTimestamp)
+        Set-FactoryProperty -Target $productionAudit -Name "summary" -Value "Approved commit was published to $remote/$developmentBranch and $remote/$productionBranch after parallel candidate checks."
     }
-    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $developmentBranch, $productionBranch) -Failure "Could not refresh branches before production push"
-    $developmentBeforeProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot recheck development before production push"
-    $productionBeforeProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production before push"
-    if ($developmentBeforeProduction -ne $integrationMerge) {
-        throw "Development moved after its tested candidate was published; production was not pushed."
-    }
-    if ($productionBeforeProduction -ne $remoteProduction) {
-        throw "Production moved after validation and before push. Run review again."
-    }
-    $null = Invoke-PipelineGit -WorkingDirectory $release -Arguments @("push", $remote, "HEAD:$productionBranch") -Failure "Production push was rejected"
-    $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $productionBranch) -Failure "Could not verify production push"
-    $publishedProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot resolve published production"
-    if ($publishedProduction -ne $releaseMerge -or -not (Test-PipelineAncestor -RepositoryRoot $repositoryRoot -Ancestor $taskCommit -Descendant "$remote/$productionBranch")) {
-        throw "Published production does not match the tested release candidate."
-    }
-    $productionAudit.status = "published"
-    $productionAudit.mergeCommit = $publishedProduction
-    Set-FactoryProperty -Target $productionAudit -Name "attempts" -Value 1
-    Set-FactoryProperty -Target $productionAudit -Name "publishedAt" -Value (Get-FactoryUtcTimestamp)
-    Set-FactoryProperty -Target $productionAudit -Name "summary" -Value "Approved commit was published to $remote/$developmentBranch and $remote/$productionBranch after parallel candidate checks."
 
     $currentStage = "cleanup"
     $cleanupAudit = [pscustomobject]@{
@@ -490,21 +508,21 @@ try {
         taskCommit = $taskCommit
         startedAt = Get-FactoryUtcTimestamp
     }
-    Update-PipelineTask -Status "production" -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $cleanupAudit
+    Update-PipelineTask -Status $(if ($developmentOnly) { "integrating" } else { "production" }) -ErrorText "" -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $cleanupAudit
     $cleanupRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "cleanup-task.ps1"),
         "-Repository", $repositoryRoot, "-TaskId", $TaskId, "-ClaudeCommand", $ClaudeCommand,
-        "-FinalizeProduction"
+        "-FinalizePublication"
     )
     if ([int]$cleanupRun.exitCode -ne 0) {
         $detail = ([string]$cleanupRun.output -replace '[\r\n\t]+', ' ').Trim()
-        throw "Cleanup failed after both branch pushes were verified: $detail"
+        throw "Cleanup failed after publication was verified: $detail"
     }
     $cleanupText = ([string]$cleanupRun.stdout).Trim()
-    if (-not $cleanupText) { throw "Cleanup returned no result after both branch pushes were verified." }
-    try { $cleanup = $cleanupText | ConvertFrom-Json } catch { throw "Cleanup returned invalid JSON after both branch pushes were verified." }
+    if (-not $cleanupText) { throw "Cleanup returned no result after publication was verified." }
+    try { $cleanup = $cleanupText | ConvertFrom-Json } catch { throw "Cleanup returned invalid JSON after publication was verified." }
     $cleanupStatus = [string](Get-FactoryNestedValue -Target $cleanup -Name "status" -Default "")
-    if (-not $cleanupStatus) { throw "Cleanup result is missing required field 'status' after both branch pushes were verified." }
+    if (-not $cleanupStatus) { throw "Cleanup result is missing required field 'status' after publication was verified." }
     [ordered]@{
         taskId = $TaskId
         status = $cleanupStatus

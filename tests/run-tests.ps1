@@ -136,6 +136,9 @@ try {
     Assert-True (@($bundleManifest.files) -contains "scripts/test-lease.ps1") "The plugin manifest omits the serialized test-lane lease."
     Assert-True (@($bundleManifest.files) -contains "scripts/wait-factory.ps1") "The plugin manifest omits the native operator wait command."
     Assert-True (@($bundleManifest.files) -contains "scripts/migrate-runtime.ps1") "The plugin manifest omits safe runtime migration."
+    $runtimeMigrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\migrate-runtime.ps1") -Raw
+    Assert-True (-not $runtimeMigrationSource.Contains("Get-FileHash")) "Runtime migration still depends on ambient PowerShell utility modules for hashing."
+    Assert-True ($runtimeMigrationSource.Contains("Get-FactoryFileSha256")) "Runtime migration does not use the module-independent SHA-256 helper."
     Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "AGENTS.md")) "The repository omits the Codex runtime-cleanup guard."
     Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot "CLAUDE.md")) "The repository omits the Claude runtime-cleanup guard."
     $codexSkill = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\factory\SKILL.md") -Raw
@@ -1238,6 +1241,7 @@ try {
     $legacyConfig.PSObject.Properties.Remove("conversationLanguage")
     $legacyConfig.PSObject.Properties.Remove("workerLaunchTimeoutSeconds")
     $legacyConfig.PSObject.Properties.Remove("testDatabaseIsolation")
+    $legacyConfig.preview.PSObject.Properties.Remove("dependencyLinks")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
@@ -1249,6 +1253,8 @@ try {
     Assert-Equal "English" ([string]$migratedConfig.conversationLanguage) "Conversation language default was not migrated."
     Assert-Equal $false ([bool]$migratedConfig.autoPushDevelopment) "Migration overwrote a repository-specific config value."
     Assert-Equal $false ([bool]$migratedConfig.testDatabaseIsolation.enabled) "Test database isolation was not migrated safely as opt-in."
+    Assert-True ($migratedConfig.preview.dependencyLinks -is [Array]) "Config migration serialized a missing array property as an object."
+    Assert-Equal 2 (@($migratedConfig.preview.dependencyLinks).Count) "Config migration did not restore the preview dependency links array."
     Assert-Equal $false ([bool]$migratedConfig.nativeScheduler.startWithOrchestrator) "Migration overwrote a repository-specific scheduler setting."
     $migratedConfig.testDatabaseIsolation.enabled = $true
     $migratedConfig.testDatabaseIsolation.databasePrefix = "factory_test"
@@ -2851,7 +2857,7 @@ try {
     }
     $pipelineTickErrors = @($pipelineTick.errors | ForEach-Object { [string]$_ })
     Assert-Equal 1 $pipelineTickErrors.Count "Synthetic cleanup failure was not reported exactly once."
-    Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after both branch pushes were verified") "Pipeline hid the cleanup stage failure."
+    Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after publication was verified") "Pipeline hid the cleanup stage failure."
     Assert-Equal 0 ([int]$pipelineTick.integratedCount) "Scheduler reported a cleanup-failed task as fully integrated."
     $cleanupFailedState = Read-FactoryJson -Path $context.statePath
     $cleanupFailedTask = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
@@ -2985,9 +2991,82 @@ try {
     Assert-Equal 0 $LASTEXITCODE "Local task-only commit is absent from remote development."
     & git -C $repository merge-base --is-ancestor $localMergeCommit origin/master
     Assert-Equal 0 $LASTEXITCODE "Local task-only commit is absent from remote production."
+
+    $developmentOnlyConfig = Read-FactoryJson -Path $context.configPath
+    $developmentOnlyConfig.productionBranch = ""
+    $developmentOnlyConfig.autoPromoteToProduction = $true
+    $developmentOnlyConfig.integrationTestCommands = @("git diff --check")
+    $developmentOnlyConfig.releaseTestCommands = @("exit 91")
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $developmentOnlyConfig
+    $developmentOnlyReadiness = Get-FactoryPublicationReadiness -Config $developmentOnlyConfig -State (Read-FactoryJson -Path $context.statePath) -RepositoryRoot $repository
+    Assert-True ([bool]$developmentOnlyReadiness.ready -and [bool]$developmentOnlyReadiness.developmentOnly) "An empty production branch did not enable development-only publication."
+    Assert-Equal 0 (@($developmentOnlyReadiness.releaseTestCommands).Count) "Development-only readiness retained release checks."
+
+    & git -C $repository fetch origin develop master 1> $null
+    $developmentOnlyMasterBefore = (& git -C $repository rev-parse origin/master).Trim()
+    $releaseWorktree = Join-Path ([string]$context.worktreeRoot) "factory-release"
+    $releaseHeadBefore = if (Test-Path -LiteralPath $releaseWorktree -PathType Container) { (& git -C $releaseWorktree rev-parse HEAD).Trim() } else { "" }
+    $developmentOnlyTaskId = "development-only-task"
+    $developmentOnlyBranch = "factory-worker/development-only-task"
+    $developmentOnlyWorktree = Join-Path ([string]$context.worktreeRoot) "worker-development-only-task"
+    & git -C $repository worktree add -b $developmentOnlyBranch $developmentOnlyWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create development-only fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $developmentOnlyWorktree "DEVELOPMENT-ONLY.md"), "development only`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $developmentOnlyWorktree add DEVELOPMENT-ONLY.md
+    & git -C $developmentOnlyWorktree commit -m "test: development-only publication" 1> $null
+    $developmentOnlyCommit = (& git -C $developmentOnlyWorktree rev-parse HEAD).Trim()
+    $developmentOnlyState = Read-FactoryJson -Path $context.statePath
+    $developmentOnlyTask = New-FactoryTestTask -Id $developmentOnlyTaskId -Title "Publish only to development" -Now (Get-FactoryUtcTimestamp)
+    $developmentOnlyTask.status = "awaiting-review"
+    $developmentOnlyTask.branch = $developmentOnlyBranch
+    $developmentOnlyTask.commit = $developmentOnlyCommit
+    $developmentOnlyTask.worktree = $developmentOnlyWorktree
+    $developmentOnlyTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = $developmentOnlyTaskId; branch = $developmentOnlyBranch; commit = $developmentOnlyCommit
+        worktree = $developmentOnlyWorktree; changedFiles = @("DEVELOPMENT-ONLY.md")
+        tests = @([pscustomobject]@{ command = "git diff --check"; status = "passed"; summary = "Clean diff." })
+        notes = "Ready for development-only publication."; blockingReason = ""
+    }
+    $developmentOnlyTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-development-only-task" }
+    $developmentOnlyState.tasks = @($developmentOnlyState.tasks) + @($developmentOnlyTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $developmentOnlyState
+
+    $developmentOnlyApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId $developmentOnlyTaskId) | ConvertFrom-Json
+    Assert-Equal "approved" ([string]$developmentOnlyApproval.status) "Development-only task could not be approved."
+    $developmentOnlyApprovedTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId $developmentOnlyTaskId
+    $developmentOnlyPlan = $developmentOnlyApprovedTask.review.integrationPlan
+    Assert-Equal "" ([string]$developmentOnlyPlan.productionBranch) "Development-only plan retained a production branch."
+    Assert-Equal "" ([string]$developmentOnlyPlan.productionBase) "Development-only plan retained a production base."
+    Assert-Equal "development-only" ([string]$developmentOnlyPlan.productionMode) "Development-only plan used a production mode."
+    Assert-Equal 0 (@($developmentOnlyPlan.releaseTestCommands).Count) "Development-only plan retained release checks."
+    Assert-True (-not [bool]$developmentOnlyPlan.autoPromoteToProduction) "Development-only plan authorized production promotion."
+
+    $developmentOnlyTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    Assert-Equal 0 (@($developmentOnlyTick.errors).Count) "Development-only publication failed: $(@($developmentOnlyTick.errors) -join ' | ')"
+    Assert-Equal 1 ([int]$developmentOnlyTick.integratedCount) "Development-only task was not published."
+    $developmentOnlyFinalTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId $developmentOnlyTaskId
+    Assert-Equal "done" ([string]$developmentOnlyFinalTask.status) "Development-only task did not finish cleanup."
+    Assert-Equal "published" ([string]$developmentOnlyFinalTask.integration.status) "Development-only publication was not audited."
+    Assert-True ($null -eq $developmentOnlyFinalTask.production) "Development-only publication created a production audit."
+    Assert-True (-not [bool]$developmentOnlyFinalTask.integration.checksParallel) "A single development check was incorrectly marked parallel."
+    Assert-Equal "completed" ([string]$developmentOnlyFinalTask.cleanup.status) "Development-only cleanup was not audited."
+    Assert-True (-not (Test-Path -LiteralPath $developmentOnlyWorktree)) "Development-only publication left its worker worktree behind."
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository merge-base --is-ancestor $developmentOnlyCommit origin/develop
+    Assert-Equal 0 $LASTEXITCODE "Development-only commit is absent from remote development."
+    & git -C $repository merge-base --is-ancestor $developmentOnlyCommit origin/master
+    Assert-True ($LASTEXITCODE -ne 0) "Development-only commit unexpectedly reached remote production."
+    Assert-Equal $developmentOnlyMasterBefore ((& git -C $repository rev-parse origin/master).Trim()) "Development-only publication moved the production branch."
+    if ($releaseHeadBefore) {
+        Assert-Equal $releaseHeadBefore ((& git -C $releaseWorktree rev-parse HEAD).Trim()) "Development-only publication reset the release worktree."
+    }
+
     $restoredPipelineConfig = Read-FactoryJson -Path $context.configPath
+    $restoredPipelineConfig.productionBranch = "master"
+    $restoredPipelineConfig.autoPromoteToProduction = $true
     $restoredPipelineConfig.productionMode = "merge-develop"
     $restoredPipelineConfig.allowUnrelatedDevelopCommitsToProduction = $true
+    $restoredPipelineConfig.releaseTestCommands = @("git diff --check")
     Write-FactoryJsonAtomic -Path $context.configPath -Value $restoredPipelineConfig
     $previousDoneIntegrationErrorAction = $ErrorActionPreference
     try {
