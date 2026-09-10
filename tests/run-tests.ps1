@@ -253,6 +253,8 @@ try {
     $cleanupSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Raw
     Assert-True ($cleanupSource.Contains("core.longpaths=true")) "Task cleanup does not enable Git long-path support."
     Assert-True ($cleanupSource.Contains("Close-FactoryTaskWorkerSessions")) "Task cleanup does not close the selected worker runtime session."
+    Assert-True ($cleanupSource.Contains('Set-FactoryProperty -Target $task -Name "status" -Value "cleaning"')) "Task cleanup does not claim an explicit unlocked cleanup state."
+    Assert-True ($cleanupSource.Contains("Test-FactoryRecordedProcess -ProcessRecord `$existingCleanup")) "Task cleanup cannot distinguish a live cleanup owner from an interrupted attempt."
     Assert-True ($publicSkill.Contains("cleanup <task-id>")) "The public skill does not expose per-task cleanup."
     $rejectSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\reject-task.ps1") -Raw
     Assert-True ($rejectSource.Contains("worktree remove --force")) "Task rejection does not remove abandoned worktrees."
@@ -268,6 +270,9 @@ try {
     Assert-True ($nativeCliSource.Contains("Publication runs asynchronously; monitor: factory inspect")) "Native go does not explain how to monitor asynchronous publication."
     $integrationSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\integrate-task.ps1") -Raw
     Assert-True ($integrationSource.Contains('"merge", "--no-ff", "--no-edit", "-F", $messagePath, $Commit')) "Native integration does not merge the immutable approved SHA with a file-backed message."
+    $schedulerSource = Get-Content -LiteralPath (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") -Raw
+    Assert-True ($schedulerSource.Contains("Update-SchedulerLoopStateSafe")) "Scheduler loop bookkeeping can still escape as a fatal error."
+    Assert-True ($schedulerSource.Contains("Touch-SchedulerLoopHeartbeatSafe")) "Scheduler loop heartbeat contention can still escape as a fatal error."
     Assert-True ($integrationSource.Contains('New-Object Text.UTF8Encoding($false)')) "Pipeline merge messages are not written as UTF-8 without a BOM."
     Assert-True (-not $integrationSource.Contains('"merge", "--no-ff", "--no-edit", "-m"')) "Pipeline merge message text is exposed through native argv."
     Assert-True ($integrationSource.Contains('"push", $remote, "HEAD:$developmentBranch"')) "Native integration does not use an explicit development refspec."
@@ -1118,6 +1123,91 @@ try {
         Assert-Equal $transientFailureAt ([string]$schedulerRecovered.lastFailureAt) "Scheduler rewrote or discarded the original failure time after recovery."
     } finally {
         Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    }
+
+    $schedulerLockMarker = Join-Path $testRoot "scheduler-lock-one-shot.marker"
+    $schedulerLockHolderReady = Join-Path $testRoot "scheduler-lock-holder.ready"
+    $schedulerLockHolderScript = Join-Path $testRoot "hold-factory-state-lock.ps1"
+    [IO.File]::WriteAllText($schedulerLockHolderScript, @'
+param([string]$CommonPath, [string]$ProjectKey, [string]$ReadyPath, [int]$HoldMilliseconds)
+$ErrorActionPreference = "Stop"
+. $CommonPath
+$heldMutex = $null
+try {
+    $heldMutex = Enter-FactoryMutex -ProjectKey $ProjectKey
+    [IO.File]::WriteAllText($ReadyPath, "ready", (New-Object Text.UTF8Encoding($false)))
+    Start-Sleep -Milliseconds $HoldMilliseconds
+} finally {
+    Exit-FactoryMutex -Mutex $heldMutex
+}
+'@, (New-Object Text.UTF8Encoding($false)))
+    $env:CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER = $schedulerLockMarker
+    $schedulerLockHolder = $null
+    try {
+        $previousLockTickAt = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "lastTickAt" -Default "")
+        $schedulerLockStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 30) | ConvertFrom-Json
+        Assert-True ([bool]$schedulerLockStart.started) "State-lock contention scheduler fixture did not start."
+        $initialLockTickDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $initialLockTickAt = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "lastTickAt" -Default "")
+        } while ($initialLockTickAt -eq $previousLockTickAt -and [DateTime]::UtcNow -lt $initialLockTickDeadline)
+        Assert-True ($initialLockTickAt -ne $previousLockTickAt) "State-lock contention fixture did not finish its initial scheduler tick."
+
+        $holderArguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $schedulerLockHolderScript,
+            "-CommonPath", (Join-Path $pluginRoot "scripts\factory-common.ps1"),
+            "-ProjectKey", ([string]$context.projectKey),
+            "-ReadyPath", $schedulerLockHolderReady,
+            "-HoldMilliseconds", "12000"
+        ) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+        $schedulerLockHolder = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
+            -ArgumentList ($holderArguments -join " ") -WindowStyle Hidden -PassThru
+        $holderReadyDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        while (-not (Test-Path -LiteralPath $schedulerLockHolderReady) -and [DateTime]::UtcNow -lt $holderReadyDeadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True (Test-Path -LiteralPath $schedulerLockHolderReady) "State-lock holder did not acquire the factory mutex."
+        [IO.File]::WriteAllText($schedulerLockMarker, "fail under lock", (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText([string]$schedulerLockStart.scheduler.wakePath, (Get-FactoryUtcTimestamp), (New-Object Text.UTF8Encoding($false)))
+
+        $bookkeepingLogSeen = $false
+        $bookkeepingDeadline = [DateTime]::UtcNow.AddSeconds(12)
+        do {
+            Start-Sleep -Milliseconds 100
+            $bookkeepingLog = [IO.File]::ReadAllText([string]$schedulerLockStart.scheduler.stderrPath, [Text.Encoding]::UTF8)
+            $bookkeepingLogSeen = $bookkeepingLog.Contains('"operation":"loop-state"') -and $bookkeepingLog.Contains("was skipped: Timed out waiting for the factory state lock")
+        } while (-not $bookkeepingLogSeen -and [DateTime]::UtcNow -lt $bookkeepingDeadline)
+        Assert-True $bookkeepingLogSeen "Scheduler did not log its skipped state bookkeeping during mutex contention. Log: $bookkeepingLog"
+        $heartbeatContentionDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            Start-Sleep -Milliseconds 100
+            $bookkeepingLog = [IO.File]::ReadAllText([string]$schedulerLockStart.scheduler.stderrPath, [Text.Encoding]::UTF8)
+        } while (-not $bookkeepingLog.Contains('"operation":"heartbeat"') -and [DateTime]::UtcNow -lt $heartbeatContentionDeadline)
+        Assert-True ($bookkeepingLog.Contains('"operation":"heartbeat"')) "Scheduler did not treat a contended heartbeat as non-fatal bookkeeping."
+        $schedulerProcessDuringLock = Get-Process -Id ([int]$schedulerLockStart.scheduler.pid) -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $schedulerProcessDuringLock) "Scheduler died when its loop-state bookkeeping could not acquire the mutex."
+        Assert-True ($schedulerLockHolder.WaitForExit(20000)) "State-lock holder did not release the mutex."
+        [IO.File]::WriteAllText([string]$schedulerLockStart.scheduler.wakePath, (Get-FactoryUtcTimestamp), (New-Object Text.UTF8Encoding($false)))
+
+        $schedulerAfterLock = $null
+        $schedulerAfterLockDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $schedulerAfterLock = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action status -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        } while (([string]$schedulerAfterLock.status -ne "running" -or -not [string]$schedulerAfterLock.lastFailureAt) -and [DateTime]::UtcNow -lt $schedulerAfterLockDeadline)
+        Assert-True ([bool]$schedulerAfterLock.running) "Scheduler did not remain alive after the state lock was released."
+        Assert-Equal ([int]$schedulerLockStart.scheduler.pid) ([int]$schedulerAfterLock.pid) "Scheduler contention recovery replaced the daemon process."
+        Assert-Equal "running" ([string]$schedulerAfterLock.status) "Scheduler did not resume successful ticks after mutex contention."
+        Assert-True ([string]$schedulerAfterLock.lastFailureAt -ne "") "Scheduler did not persist the failure observed during mutex contention."
+        Assert-True ([string]$schedulerAfterLock.lastExitReason -ne "fatal scheduler error") "Mutex contention was recorded as a fatal scheduler exit."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
+        if ($null -ne $schedulerLockHolder) {
+            if (-not $schedulerLockHolder.HasExited) { Stop-Process -Id $schedulerLockHolder.Id -Force -ErrorAction SilentlyContinue }
+            $schedulerLockHolder.Dispose()
+        }
         $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action stop -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     }
 
@@ -2624,11 +2714,47 @@ try {
     $cleanupPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
     Assert-True ($cleanupPreviewOutput.Contains([string]$launch.worktree)) "Cleanup preview fixture did not start from the task worktree."
     $cleanupPreview = Read-FactoryJson -Path ([string]$context.previewPath)
-    $cleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "test-task" -ClaudeCommand $fakeClaude) |
-        ConvertFrom-Json
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue
-    Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+    $cleanupRemovalReady = Join-Path $testRoot "cleanup-removal-unlocked.ready"
+    $cleanupStdout = Join-Path $testRoot "cleanup-unlocked.stdout"
+    $cleanupStderr = Join-Path $testRoot "cleanup-unlocked.stderr"
+    $env:CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_DELAY_MILLISECONDS = "3500"
+    $env:CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_READY_FILE = $cleanupRemovalReady
+    $cleanupArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\cleanup-task.ps1"),
+        "-Repository", $repository, "-TaskId", "test-task", "-ClaudeCommand", $fakeClaude
+    ) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+    $cleanupProcess = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
+        -ArgumentList ($cleanupArguments -join " ") -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $cleanupStdout -RedirectStandardError $cleanupStderr
+    try {
+        $cleanupRemovalDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not (Test-Path -LiteralPath $cleanupRemovalReady) -and [DateTime]::UtcNow -lt $cleanupRemovalDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-True (Test-Path -LiteralPath $cleanupRemovalReady) "Cleanup did not reach its unlocked worktree-removal phase."
+        $cleanupInProgress = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "test-task"
+        Assert-Equal "cleaning" ([string]$cleanupInProgress.status) "Cleanup did not publish an explicit in-progress state."
+        Assert-True (Test-FactoryRecordedProcess -ProcessRecord $cleanupInProgress.cleanup) "Cleanup in-progress state did not identify its live owner."
+        $cleanupMutexPaths = Get-FactoryMutexDiagnosticPaths -ProjectKey ([string]$context.projectKey)
+        Assert-True (-not (Test-Path -LiteralPath ([string]$cleanupMutexPaths.owner))) "Cleanup retained the global state mutex during worktree removal."
+        $cleanupStateProbe = $null
+        try {
+            $cleanupStateProbe = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey) -TimeoutMilliseconds 1000
+        } finally {
+            Exit-FactoryMutex -Mutex $cleanupStateProbe
+        }
+        Assert-True ($cleanupProcess.WaitForExit(20000)) "Cleanup outside-lock fixture did not finish."
+        Assert-Equal 0 ([int]$cleanupProcess.ExitCode) "Cleanup outside-lock fixture failed: $(Get-Content -LiteralPath $cleanupStderr -Raw)"
+        $cleanup = (Get-Content -LiteralPath $cleanupStdout -Raw) | ConvertFrom-Json
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_READY_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+        if (-not $cleanupProcess.HasExited) { Stop-Process -Id $cleanupProcess.Id -Force -ErrorAction SilentlyContinue }
+        $cleanupProcess.Dispose()
+    }
     Assert-Equal "done" ([string]$cleanup.status) "Task cleanup did not mark the task done."
     Assert-True (-not (Test-Path -LiteralPath $launch.worktree)) "Task cleanup did not remove the worker worktree."
     $remainingWorkerBranch = @(& git -C $repository branch --list ([string]$launch.branch))
@@ -2663,6 +2789,74 @@ try {
         $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "other999"
     }).Count) "Answer or cleanup removed another task's row."
     Assert-Equal 1 (@($rowsAfterCleanup | Where-Object { [string]$_.kind -eq "interactive" }).Count) "Answer or cleanup removed the id-less interactive row."
+
+    $interruptedCleanupWorktree = Join-Path ([string]$context.worktreeRoot) "worker-interrupted-cleanup-task"
+    $interruptedCleanupBranch = "factory-worker/interrupted-cleanup-task"
+    & git -C $repository fetch origin develop master 1> $null
+    & git -C $repository worktree add -b $interruptedCleanupBranch $interruptedCleanupWorktree origin/develop 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not create interrupted cleanup fixture worktree." }
+    [IO.File]::WriteAllText((Join-Path $interruptedCleanupWorktree "INTERRUPTED-CLEANUP.md"), "recoverable cleanup`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $interruptedCleanupWorktree add INTERRUPTED-CLEANUP.md
+    & git -C $interruptedCleanupWorktree commit -m "test: interrupted cleanup recovery" 1> $null
+    $interruptedCleanupCommit = (& git -C $interruptedCleanupWorktree rev-parse HEAD).Trim()
+    & git -C $interruptedCleanupWorktree push origin HEAD:develop HEAD:master 1> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not publish interrupted cleanup fixture commit." }
+    $interruptedCleanupState = Read-FactoryJson -Path $context.statePath
+    $interruptedCleanupTask = New-FactoryTestTask -Id "interrupted-cleanup-task" -Title "Resume interrupted cleanup" -Now (Get-FactoryUtcTimestamp)
+    $interruptedCleanupTask.status = "held"
+    $interruptedCleanupTask.branch = $interruptedCleanupBranch
+    $interruptedCleanupTask.commit = $interruptedCleanupCommit
+    $interruptedCleanupTask.worktree = $interruptedCleanupWorktree
+    $interruptedCleanupTask.workerResult = [pscustomobject]@{
+        status = "completed"; taskId = "interrupted-cleanup-task"; branch = $interruptedCleanupBranch
+        commit = $interruptedCleanupCommit; worktree = $interruptedCleanupWorktree
+        changedFiles = @("INTERRUPTED-CLEANUP.md"); tests = @(); notes = "Published fixture."; blockingReason = ""
+    }
+    $interruptedCleanupState.tasks = @($interruptedCleanupState.tasks) + @($interruptedCleanupTask)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $interruptedCleanupState
+
+    $cleanupFinalizeReady = Join-Path $testRoot "cleanup-before-final-state.ready"
+    $cleanupInterruptedStdout = Join-Path $testRoot "cleanup-interrupted.stdout"
+    $cleanupInterruptedStderr = Join-Path $testRoot "cleanup-interrupted.stderr"
+    $env:CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_DELAY_MILLISECONDS = "30000"
+    $env:CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_READY_FILE = $cleanupFinalizeReady
+    $interruptedCleanupArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\cleanup-task.ps1"),
+        "-Repository", $repository, "-TaskId", "interrupted-cleanup-task", "-ClaudeCommand", $fakeClaude
+    ) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+    $interruptedCleanupProcess = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
+        -ArgumentList ($interruptedCleanupArguments -join " ") -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $cleanupInterruptedStdout -RedirectStandardError $cleanupInterruptedStderr
+    try {
+        $cleanupFinalizeDeadline = [DateTime]::UtcNow.AddSeconds(20)
+        while (-not (Test-Path -LiteralPath $cleanupFinalizeReady) -and [DateTime]::UtcNow -lt $cleanupFinalizeDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-True (Test-Path -LiteralPath $cleanupFinalizeReady) "Interrupted cleanup fixture did not finish its slow artifact work."
+        $cleanupBeforeInterruption = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
+        Assert-Equal "cleaning" ([string]$cleanupBeforeInterruption.status) "Cleanup was not recoverably marked in progress before interruption."
+        Assert-True (Test-FactoryRecordedProcess -ProcessRecord $cleanupBeforeInterruption.cleanup) "Cleanup owner was not live before the synthetic interruption."
+        Assert-True (-not (Test-Path -LiteralPath $interruptedCleanupWorktree)) "Interrupted cleanup fixture had not removed its worktree before finalization."
+        Assert-Equal 0 (@(& git -C $repository branch --list $interruptedCleanupBranch).Count) "Interrupted cleanup fixture retained its worker branch before finalization."
+        Stop-Process -Id $interruptedCleanupProcess.Id -Force
+        Assert-True ($interruptedCleanupProcess.WaitForExit(5000)) "Interrupted cleanup process did not stop."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_READY_FILE -ErrorAction SilentlyContinue
+        if (-not $interruptedCleanupProcess.HasExited) { Stop-Process -Id $interruptedCleanupProcess.Id -Force -ErrorAction SilentlyContinue }
+        $interruptedCleanupProcess.Dispose()
+    }
+    $staleCleanupTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
+    Assert-Equal "cleaning" ([string]$staleCleanupTask.status) "Interrupted cleanup did not retain its recoverable in-progress state."
+    Assert-Equal $false (Test-FactoryRecordedProcess -ProcessRecord $staleCleanupTask.cleanup) "Interrupted cleanup still appeared to have a live owner."
+    $interruptedCleanupStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status cleaning -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+    Assert-True ($interruptedCleanupStatus.Contains("CLEANUP INTERRUPTED") -and $interruptedCleanupStatus.Contains("factory cleanup interrupted-cleanup-task")) "Status did not expose the interrupted cleanup recovery command."
+    $resumedCleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "interrupted-cleanup-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "done" ([string]$resumedCleanup.status) "Re-running an interrupted cleanup did not complete it."
+    $resumedCleanupTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
+    Assert-Equal "done" ([string]$resumedCleanupTask.status) "Interrupted cleanup recovery was not persisted."
+    Assert-Equal "completed" ([string]$resumedCleanupTask.cleanup.status) "Interrupted cleanup recovery retained a stale running audit."
+    Assert-True ([bool]$resumedCleanupTask.cleanup.resumed -or [string]$resumedCleanupTask.cleanup.firstStartedAt) "Interrupted cleanup recovery lost its original attempt history."
 
     & git -C $repository fetch origin develop 1> $null
     & git -C $repository merge --ff-only origin/develop 1> $null
@@ -2849,28 +3043,42 @@ try {
     $pipelineRetryGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "pipeline-task") | ConvertFrom-Json
     Assert-Equal "approved" ([string]$pipelineRetryGo.status) "Freshly reviewed publication plan could not be approved."
 
-    $env:CLAUDE_FACTORY_TEST_FAIL_CLEANUP = "pipeline-task"
+    $cleanupQueueTaskId = "queued-after-cleanup-failure"
+    $cleanupQueueState = Read-FactoryJson -Path $context.statePath
+    $cleanupQueueState.tasks = @($cleanupQueueState.tasks) + @(
+        New-FactoryTestTask -Id $cleanupQueueTaskId -Title "Queue continues after cleanup failure" -Now (Get-FactoryUtcTimestamp)
+    )
+    $cleanupQueueState.active = $true
+    $cleanupQueueState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupQueueState
+    $env:CLAUDE_FACTORY_TEST_FAIL_WORKTREE_REMOVAL = "pipeline-task"
     try {
         $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     } finally {
-        Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_WORKTREE_REMOVAL -ErrorAction SilentlyContinue
     }
     $pipelineTickErrors = @($pipelineTick.errors | ForEach-Object { [string]$_ })
     Assert-Equal 1 $pipelineTickErrors.Count "Synthetic cleanup failure was not reported exactly once."
     Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after publication was verified") "Pipeline hid the cleanup stage failure."
     Assert-Equal 0 ([int]$pipelineTick.integratedCount) "Scheduler reported a cleanup-failed task as fully integrated."
+    Assert-Equal 1 ([int]$pipelineTick.launchedCount) "A worktree-removal failure prevented the same scheduler tick from launching queued work."
     $cleanupFailedState = Read-FactoryJson -Path $context.statePath
     $cleanupFailedTask = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
+    $launchedAfterCleanupFailure = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq $cleanupQueueTaskId })[0]
     Assert-Equal "blocked" ([string]$cleanupFailedTask.status) "Cleanup failure did not leave the published task recoverable."
     Assert-Equal "published" ([string]$cleanupFailedTask.integration.status) "Cleanup failure rewrote development publication as failed."
     Assert-Equal "published" ([string]$cleanupFailedTask.production.status) "Cleanup failure rewrote production publication as failed."
     Assert-Equal "failed" ([string]$cleanupFailedTask.cleanup.status) "Cleanup failure was not audited as its own stage."
     Assert-Equal "cleanup" ([string]$cleanupFailedTask.cleanup.stage) "Cleanup failure audit names the wrong pipeline stage."
+    Assert-True ([string]$cleanupFailedTask.cleanup.error -match "Synthetic worktree removal failure") "Cleanup lost the specific worktree-removal failure."
+    Assert-True ([string]$launchedAfterCleanupFailure.status -in @("starting", "planning", "awaiting-input", "running", "awaiting-review")) "Queued work did not advance after cleanup removal failed."
     Assert-True (Test-Path -LiteralPath $pipelineWorktree) "Cleanup failure unexpectedly removed the retained worktree."
     $cleanupFailedInspect = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath inspect pipeline-task -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($cleanupFailedInspect.Contains("cleanup: failed") -and $cleanupFailedInspect.Contains("/factory cleanup pipeline-task")) "Factory inspect did not offer the cleanup-only retry."
     $pipelineCleanupRetry = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "pipeline-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "done" ([string]$pipelineCleanupRetry.status) "Manual cleanup-only retry did not finish the published task."
+    $cleanupQueueDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $cleanupQueueTaskId -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-True ([bool]$cleanupQueueDiscard.removedFromState) "Queued work launched after cleanup failure could not be discarded."
     $pipelineFinalState = Read-FactoryJson -Path $context.statePath
     $pipelineFinalTask = @($pipelineFinalState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-Equal "done" ([string]$pipelineFinalTask.status) "Native pipeline did not finish cleanup."
@@ -3589,8 +3797,14 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PSQL_FAIL_DROP -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_CLEANUP -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_FAIL_WORKTREE_REMOVAL -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_REMOVAL_READY_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_DELAY_MILLISECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_CLEANUP_FINALIZE_READY_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SYNC_DELAY_MILLISECONDS -ErrorAction SilentlyContinue

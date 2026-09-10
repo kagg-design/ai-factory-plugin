@@ -13,6 +13,7 @@ $config = Read-FactoryJson -Path $context.configPath
 $CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $state = Read-FactoryJson -Path $context.statePath
 $task = Get-FactoryTask -State $state -TaskId $TaskId
+if ([string]$task.status -eq "cleaning") { throw "Task '$TaskId' cleanup is in progress; its worker cannot be resumed." }
 $session = $task.backgroundSession
 if ($null -eq $session -or [string]$session.runtime -ne "codex") { throw "Task '$TaskId' has no Codex worker session." }
 $threadId = [string]$session.sessionId

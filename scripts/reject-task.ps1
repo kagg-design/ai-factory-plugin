@@ -112,6 +112,9 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+    if ([string]$task.status -eq "cleaning") {
+        throw "Task '$TaskId' cleanup is in progress and cannot be rejected concurrently."
+    }
     if ([string]$task.status -eq "done") {
         throw "Completed task '$TaskId' is history. It cannot be rejected."
     }

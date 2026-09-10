@@ -38,7 +38,7 @@ $script:Tree = @{
 
 $script:FactoryStates = @(
     "queued", "starting", "planning", "awaiting-input", "running", "syncing",
-    "awaiting-review", "approved", "integrating", "production", "held",
+    "awaiting-review", "approved", "integrating", "production", "cleaning", "held",
     "rejected", "blocked", "failed", "done"
 )
 $script:CliExitCode = 0
@@ -213,6 +213,12 @@ function Get-CliEffectiveStatus {
     if ($status -eq "awaiting-review" -and (Test-FactoryTaskHasCurrentApprovedReview -Task $Task)) {
         return "awaiting-approval"
     }
+    if ($status -eq "cleaning") {
+        $cleanup = Get-CliProperty -InputObject $Task -Name "cleanup"
+        if (-not (Test-FactoryRecordedProcess -ProcessRecord $cleanup)) {
+            return "cleanup-interrupted"
+        }
+    }
     return $status
 }
 
@@ -279,6 +285,8 @@ function Get-CliStateText {
         "approved" { "approved commit is queued for integration" }
         "integrating" { "integration into development is running" }
         "production" { "production promotion is running" }
+        "cleaning" { "published artifacts are being removed" }
+        "cleanup-interrupted" { "cleanup was interrupted and can be resumed" }
         "held" { "retained and on hold" }
         "rejected" { "rejected but retained" }
         "blocked" { "blocked" }
@@ -301,6 +309,8 @@ function Get-CliStateLabel {
         "syncing" { "SYNC" }
         "integrating" { "INTEGRATING" }
         "production" { "PRODUCTION" }
+        "cleaning" { "CLEANUP" }
+        "cleanup-interrupted" { "CLEANUP INTERRUPTED" }
         "session-blocked" { "SESSION BLOCKED" }
         default { $Status.ToUpperInvariant() }
     }
@@ -311,9 +321,9 @@ function Get-CliGroup {
     param([string]$Status)
 
     if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "awaiting-approval", "held", "rejected")) { return "Needs your action" }
-    if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production")) { return "Working" }
+    if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production", "cleaning")) { return "Working" }
     if ($Status -in @("queued", "review-session-active")) { return "Waiting" }
-    if ($Status -in @("blocked", "failed", "session-blocked")) { return "Problems" }
+    if ($Status -in @("blocked", "failed", "session-blocked", "cleanup-interrupted")) { return "Problems" }
     return "Other"
 }
 
@@ -357,6 +367,14 @@ function Get-CliNextAction {
             } else { "$prompt review $id" }
         }
         { $_ -in @("approved", "integrating", "production") } { "automatic; the factory will continue" }
+        "cleaning" {
+            $cleanupOwner = Get-CliProperty -InputObject $Task -Name "cleanup"
+            if (Test-FactoryRecordedProcess -ProcessRecord $cleanupOwner) {
+                "automatic; artifact cleanup is running"
+            } else {
+                "$prompt cleanup $id"
+            }
+        }
         "held" {
             $review = Get-CliProperty -InputObject $Task -Name "review"
             $hasApprovedPlan = -not $requiresFreshReview -and
@@ -448,7 +466,7 @@ function Add-CliTaskTree {
         $details.Add("Session: none")
     }
     $worktree = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "worktree")
-    if ($worktree -and $status -notin @("approved", "integrating", "production", "done")) {
+    if ($worktree -and $status -notin @("approved", "integrating", "production", "cleaning", "done")) {
         $details.Add("View in browser: factory preview $id")
     }
     $action = Get-CliNextAction -Task $Task -State $State -Config $Config
@@ -715,7 +733,7 @@ function Write-CliInspect {
         if ($value) { Add-CliInspectLine -Lines $lines -Text "$($field.Label): $value" }
     }
     $previewWorktree = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "worktree")
-    if ($previewWorktree -and $status -notin @("approved", "integrating", "production", "done")) {
+    if ($previewWorktree -and $status -notin @("approved", "integrating", "production", "cleaning", "done")) {
         Add-CliInspectLine -Lines $lines -Text "Browser preview: factory preview $TaskId"
     }
     $plan = Get-CliProperty -InputObject $task -Name "plan"

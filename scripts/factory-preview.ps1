@@ -420,7 +420,7 @@ function Start-TaskPreview {
     if (-not (Test-PreviewPathInsideRoot -Path $worktree -Root ([string]$context.worktreeRoot))) {
         throw "Task '$RequestedTaskId' worktree is outside the factory worktree root."
     }
-    if ([string]$task.status -in @("approved", "integrating", "production", "done")) {
+    if ([string]$task.status -in @("approved", "integrating", "production", "cleaning", "done")) {
         throw "Task '$RequestedTaskId' is '$($task.status)' and its worktree may be integrating or already removed. Preview it before approval."
     }
 

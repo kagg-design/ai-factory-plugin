@@ -134,7 +134,7 @@ if (Test-FactoryRecordedProcess -ProcessRecord $scheduler) {
     throw "Stop the native scheduler before runtime migration: factory scheduler stop"
 }
 $activeTasks = @($state.tasks | Where-Object {
-    [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -in @("starting", "planning", "awaiting-input", "running", "integrating", "production") -or
+    [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -in @("starting", "planning", "awaiting-input", "running", "integrating", "production", "cleaning") -or
     (Test-FactoryTaskHasActiveSession -Task $_)
 })
 if ($activeTasks.Count -gt 0) {

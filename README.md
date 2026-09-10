@@ -674,6 +674,11 @@ exact recovery command; `factory doctor` reports the same failure and log path.
 A live scheduler with a transient failed tick remains visible as `failed (...;
 retrying)` but does not request a second scheduler or wake the orchestrator. A
 successful retry clears `lastError` while retaining the original failure time.
+If the scheduler cannot acquire the state mutex merely to save loop status or
+a heartbeat, it logs a transient `loop-error`, skips that bookkeeping write,
+and keeps its daemon ownership. Its normal exponential backoff still applies,
+and the first successful later write preserves the pending failure time; mutex
+contention alone is never a `fatal scheduler error`.
 
 `factory wait` is the native, log-free notification boundary. It reads the
 atomic state snapshot until input, a closed-session review, a blocker, a
@@ -712,13 +717,18 @@ exception because that session is waiting for its own sync operation.
 `cleanup` is intentionally strict. It reconciles the task first, refuses
 active sessions and dirty worktrees, refreshes the configured remote branches,
 and requires the recorded commit to be reachable from both development and
-production. It then stops every live process for the task, verifies that none
+production. It briefly records the task as `cleaning`, releases the shared
+state lock, then stops every live process for the task, verifies that none
 still holds the directory, removes all of the task's Agent View rows, and only
 then deletes the worker worktree and local `factory-worker/*` branch. It keeps
 the transcript and result in private state and marks the task `done`. Claude
 Code 2.1.228 was verified to leave JSONL transcripts intact after `claude rm`.
 Cleanup also uses Git long-path support and finishes removal of verified clean
-residue left by Windows.
+residue left by Windows. Slow session, database, Git, and filesystem operations
+never hold the project state mutex. A failed attempt records the artifacts it
+already removed; a `cleaning` row whose recorded owner is no longer live is
+shown as `CLEANUP INTERRUPTED` and can be resumed with `factory cleanup
+<task-id>`.
 
 `reject` is the normal way to abandon a task. It first shows the exact session,
 worktree, branch, commit, and private metadata that will be lost, then asks for
@@ -853,7 +863,9 @@ factory:
 Cleanup is audited as a separate stage after every configured remote push is
 verified. If it fails, completed publications remain recorded as `published`,
 the task becomes `blocked` with `cleanup: failed`, and `factory cleanup
-<task-id>` retries only artifact cleanup without republishing anything.
+<task-id>` retries only artifact cleanup without republishing anything. A
+cleanup error does not abort the scheduler's worker-launch pass for other
+queued tasks.
 
 Leave the production branch empty when the repository has only a development
 publication target:

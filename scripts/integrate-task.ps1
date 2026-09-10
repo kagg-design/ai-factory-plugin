@@ -245,7 +245,8 @@ function Update-PipelineTask {
         $CleanupValue,
         [bool]$ClearApproval = $false,
         [string[]]$ExpectedStatuses = @(),
-        [string]$ExpectedPlanHash = ""
+        [string]$ExpectedPlanHash = "",
+        [switch]$PreserveRecordedCleanupFailure
     )
 
     $lock = $null
@@ -269,7 +270,15 @@ function Update-PipelineTask {
         Set-FactoryProperty -Target $currentTask -Name "error" -Value $(if ($ErrorText) { $ErrorText } else { $null })
         if ($null -ne $IntegrationValue) { Set-FactoryProperty -Target $currentTask -Name "integration" -Value $IntegrationValue }
         if ($null -ne $ProductionValue) { Set-FactoryProperty -Target $currentTask -Name "production" -Value $ProductionValue }
-        if ($null -ne $CleanupValue) { Set-FactoryProperty -Target $currentTask -Name "cleanup" -Value $CleanupValue }
+        $recordedCleanup = Get-FactoryNestedValue -Target $currentTask -Name "cleanup"
+        $hasRecordedCleanupFailure = (
+            $PreserveRecordedCleanupFailure -and
+            [string](Get-FactoryNestedValue -Target $recordedCleanup -Name "status" -Default "") -eq "failed" -and
+            [string](Get-FactoryNestedValue -Target $recordedCleanup -Name "taskCommit" -Default "") -eq $taskCommit
+        )
+        if ($null -ne $CleanupValue -and -not $hasRecordedCleanupFailure) {
+            Set-FactoryProperty -Target $currentTask -Name "cleanup" -Value $CleanupValue
+        }
         if ($ClearApproval) { Set-FactoryProperty -Target $currentTask -Name "approval" -Value $null }
         $now = Get-FactoryUtcTimestamp
         Set-FactoryProperty -Target $currentTask -Name "updatedAt" -Value $now
@@ -544,7 +553,11 @@ try {
     try {
         if ($mayUpdateState -and (-not $claimAttempted -or $pipelineClaimed)) {
             if ($currentStage -eq "cleanup") {
-                Update-PipelineTask -Status "blocked" -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $failureAudit -ClearApproval $true
+                # cleanup-task records the precise partial-artifact result
+                # itself. Keep that audit instead of replacing it with the
+                # pipeline wrapper error; fall back to this generic audit only
+                # if cleanup died before it could write one.
+                Update-PipelineTask -Status "blocked" -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $failureAudit -ClearApproval $true -PreserveRecordedCleanupFailure
             } elseif ($currentStage -eq "production") {
                 Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $failureAudit -ClearApproval $true
             } else {

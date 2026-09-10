@@ -139,12 +139,13 @@ function Update-SchedulerState {
     param(
         [hashtable]$Values = @{},
         [Nullable[bool]]$Active = $null,
-        [Nullable[bool]]$Paused = $null
+        [Nullable[bool]]$Paused = $null,
+        [int]$TimeoutMilliseconds = 30000
     )
 
     $mutex = $null
     try {
-        $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+        $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey) -TimeoutMilliseconds $TimeoutMilliseconds
         $state = Read-FactoryJson -Path ([string]$context.statePath)
         if ($null -eq $state.PSObject.Properties["scheduler"] -or $null -eq $state.scheduler) {
             Set-FactoryProperty -Target $state -Name "scheduler" -Value ([pscustomobject]@{})
@@ -183,8 +184,69 @@ function Set-SchedulerActivity {
 }
 
 function Touch-SchedulerHeartbeat {
+    param([int]$TimeoutMilliseconds = 30000)
+
     $now = Get-FactoryUtcTimestamp
-    Update-SchedulerState -Values @{ heartbeatAt = $now; activityHeartbeatAt = $now }
+    Update-SchedulerState -Values @{ heartbeatAt = $now; activityHeartbeatAt = $now } -TimeoutMilliseconds $TimeoutMilliseconds
+}
+
+function Write-SchedulerLoopErrorSafe {
+    param(
+        [Parameter(Mandatory = $true)][string]$ErrorText,
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [int]$FailureCount = 0
+    )
+
+    try {
+        Write-SchedulerLog -Stream stderr -Event "loop-error" -Values @{
+            pid = $PID
+            error = $ErrorText
+            failureCount = $FailureCount
+            operation = $Operation
+            transient = $true
+        }
+    } catch {
+        # State-lock contention must not become fatal merely because its
+        # diagnostic log is temporarily unavailable too.
+        try { [Console]::Error.WriteLine("Scheduler $Operation bookkeeping failed: $ErrorText") } catch {}
+    }
+}
+
+function Update-SchedulerLoopStateSafe {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Values,
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [int]$FailureCount = 0
+    )
+
+    try {
+        # This timeout is intentionally short. Scheduler telemetry is
+        # disposable bookkeeping; the next loop can refresh it, and waiting
+        # for the general 30-second state timeout would stall queue progress.
+        Update-SchedulerState -Values $Values -TimeoutMilliseconds 1000
+        return $true
+    } catch {
+        Write-SchedulerLoopErrorSafe `
+            -ErrorText "Scheduler bookkeeping '$Operation' was skipped: $($_.Exception.Message)" `
+            -Operation $Operation `
+            -FailureCount $FailureCount
+        return $false
+    }
+}
+
+function Touch-SchedulerLoopHeartbeatSafe {
+    param([int]$FailureCount = 0)
+
+    try {
+        Touch-SchedulerHeartbeat -TimeoutMilliseconds 1000
+        return $true
+    } catch {
+        Write-SchedulerLoopErrorSafe `
+            -ErrorText "Scheduler bookkeeping 'heartbeat' was skipped: $($_.Exception.Message)" `
+            -Operation "heartbeat" `
+            -FailureCount $FailureCount
+        return $false
+    }
 }
 
 function Get-SchedulerStatusResult {
@@ -320,7 +382,6 @@ function Invoke-SchedulerTick {
             return $skippedResult
         }
 
-        if ($Action -eq "run") { Set-SchedulerActivity -Activity reconciling -Since $tickStartedAt }
         if ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER -and (Test-Path -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER))) {
             Remove-Item -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ONCE_MARKER) -Force
             throw "Synthetic one-shot scheduler loop failure."
@@ -328,6 +389,7 @@ function Invoke-SchedulerTick {
         if ($env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK -eq "1") {
             throw "Synthetic scheduler loop failure."
         }
+        if ($Action -eq "run") { Set-SchedulerActivity -Activity reconciling -Since $tickStartedAt }
         $reconcile = Invoke-SchedulerChildJson -ScriptName "reconcile-worker-sessions.ps1" -Arguments @(
             "-Repository", [string]$context.repositoryRoot,
             "-ClaudeCommand", $ClaudeCommand
@@ -657,6 +719,7 @@ switch ($Action) {
             }
             Write-SchedulerLog -Stream stdout -Event "process-start" -Values @{ pid = $PID; intervalSeconds = $IntervalSeconds }
             $failureCount = 0
+            $pendingFailureAt = $null
             while (-not (Test-Path -LiteralPath $stopPath)) {
                 Remove-Item -LiteralPath $wakePath -Force -ErrorAction SilentlyContinue
                 $lastError = $null
@@ -666,6 +729,13 @@ switch ($Action) {
                     if ($null -ne $currentConfig.PSObject.Properties["nativeScheduler"] -and -not [bool]$currentConfig.nativeScheduler.enabled) {
                         $exitReason = "disabled in project config"
                         break
+                    }
+                    if (
+                        [string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER -and
+                        (Test-Path -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER))
+                    ) {
+                        Remove-Item -LiteralPath ([string]$env:CLAUDE_FACTORY_TEST_SCHEDULER_DAEMON_THROW_ONCE_MARKER) -Force
+                        throw "Synthetic one-shot scheduler daemon-loop failure."
                     }
                     $tick = Invoke-SchedulerTick
                     if (@($tick.errors).Count -gt 0) {
@@ -681,6 +751,7 @@ switch ($Action) {
                     $failureCount++
                     Write-SchedulerLog -Stream stderr -Event "loop-error" -Values @{ pid = $PID; error = $lastError; failureCount = $failureCount }
                 }
+                if ($failureAt) { $pendingFailureAt = $failureAt }
                 $schedulerValues = @{
                     status = if ($lastError) { "failed" } else { "running" }
                     heartbeatAt = Get-FactoryUtcTimestamp
@@ -692,8 +763,12 @@ switch ($Action) {
                     activitySince = $null
                     activityHeartbeatAt = $null
                 }
-                if ($failureAt) { $schedulerValues.lastFailureAt = $failureAt }
-                Update-SchedulerState -Values $schedulerValues
+                if ($pendingFailureAt) { $schedulerValues.lastFailureAt = $pendingFailureAt }
+                $schedulerStateRecorded = Update-SchedulerLoopStateSafe `
+                    -Values $schedulerValues `
+                    -Operation "loop-state" `
+                    -FailureCount $failureCount
+                if ($schedulerStateRecorded -and $pendingFailureAt) { $pendingFailureAt = $null }
                 $delay = if ($failureCount -gt 0) {
                     [Math]::Min($maximumBackoffSeconds, $IntervalSeconds * [Math]::Pow(2, [Math]::Min(5, $failureCount)))
                 } else { $IntervalSeconds }
@@ -709,7 +784,7 @@ switch ($Action) {
                     $remainingMilliseconds -= $slice
                     $heartbeatMilliseconds -= $slice
                     if ($heartbeatMilliseconds -le 0) {
-                        Touch-SchedulerHeartbeat
+                        $null = Touch-SchedulerLoopHeartbeatSafe -FailureCount $failureCount
                         $heartbeatMilliseconds = 5000
                     }
                 }
@@ -731,19 +806,26 @@ switch ($Action) {
             throw
         } finally {
             if ($ownsScheduler) {
-                Update-SchedulerState -Values @{
-                    status = if ($fatalError) { "failed" } else { "stopped" }
-                    pid = $null
-                    processStartTimeUtc = $null
-                    heartbeatAt = Get-FactoryUtcTimestamp
-                    lastError = if ($fatalError) { $fatalError } else { $null }
-                    lastFailureAt = if ($fatalError) { Get-FactoryUtcTimestamp } else { $null }
-                    activity = "idle"
-                    activityTaskId = $null
-                    activityTaskTitle = $null
-                    activitySince = $null
-                    activityHeartbeatAt = $null
-                    lastExitReason = $exitReason
+                try {
+                    Update-SchedulerState -Values @{
+                        status = if ($fatalError) { "failed" } else { "stopped" }
+                        pid = $null
+                        processStartTimeUtc = $null
+                        heartbeatAt = Get-FactoryUtcTimestamp
+                        lastError = if ($fatalError) { $fatalError } else { $null }
+                        lastFailureAt = if ($fatalError) { Get-FactoryUtcTimestamp } else { $null }
+                        activity = "idle"
+                        activityTaskId = $null
+                        activityTaskTitle = $null
+                        activitySince = $null
+                        activityHeartbeatAt = $null
+                        lastExitReason = $exitReason
+                    }
+                } catch {
+                    Write-SchedulerLoopErrorSafe `
+                        -ErrorText "Scheduler final-state bookkeeping was skipped: $($_.Exception.Message)" `
+                        -Operation "process-exit" `
+                        -FailureCount $failureCount
                 }
                 Write-SchedulerLog -Stream stdout -Event "process-exit" -Values @{ pid = $PID; reason = $exitReason; error = if ($fatalError) { $fatalError } else { $null } }
                 Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue

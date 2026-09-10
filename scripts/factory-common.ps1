@@ -417,6 +417,17 @@ function Get-FactoryOperatorActionEvents {
                 audience = "orchestrator"
                 reason = $reason; occurredAt = $occurredAt; command = "factory inspect $taskId"
             })
+        } elseif ($status -eq "cleaning") {
+            $cleanup = Get-FactoryNestedValue -Target $task -Name "cleanup"
+            if (-not (Test-FactoryRecordedProcess -ProcessRecord $cleanup)) {
+                $events.Add([pscustomobject][ordered]@{
+                    kind = "cleanup-interrupted"; taskId = $taskId; title = $title; status = $status
+                    audience = "orchestrator"
+                    reason = "Cleanup has no live owner and must be resumed."
+                    occurredAt = [string](Get-FactoryNestedValue -Target $cleanup -Name "startedAt" -Default $occurredAt)
+                    command = "factory cleanup $taskId"
+                })
+            }
         }
     }
 

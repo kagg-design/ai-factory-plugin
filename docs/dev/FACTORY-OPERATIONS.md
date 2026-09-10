@@ -303,7 +303,10 @@ as retrying but does not request manual recovery; its next successful tick
 clears `lastError`. The status card for a dead process includes the failure time
 and exact recovery command. The JSONL stdout log contains one entry per tick plus process
 start/exit records, while stderr records tick failures and unexpected process
-loss. No Claude cron job is created.
+loss. A state-mutex timeout while saving loop status or a heartbeat is logged as
+a transient `loop-error`; that disposable bookkeeping write is skipped and the
+same daemon backs off and retries instead of exiting fatally. No Claude cron job
+is created.
 
 Use `factory wait [timeout-seconds]` when a shell or orchestrator should sleep
 until Factory needs a decision. It watches atomic state rather than logs and
@@ -368,6 +371,7 @@ active factory tasks.
 | `approved`        | the exact SHA was approved                    | scheduler begins integration        |
 | `integrating`     | development merge and checks are running      | do not interfere                    |
 | `production`      | production promotion is running               | wait for the result                 |
+| `cleaning`        | published artifacts are being removed         | wait; rerun cleanup if interrupted  |
 | `held`            | task and artifacts are retained but held      | decide later                        |
 | `rejected`        | rejected with `--keep`; artifacts retained    | inspect or discard with `reject`    |
 | `blocked`         | an external or technical blocker exists       | `/factory inspect <id>`             |
@@ -764,6 +768,13 @@ recorded commit is reachable from both, removes the worker worktree and local
 worker branch, preserves the factory result metadata, marks the task `done`,
 and removes every background session for the task from Claude Agent View.
 
+Cleanup first claims the task as `cleaning` while holding the shared state lock
+for one short state write. Session shutdown, preview shutdown, database drop,
+remote verification, worktree removal, branch deletion, and pruning then run
+without that lock. A second short lock records either `done` or a `blocked`
+cleanup audit with the partial artifact result. This keeps the scheduler and
+other task state transitions responsive during slow Windows directory removal.
+
 After all Git safety checks pass, cleanup stops and verifies every live task
 process before touching the worktree. This includes a terminal-looking row that
 still has a PID and can hold the directory on Windows. A stop failure aborts
@@ -787,7 +798,10 @@ preview confirmation unless `--yes` is supplied.
 Native publication treats cleanup as a separate stage. Once both remote
 branches are verified, a cleanup failure cannot rewrite either publication
 audit as failed. The task remains `blocked` with `cleanup: failed`; rerun
-`/factory cleanup <task-id>` to remove only the retained artifacts.
+`/factory cleanup <task-id>` to remove only the retained artifacts. If the
+cleanup process is killed after artifact work but before its final state write,
+status shows `CLEANUP INTERRUPTED`; the same command adopts the dead attempt and
+finishes idempotently without publishing again.
 
 ## 11. Pause, stop, and recovery
 

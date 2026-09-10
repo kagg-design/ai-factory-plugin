@@ -433,6 +433,10 @@ Choose `Next:` from the actual task data:
   `/factory go <id>` primary. This is not review work for the orchestrator.
 - `approved`, `integrating`, `production`: say the factory will continue; do
   not invent a user decision.
+- live `cleaning`: say artifact cleanup is automatic and still running. If the
+  recorded cleanup owner is no longer live, label it `CLEANUP INTERRUPTED` and
+  make `/factory cleanup <id>` primary; do not restart implementation or
+  publication.
 - `held` with a validated commit/result: `/factory review <id>` or
   `/factory sync <id>` when stale.
 - machine `held` without a commit, identified by `holdReason`:
@@ -764,8 +768,10 @@ Cleanup is a published-work artifact-removal command with strict safeguards. It
 must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
 from every configured remote publication branch. With an empty
-`productionBranch`, only development reachability is required. After those
-checks, it must stop and verify every live process belonging to the task before
+`productionBranch`, only development reachability is required. It first claims
+the task as `cleaning` under a short state lock, then releases that lock. After
+the remote and worktree checks, it must stop and verify every live process
+belonging to the task before
 touching the worktree, remove every matching Agent View row, and drop the exact
 isolated worker test database when configured. A stop or database failure must
 abort before artifact removal. It removes only the task's external worker
@@ -773,6 +779,12 @@ worktree and local `factory-worker/*` branch. Preserve the factory's result
 metadata in private state and report the task as `done`. If an individual Agent
 View `rm` fails, report the returned `agentSessionWarning`; the Git cleanup and
 `done` state remain authoritative. JSONL transcripts remain on disk after rm.
+
+Do not hold the global state mutex across session, database, Git, or filesystem
+operations. A failed cleanup records its partial artifact result and becomes
+`blocked` with `cleanup: failed`. A stale `cleaning` attempt whose PID/start
+identity is no longer live is recoverable by running the same cleanup command;
+the retry must tolerate artifacts already removed by the interrupted attempt.
 
 Git long-path support is enabled by the bundled script. If Git verified the
 worktree clean and unregistered it but Windows left files behind, the script
@@ -881,6 +893,11 @@ mutex/PID refusal and must not attempt a second tick while work is in flight.
 The scheduler writes JSONL tick/process records to `scheduler.stdout.log` and
 failure/process-loss records to `scheduler.stderr.log`; use the printed paths
 and `factory doctor` when runnable work is not moving.
+
+A `loop-error` whose operation is `loop-state` or `heartbeat` can mean a skipped
+telemetry write during state-mutex contention. The daemon is designed to remain
+alive, retain ownership, back off, and retry. Do not restart it merely because
+one such record exists; check process liveness and whether later ticks resume.
 
 A failed tick sets the current `lastError` once and backs off normally. The
 next successful tick clears the current error and returns status to `running`

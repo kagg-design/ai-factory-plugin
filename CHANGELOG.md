@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Kept the native scheduler alive when its loop-state or heartbeat bookkeeping
+  cannot acquire the project state mutex: skipped telemetry is logged as a
+  transient `loop-error`, backoff continues, and the next successful tick
+  persists the pending failure. Task cleanup now claims an explicit `cleaning`
+  state under a short lock, performs session/database/Git/filesystem work
+  unlocked, and briefly re-locks to record a complete or partial result.
+  Interrupted cleanup attempts can be resumed without republishing.
 - Added development-only publication: an empty `productionBranch` now makes
   review, direct approval, integration, verification, and cleanup operate only
   on the configured development branch, without fetching or pushing a

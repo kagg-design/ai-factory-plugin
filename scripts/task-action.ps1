@@ -23,6 +23,9 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+    if ([string]$task.status -eq "cleaning") {
+        throw "Task '$TaskId' cleanup is in progress. Wait for it to finish or resume it with 'factory cleanup $TaskId' if its owner stopped."
+    }
     $now = Get-FactoryUtcTimestamp
     $previewCleanup = $null
 
