@@ -21,6 +21,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 . (Join-Path $pluginRoot "scripts\worker-event.ps1")
 . (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
+. (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -565,7 +566,7 @@ try {
     Assert-True ([bool]$runtimeMigration.migrated -and [bool]$runtimeMigration.verified) "Synthetic runtime migration did not copy and verify the project."
     Assert-True ([bool]$runtimeMigration.sourceRetained -and (Test-Path -LiteralPath ([string]$context.projectData))) "Runtime migration removed its source copy."
     Assert-True (Test-Path -LiteralPath (Join-Path ([string]$runtimeMigration.destination) "runtime-migration.json")) "Runtime migration omitted its receipt."
-    Assert-Equal 8 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 9 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $initialFactoryConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 8 ([int]$initialFactoryConfig.codingConcurrency) "A fresh factory did not default to eight coding slots."
@@ -1283,6 +1284,9 @@ try {
     Assert-True ([bool]$waitReady.signaled -and -not [bool]$waitReady.timedOut) "Factory wait did not return when review became actionable."
     $waitReadyAction = @($waitReady.actions)[0]
     Assert-Equal "awaiting-review" ([string]$waitReadyAction.kind) "Factory wait returned the wrong operator event."
+    $waitReadyAgain = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
+    Assert-True (-not [bool]$waitReadyAgain.signaled -and [bool]$waitReadyAgain.timedOut) "Factory wait repeated an acknowledged attention edge."
     $reviewedWaitState = Read-FactoryJson -Path $context.statePath
     $reviewedWaitTask = Get-FactoryTask -State $reviewedWaitState -TaskId "wait-for-worker-close"
     $reviewedWaitTask.review = [pscustomobject]@{
@@ -1298,12 +1302,19 @@ try {
     Assert-Equal "awaiting-approval" ([string]$approvalEvent.kind) "Factory did not distinguish completed review from review work."
     Assert-Equal "human" ([string]$approvalEvent.audience) "Reviewed task was assigned to the orchestrator instead of the human operator."
     Assert-Equal "factory go wait-for-worker-close" ([string]$approvalEvent.command) "Reviewed task did not name the operator go command."
+    $autoGoConfig = Read-FactoryJson -Path $context.configPath
+    $autoGoConfig.orchestrator.autoGoApprovedReviews = $true
+    $autoGoEvents = @(Get-FactoryOperatorActionEvents -State $reviewedWaitState -Config $autoGoConfig)
+    $autoGoEvent = @($autoGoEvents | Where-Object { [string]$_.taskId -eq "wait-for-worker-close" })[0]
+    Assert-Equal "auto-go" ([string]$autoGoEvent.kind) "Persisted auto-go policy did not produce an AI-actionable approval edge."
+    Assert-True ([bool]$autoGoEvent.aiActionable -and -not [bool]$autoGoEvent.humanDecision) "Auto-go edge was still classified as a human decision."
     $waitAfterReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
         -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
     Assert-True (-not [bool]$waitAfterReview.signaled -and [bool]$waitAfterReview.timedOut) "Factory wait woke the orchestrator for a task already waiting on human go."
     $waitIncludingApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
-        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100 -IncludeOperatorApproval) | ConvertFrom-Json
+        -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100 -Cursor ([long]$waitReady.cursor) -IncludeOperatorApproval) | ConvertFrom-Json
     Assert-Equal "awaiting-approval" ([string]@($waitIncludingApproval.actions)[0].kind) "Explicit human-approval wait did not expose the go decision."
+    Assert-True ([long]$waitIncludingApproval.cursor -gt [long]$waitIncludingApproval.previousCursor) "Factory wait cursor did not advance across the human-decision edge."
 
     $liveFailedSchedulerState = Read-FactoryJson -Path $context.statePath
     $liveFailedSchedulerState.tasks = @($liveFailedSchedulerState.tasks) + @(New-FactoryTestTask -Id "live-retrying-scheduler-task" -Title "Queued during scheduler retry" -Now (Get-FactoryUtcTimestamp))
@@ -1335,7 +1346,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 8 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 9 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 3 ([int]$migratedConfig.codingConcurrency) "The deprecated concurrency alias was not migrated into codingConcurrency."
     Assert-True ((Get-FactoryCodingConcurrencySource -Config $migratedConfig) -match "deprecated concurrency is present but ignored") "Config diagnostics do not identify the retained deprecated alias."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
@@ -2143,6 +2154,10 @@ try {
     $blockedTimedOutTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "blocked-session-task"
     Assert-Equal "blocked" ([string]$blockedTimedOutTask.status) "A long-blocked session continued consuming a coding slot."
     Assert-True ([string]$blockedTimedOutTask.holdReason -match "remained blocked") "Blocked-session timeout omitted the stall reason."
+    $blockedTaskDoctor = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-doctor.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    $blockedTaskDoctorCheck = @($blockedTaskDoctor.checks | Where-Object { [string]$_.name -eq "blockedTasks" })[0]
+    Assert-True (-not [bool]$blockedTaskDoctorCheck.passed) "Factory doctor reported zero warnings while a task was blocked."
+    Assert-True ([string]$blockedTaskDoctorCheck.detail -match "blocked-session-task" -and [string]$blockedTaskDoctorCheck.detail -match "remained blocked") "Factory doctor omitted the blocked task ID or reason."
     $blockedCleanupState = Read-FactoryJson -Path $context.statePath
     $blockedCleanupState.tasks = @($blockedCleanupState.tasks | Where-Object { [string]$_.id -ne "blocked-session-task" })
     Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedCleanupState
@@ -2441,9 +2456,38 @@ try {
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\sync-task.ps1"),
         "-Repository", $repository, "-TaskId", "test-task", "-Action", "prepare", "-LeaseToken", ([string]$syncLease.token)
     ) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
-    $syncProcess = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
-        -ArgumentList ($syncArguments -join " ") -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $syncStdout -RedirectStandardError $syncStderr
+    $realGitForSync = [string](Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $syncGitShim = Join-Path $testRoot "sync-worker-bin"
+    New-Item -ItemType Directory -Path $syncGitShim -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $pluginRoot "scripts\codex-git.cmd") -Destination (Join-Path $syncGitShim "git.cmd") -Force
+    $previousSyncPath = $env:PATH
+    $previousSyncRealGit = $env:CLAUDE_FACTORY_REAL_GIT
+    $previousSyncWorktree = $env:CLAUDE_FACTORY_WORKTREE
+    $previousSyncPluginRoot = $env:CLAUDE_FACTORY_PLUGIN_ROOT
+    try {
+        $env:PATH = "$syncGitShim;$previousSyncPath"
+        $env:CLAUDE_FACTORY_REAL_GIT = $realGitForSync
+        $env:CLAUDE_FACTORY_WORKTREE = [string]$launch.worktree
+        $env:CLAUDE_FACTORY_PLUGIN_ROOT = $pluginRoot
+        $previousSyncErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $directWorkerRebase = @(& git -C ([string]$launch.worktree) rebase HEAD 2>&1)
+            $directWorkerRebaseExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousSyncErrorAction
+        }
+        Assert-Equal 2 $directWorkerRebaseExit "Worker Git shim allowed a direct rebase."
+        Assert-True (($directWorkerRebase -join "`n") -match "Factory Git proxy blocked 'rebase'") "Worker Git shim did not explain the direct rebase denial."
+        $syncProcess = Start-Process -FilePath (Get-Command powershell -ErrorAction Stop).Source `
+            -ArgumentList ($syncArguments -join " ") -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $syncStdout -RedirectStandardError $syncStderr
+    } finally {
+        $env:PATH = $previousSyncPath
+        $env:CLAUDE_FACTORY_REAL_GIT = $previousSyncRealGit
+        $env:CLAUDE_FACTORY_WORKTREE = $previousSyncWorktree
+        $env:CLAUDE_FACTORY_PLUGIN_ROOT = $previousSyncPluginRoot
+    }
     try {
         $syncMarkerDeadline = [DateTime]::UtcNow.AddSeconds(10)
         while (-not (Test-Path -LiteralPath $syncDelayMarker) -and [DateTime]::UtcNow -lt $syncMarkerDeadline) {
@@ -2572,6 +2616,40 @@ try {
     Assert-True ($null -eq $reworkedTask.review -and $null -eq $reworkedTask.approval) "Rework retained review or approval."
     Assert-True ($null -eq $reworkedTask.backgroundSession) "Rework retained the old session identity."
     Assert-Equal $reworkFindings ([string]$reworkedTask.pendingInstructions) "Rework changed the requested findings."
+
+    $failedReworkLaunch = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\start-worker-session.ps1"),
+        "-Repository", $repository, "-TaskId", "rework-task", "-Mode", "auto",
+        "-ClaudeCommand", (Join-Path $testRoot "missing-claude.exe")
+    )
+    Assert-True ([int]$failedReworkLaunch.exitCode -ne 0) "Synthetic rework launch failure unexpectedly succeeded."
+    $failedReworkState = Read-FactoryJson -Path $context.statePath
+    $failedReworkTask = Get-FactoryTask -State $failedReworkState -TaskId "rework-task"
+    Assert-True (Test-FactoryRecoverableFailedReworkLaunch -Task $failedReworkTask) "Failed rework launch was not classified as recoverable."
+    Assert-Equal $reworkCommit ([string]$failedReworkTask.commit) "Failed rework launch discarded the validated commit."
+    Assert-Equal $reworkFindings ([string]$failedReworkTask.pendingInstructions) "Failed rework launch consumed undelivered instructions."
+    $retriedRework = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action retry -TaskId "rework-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "queued" ([string]$retriedRework.status) "Recoverable failed rework launch was not queued for redelivery."
+    $retriedReworkTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "rework-task"
+    Assert-Equal $reworkCommit ([string]$retriedReworkTask.workerResult.commit) "Rework recovery discarded the prior result."
+    Assert-Equal $reworkFindings ([string]$retriedReworkTask.pendingInstructions) "Rework recovery discarded the pending instructions."
+
+    $genericValidatedFailure = New-FactoryTestTask -Id "generic-validated-failure" -Title "Validated generic failure" -Now (Get-FactoryUtcTimestamp)
+    $genericValidatedFailure.status = "failed"
+    $genericValidatedFailure.commit = $reworkCommit
+    $genericValidatedFailure.workerResult = $reworkTask.workerResult
+    $genericValidatedFailure.launchFailedAt = Get-FactoryUtcTimestamp
+    $genericValidatedState = Read-FactoryJson -Path $context.statePath
+    $genericValidatedState.tasks = @($genericValidatedState.tasks) + @($genericValidatedFailure)
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $genericValidatedState
+    $genericRetry = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\task-action.ps1"),
+        "-Repository", $repository, "-Action", "retry", "-TaskId", "generic-validated-failure", "-ClaudeCommand", $fakeClaude
+    )
+    Assert-True ([int]$genericRetry.exitCode -ne 0 -and [string]$genericRetry.output -match "validated result or commit") "Generic validated failure bypassed the retry invariant."
+    $genericValidatedState = Read-FactoryJson -Path $context.statePath
+    $genericValidatedState.tasks = @($genericValidatedState.tasks | Where-Object { [string]$_.id -ne "generic-validated-failure" })
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $genericValidatedState
 
     $postCommitAnswer = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\answer-task.ps1") -Repository $repository -TaskId "rework-task" -Text "Apply the review findings to the retained commit." -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "queued" ([string]$postCommitAnswer.status) "An explicit rework task rejected a post-commit answer."
@@ -3019,12 +3097,58 @@ try {
     Assert-True ($failedPlanGoExit -ne 0 -and ($failedPlanGoOutput -join "`n") -match "Run review again") "Native go reused a failed publication plan."
     Assert-True ($failedPlanDirectExit -ne 0 -and ($failedPlanDirectOutput -join "`n") -match "fresh review") "Direct approval reused a failed publication plan."
 
+    $wordpressSetupHook = Join-Path $testRoot "wordpress-candidate-setup.ps1"
+    $wordpressSetupHookSource = @'
+param(
+    [string]$Repository,
+    [string]$Worktree,
+    [string]$Scope,
+    [string]$TaskId,
+    [string]$Commit,
+    [string]$ResultPath,
+    [string]$Root
+)
+$ErrorActionPreference = "Stop"
+$wordpressRoot = Join-Path $Root ("wordpress-{0}-{1}" -f $Scope, $Commit.Substring(0, 12))
+New-Item -ItemType Directory -Path $wordpressRoot -Force | Out-Null
+$wordpressConfig = Join-Path $wordpressRoot "wp-tests-config.php"
+[IO.File]::WriteAllText($wordpressConfig, "<?php // isolated $Scope $Commit", (New-Object Text.UTF8Encoding($false)))
+$loadedCodePath = if ($env:FACTORY_TEST_HOOK_BAD_LOADED -eq "1") { $Repository } else { $Worktree }
+$result = [ordered]@{
+    version = 1
+    candidateWorktree = $Worktree
+    candidateCommit = $Commit
+    wordpressRoot = $wordpressRoot
+    wordpressConfigPath = $wordpressConfig
+    loadedCodePath = $loadedCodePath
+    environment = [ordered]@{
+        FACTORY_WP_TEST_ROOT = $wordpressRoot
+        FACTORY_WP_TEST_CONFIG = $wordpressConfig
+        FACTORY_LOADED_CODE_PATH = $loadedCodePath
+    }
+    summary = "Synthetic candidate-specific WordPress environment."
+}
+[IO.File]::WriteAllText($ResultPath, (($result | ConvertTo-Json -Depth 10) + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+'@
+    [IO.File]::WriteAllText($wordpressSetupHook, $wordpressSetupHookSource, (New-Object Text.UTF8Encoding($false)))
+    $wordpressHookConfig = Read-FactoryJson -Path $context.configPath
+    $wordpressHookConfig.isolatedTestSetup = [pscustomobject][ordered]@{
+        enabled = $true
+        command = "powershell"
+        arguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $wordpressSetupHook,
+            "-Repository", "{repository}", "-Worktree", "{worktree}", "-Scope", "{scope}",
+            "-TaskId", "{taskId}", "-Commit", "{commit}", "-ResultPath", "{resultPath}", "-Root", $testRoot
+        )
+    }
+    Write-FactoryJsonAtomic -Path $context.configPath -Value $wordpressHookConfig
+
     $parallelIntegratorMarker = Join-Path $testRoot "parallel-integrator.ready"
     $parallelReleaseMarker = Join-Path $testRoot "parallel-release.ready"
     $parallelIntegratorLiteral = $parallelIntegratorMarker.Replace("'", "''")
     $parallelReleaseLiteral = $parallelReleaseMarker.Replace("'", "''")
-    $parallelIntegrationCommand = "`$self='$parallelIntegratorLiteral'; `$peer='$parallelReleaseLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; git diff --check"
-    $parallelReleaseCommand = "`$self='$parallelReleaseLiteral'; `$peer='$parallelIntegratorLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; git diff --check"
+    $parallelIntegrationCommand = "`$self='$parallelIntegratorLiteral'; `$peer='$parallelReleaseLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; if (`$env:FACTORY_LOADED_CODE_PATH -ne (Get-Location).Path -or -not (Test-Path -LiteralPath `$env:FACTORY_WP_TEST_CONFIG)) { exit 10 }; git diff --check"
+    $parallelReleaseCommand = "`$self='$parallelReleaseLiteral'; `$peer='$parallelIntegratorLiteral'; [IO.File]::WriteAllText(`$self, 'ready'); `$deadline=[DateTime]::UtcNow.AddSeconds(30); while (-not (Test-Path -LiteralPath `$peer) -and [DateTime]::UtcNow -lt `$deadline) { Start-Sleep -Milliseconds 50 }; if (-not (Test-Path -LiteralPath `$peer)) { exit 9 }; if (`$env:FACTORY_LOADED_CODE_PATH -ne (Get-Location).Path -or -not (Test-Path -LiteralPath `$env:FACTORY_WP_TEST_CONFIG)) { exit 10 }; git diff --check"
     $retryReviewPath = Join-Path $context.sessionsPath "pipeline-task.retry-review.json"
     Write-FactoryJsonAtomic -Path $retryReviewPath -Value ([pscustomobject]@{
         commit = $pipelineCommit
@@ -3118,6 +3242,28 @@ try {
         Assert-True ([string]$pipelineTestRow.outputPath -and (Test-Path -LiteralPath ([string]$pipelineTestRow.outputPath))) "Persisted pipeline test row omitted its full-output artifact path."
     }
     Assert-True ([bool]$pipelineFinalTask.integration.checksParallel -and [bool]$pipelineFinalTask.production.checksParallel) "Native pipeline did not audit parallel candidate checks."
+    Assert-True ([bool]$pipelineFinalTask.integration.isolatedTestSetup.enabled -and [bool]$pipelineFinalTask.production.isolatedTestSetup.enabled) "Native pipeline did not persist isolated WordPress setup attestations."
+    Assert-True ((Test-FactorySamePath -Left ([string]$pipelineFinalTask.integration.isolatedTestSetup.loadedCodePath) -Right (Join-Path ([string]$context.worktreeRoot) "factory-integrator"))) "Integration tests did not attest the integration candidate checkout."
+    Assert-True ((Test-FactorySamePath -Left ([string]$pipelineFinalTask.production.isolatedTestSetup.loadedCodePath) -Right (Join-Path ([string]$context.worktreeRoot) "factory-release"))) "Release tests did not attest the release candidate checkout."
+    Assert-True ((Test-Path -LiteralPath ([string]$pipelineFinalTask.integration.isolatedTestSetup.wordpressConfigPath) -PathType Leaf) -and (Test-Path -LiteralPath ([string]$pipelineFinalTask.production.isolatedTestSetup.wordpressConfigPath) -PathType Leaf)) "Candidate-specific WordPress configs were not provisioned."
+    $badWordpressAttestationPath = Join-Path ([string]$context.sessionsPath) "pipeline-task.bad-wordpress-attestation.json"
+    $badWordpressAttestationRejected = $false
+    $env:FACTORY_TEST_HOOK_BAD_LOADED = "1"
+    try {
+        $null = Invoke-FactoryIsolatedTestSetup `
+            -Config (Read-FactoryJson -Path $context.configPath) `
+            -RepositoryRoot $repository `
+            -Worktree (Join-Path ([string]$context.worktreeRoot) "factory-integrator") `
+            -Scope integrator `
+            -TaskId "pipeline-task" `
+            -ResultPath $badWordpressAttestationPath
+    } catch {
+        $badWordpressAttestationRejected = $_.Exception.Message -match "outside the candidate worktree"
+    } finally {
+        Remove-Item Env:\FACTORY_TEST_HOOK_BAD_LOADED -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $badWordpressAttestationPath -Force -ErrorAction SilentlyContinue
+    }
+    Assert-True $badWordpressAttestationRejected "WordPress setup accepted tests that loaded the shared checkout instead of the candidate."
     Assert-True ((Test-Path -LiteralPath $parallelIntegratorMarker) -and (Test-Path -LiteralPath $parallelReleaseMarker)) "Integration and release checks did not overlap."
     Assert-True (-not (Test-Path -LiteralPath $pipelineWorktree)) "Native pipeline left its worker worktree behind."
     & git -C $repository fetch origin develop master 1> $null
@@ -3610,13 +3756,17 @@ try {
         updatedAt = Get-FactoryUtcTimestamp
     })
     $env:CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD = "turn/start"
-    $previousAppServerFailureErrorAction = $ErrorActionPreference
+    $failedAppServerStartExitCode = 0
     try {
-        $ErrorActionPreference = "Continue"
-        $null = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 2>&1)
-        $failedAppServerStartExitCode = $LASTEXITCODE
+        $factoryCodexFailureExitCode = 1
+        Start-FactoryCodexOrchestrator `
+            -CodexCommand $fakeCodex `
+            -PluginRoot $pluginRoot `
+            -Context $context `
+            -ExitCodeVariableName "factoryCodexFailureExitCode"
+    } catch {
+        $failedAppServerStartExitCode = 1
     } finally {
-        $ErrorActionPreference = $previousAppServerFailureErrorAction
         Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD -ErrorAction SilentlyContinue
     }
     Assert-True ($failedAppServerStartExitCode -ne 0) "Injected app-server bootstrap failure did not fail startup."
@@ -3624,34 +3774,85 @@ try {
     Assert-Equal 1 ([int]$identityAfterAppServerFailure.version) "Failed app-server bootstrap replaced the last usable orchestrator identity."
     Assert-Equal "11111111-2222-4333-8444-555555555555" ([string]$identityAfterAppServerFailure.sessionId) "Failed app-server bootstrap lost the legacy orchestrator ID."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/archive\"' }).Count -eq 1) "Failed app-server bootstrap left its partially created thread unarchived."
+    $failedServerStop = Stop-FactoryCodexSharedServer -CodexCommand $fakeCodex -RuntimeHome ([string]$context.runtimeHome)
+    Assert-True ([bool]$failedServerStop.stopped) "Failed-bootstrap shared Codex server could not be stopped."
     Remove-Item -LiteralPath $codexLog -Force
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex
     Assert-Equal 0 $LASTEXITCODE "Public factory start could not select the Codex worker runtime."
     $codexConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal "codex" ([string]$codexConfig.workerAgent) "Public factory start did not persist the private Codex selection."
     $codexOrchestratorIdentity = Read-FactoryJson -Path $codexIdentityPath
     Assert-Equal "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" ([string]$codexOrchestratorIdentity.sessionId) "Codex orchestrator thread UUID was not persisted."
-    Assert-Equal 2 ([int]$codexOrchestratorIdentity.version) "Codex orchestrator identity was not upgraded to the app-backed schema."
-    Assert-Equal "app-server" ([string]$codexOrchestratorIdentity.backend) "Codex orchestrator identity did not record its app-server backend."
+    Assert-Equal 3 ([int]$codexOrchestratorIdentity.version) "Codex orchestrator identity was not upgraded to the shared app-server schema."
+    Assert-Equal "shared-app-server" ([string]$codexOrchestratorIdentity.backend) "Codex orchestrator identity did not record its shared app-server backend."
     Assert-Equal "11111111-2222-4333-8444-555555555555" ([string]$codexOrchestratorIdentity.legacySessionId) "Codex orchestrator migration did not retain the standalone thread ID."
     Assert-True (Test-Path -LiteralPath (Join-Path $env:CLAUDE_FACTORY_CODEX_SKILL_HOME "factory")) "Codex factory skill was not linked into the private test skill home."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 1) "First Codex startup did not create exactly one app-backed orchestrator thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"project/list\"' }).Count -eq 1) "Codex app-backed startup did not resolve the repository project."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\".*\"threadSource\":\"vscode\"' }).Count -eq 1) "Codex orchestrator was not created with an app-visible source."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/name/set\".*Factory Orchestrator - repository' }).Count -eq 1) "Codex app task did not receive a readable repository title."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 1) "First Codex startup did not resume the bootstrapped orchestrator."
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^--remote\tws://127\.0\.0\.1:\d+\tresume\t.*bbbbbbbb-' }).Count -eq 1) "First Codex startup did not resume the bootstrapped orchestrator through the shared server."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex
     Assert-Equal 0 $LASTEXITCODE "Stored Codex orchestrator resume failed."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 1) "Repeated Codex startup created a duplicate app-backed orchestrator thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/read\"' }).Count -eq 1) "Repeated Codex startup did not validate the stored app task."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t.*bbbbbbbb-' }).Count -eq 2) "Repeated Codex startup did not resume the stored thread."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^--remote\tws://127\.0\.0\.1:\d+\tresume\t.*bbbbbbbb-' }).Count -eq 2) "Repeated Codex startup did not resume the stored thread through the shared server."
+    Assert-Equal 1 (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server\t--listen\tws://127\.0\.0\.1:\d+$' }).Count) "Repeated startup created more than one shared Codex app-server."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"remoteControl/enable\"' }).Count -ge 2) "Codex startup did not enable Remote on the shared server."
+
+    $attentionFixtureState = Read-FactoryJson -Path $context.statePath
+    $attentionPath = Join-Path ([string]$context.projectData) "orchestrator-attention.json"
+    Remove-Item -LiteralPath $attentionPath -Force -ErrorAction SilentlyContinue
+    $attentionTask = New-FactoryTestTask -Id "attention-failure" -Title "Wake the Codex orchestrator" -Now (Get-FactoryUtcTimestamp)
+    $attentionTask.status = "failed"
+    $attentionTask.error = "Synthetic actionable failure."
+    $attentionState = Read-FactoryJson -Path $context.statePath
+    $attentionState.tasks = @($attentionTask)
+    $attentionState.active = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionState
+    $turnStartsBeforeAttention = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"turn/start\"' }).Count
+    $firstAttentionDispatch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
+        -Repository $repository -Action dispatch -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-True ([bool]$firstAttentionDispatch.dispatched -and [bool]$firstAttentionDispatch.acknowledged) "New AI-actionable state did not wake the Codex orchestrator."
+    $secondAttentionDispatch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
+        -Repository $repository -Action dispatch -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-True (-not [bool]$secondAttentionDispatch.dispatched -and [string]$secondAttentionDispatch.reason -match "no new AI-actionable edge") "Acknowledged attention was dispatched again after a fresh bridge process."
+    $turnStartsAfterAttention = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"turn/start\"' }).Count
+    Assert-Equal 1 ($turnStartsAfterAttention - $turnStartsBeforeAttention) "One attention edge created more than one Codex continuation turn."
+    $attentionRecord = Read-FactoryJson -Path $attentionPath
+    Assert-Equal ([long]$attentionRecord.revision) ([long]$attentionRecord.orchestratorAcknowledgedRevision) "Attention acknowledgement did not survive the dispatch process restart."
+
+    $attentionHumanState = Read-FactoryJson -Path $context.statePath
+    $attentionHumanTask = Get-FactoryTask -State $attentionHumanState -TaskId "attention-failure"
+    $attentionHumanTask.status = "held"
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionHumanState
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
+        -Repository $repository -Action scan -CodexCommand $fakeCodex) | ConvertFrom-Json
+    $attentionHumanTask.status = "awaiting-review"
+    $attentionHumanTask.commit = "1234567890abcdef1234567890abcdef12345678"
+    $attentionHumanTask.workerResult = [pscustomobject]@{ commit = $attentionHumanTask.commit; tests = @(); changedFiles = @() }
+    $attentionHumanTask.review = [pscustomobject]@{
+        verdict = "approved"; commit = $attentionHumanTask.commit; summary = "Ready for operator go."
+        integrationPlan = [pscustomobject]@{ planHash = "attention-human-plan" }
+    }
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionHumanState
+    $humanAttentionDispatch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
+        -Repository $repository -Action dispatch -CodexCommand $fakeCodex) | ConvertFrom-Json
+    Assert-True (-not [bool]$humanAttentionDispatch.dispatched) "Manual GO decision woke the Codex orchestrator without persisted auto-go."
+    $turnStartsAfterHumanDecision = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"turn/start\"' }).Count
+    Assert-Equal $turnStartsAfterAttention $turnStartsAfterHumanDecision "Human-only attention created a Codex continuation turn."
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionFixtureState
+    Remove-Item -LiteralPath $attentionPath -Force -ErrorAction SilentlyContinue
+
     $codexRotate = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") rotate -Repository $repository | Out-String)
     Assert-True ($codexRotate.Contains("Orchestrator rotation prepared") -and $codexRotate.Contains("factory start -Agent codex")) "Codex rotation did not print its runtime-specific restart command."
     $codexPendingPath = Get-FactoryOrchestratorRotationPendingPath -Context $context -Runtime "codex"
     $codexPendingRotation = Read-FactoryJson -Path $codexPendingPath
     Assert-Equal "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" ([string]$codexPendingRotation.previousSessionId) "Codex rotation lost the previous thread UUID."
     $env:CLAUDE_FACTORY_TEST_CODEX_THREAD_ID = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") codex-server stop -Repository $repository -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Shared Codex app-server could not be stopped before the rotation fixture changed its thread ID."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex
     Assert-Equal 0 $LASTEXITCODE "Pending Codex orchestrator rotation could not be activated."
     $rotatedCodexIdentity = Read-FactoryJson -Path (Join-Path ([string]$context.projectData) "codex-orchestrator-session.json")
     Assert-Equal "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" ([string]$rotatedCodexIdentity.sessionId) "Codex rotation resumed the context-heavy thread."
@@ -3661,13 +3862,52 @@ try {
     $activatedCodexRotation = Read-FactoryJson -Path ([string]$codexPendingRotation.recordPath)
     Assert-Equal "activated" ([string]$activatedCodexRotation.status) "Codex rotation audit was not finalized."
     Assert-Equal "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa" ([string]$activatedCodexRotation.newSessionId) "Codex rotation audit recorded the wrong replacement UUID."
+    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") agents -Repository $repository -CodexCommand $fakeCodex | Out-String)
+    Assert-Equal 0 $LASTEXITCODE "Factory could not open the shared Codex agents dashboard."
+    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^agents\t--remote\tws://127\.0\.0\.1:\d+\t-C\t' }).Count -eq 1) "Factory agents did not target the shared app-server."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_THREAD_ID -ErrorAction SilentlyContinue
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Default Claude orchestrator startup failed after Codex selection."
     $defaultRuntimeConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal "claude" ([string]$defaultRuntimeConfig.workerAgent) "Agent omission did not restore the default full Claude runtime."
     $defaultRuntimeConfig.workerAgent = "codex"
+    $defaultRuntimeConfig.codingConcurrency = 3
     Write-FactoryJsonAtomic -Path $context.configPath -Value $defaultRuntimeConfig
+
+    $slotFillState = Read-FactoryJson -Path $context.statePath
+    $slotFillTaskIds = @("codex-slot-a", "codex-slot-b", "codex-slot-c")
+    foreach ($slotFillTaskId in $slotFillTaskIds) {
+        $slotTask = New-FactoryTestTask -Id $slotFillTaskId -Title "Codex slot $slotFillTaskId" -Now (Get-FactoryUtcTimestamp)
+        $slotTask.startMode = "auto"
+        $slotFillState.tasks = @($slotFillState.tasks) + @($slotTask)
+    }
+    $slotFillState.active = $true
+    $slotFillState.paused = $false
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $slotFillState
+    $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS = "30000"
+    try {
+        $slotFillStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $slotFillTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        $slotFillStopwatch.Stop()
+        $slotFillDiagnostic = ($slotFillTick | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal 3 ([int]$slotFillTick.launchedCount) "One scheduler cycle did not fill all three free Codex slots. Tick: $slotFillDiagnostic"
+        Assert-True ($slotFillStopwatch.Elapsed.TotalSeconds -lt 20) "Scheduler waited for a detached Codex descendant instead of returning after launcher result files. Elapsed: $([Math]::Round($slotFillStopwatch.Elapsed.TotalSeconds, 3))s."
+        $slotFillRecordedState = Read-FactoryJson -Path $context.statePath
+        foreach ($slotFillTaskId in $slotFillTaskIds) {
+            $slotFillTask = Get-FactoryTask -State $slotFillRecordedState -TaskId $slotFillTaskId
+            Assert-True ($null -ne $slotFillTask.backgroundSession -and [int]$slotFillTask.backgroundSession.processId -gt 0) "Scheduler did not persist a Codex process for '$slotFillTaskId'."
+            try { $slotFillAlive = $null -ne (Get-Process -Id ([int]$slotFillTask.backgroundSession.processId) -ErrorAction Stop) } catch { $slotFillAlive = $false }
+            Assert-True $slotFillAlive "Codex worker '$slotFillTaskId' exited before the scheduler filled its peers."
+        }
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS -ErrorAction SilentlyContinue
+        foreach ($slotFillTaskId in $slotFillTaskIds) {
+            try {
+                $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $slotFillTaskId -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
+            } catch {}
+        }
+    }
+
     $codexState = Read-FactoryJson -Path $context.statePath
     $codexTask = New-FactoryTestTask -Id "codex-task" -Title "Codex interactive worker" -Now $now
     $codexTask.startMode = "interactive"
@@ -3724,6 +3964,8 @@ try {
     Assert-True ([bool]$codexDiscard.removedFromState) "Codex task rejection did not forget the task."
     Assert-True (-not (Test-Path -LiteralPath ([string]$codexRecordedTask.backgroundSession.shimDirectory))) "Codex task rejection left its private Git shim directory behind."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^delete\t--force\taaaaaaaa-' }).Count -eq 1) "Confirmed rejection did not delete the Codex session."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") codex-server stop -Repository $repository -CodexCommand $fakeCodex 1> $null
+    Assert-Equal 0 $LASTEXITCODE "Shared Codex app-server was not stopped after its test coverage."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_REAL_GIT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_WORKTREE -ErrorAction SilentlyContinue
@@ -3775,6 +4017,11 @@ try {
 
     Write-Host "All factory runtime tests passed." -ForegroundColor Green
 } finally {
+    try {
+        if ((Test-Path -LiteralPath $fakeCodex -PathType Leaf) -and (Test-Path -LiteralPath $runtime -PathType Container)) {
+            $null = Stop-FactoryCodexSharedServer -CodexCommand $fakeCodex -RuntimeHome $runtime
+        }
+    } catch {}
     try {
         if (Test-Path -LiteralPath $repository) {
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-preview.ps1") -Action stop -Repository $repository -RuntimeHome $runtime 1> $null 2> $null

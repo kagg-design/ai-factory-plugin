@@ -25,6 +25,8 @@ $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "orchestrator-session.ps1")
+. (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "codex-orchestrator.ps1")
 
 $script:Tree = @{
     Top = [char]0x256D
@@ -386,7 +388,11 @@ function Get-CliNextAction {
             elseif ($isMachineHeld) { "$prompt retry $id" }
             else { "$prompt inspect $id" }
         }
-        { $_ -in @("blocked", "failed") } { if ($cleanupFailed) { "$prompt cleanup $id" } else { "$prompt inspect $id" } }
+        { $_ -in @("blocked", "failed") } {
+            if ($cleanupFailed) { "$prompt cleanup $id" }
+            elseif (Test-FactoryRecoverableFailedReworkLaunch -Task $Task) { "$prompt retry $id" }
+            else { "$prompt inspect $id" }
+        }
         "rejected" { "$prompt inspect $id" }
         "done" { "$prompt inspect $id" }
         default { "$prompt inspect $id" }
@@ -538,6 +544,7 @@ function Write-CliStatus {
         [string]$_.status -in $runnableStates -or
         ([string]$_.status -eq "awaiting-review" -and (Test-FactoryTaskHasActiveSession -Task $_))
     }).Count
+    $nativeRunnable = @($allTasks | Where-Object { [string]$_.status -in @("queued", "approved") }).Count
     $concurrency = Get-FactoryCodingConcurrency -Config $Config
     $paused = [bool](Get-CliProperty -InputObject $State -Name "paused" -Default $false)
     $active = [bool](Get-CliProperty -InputObject $State -Name "active" -Default $false)
@@ -550,6 +557,10 @@ function Write-CliStatus {
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $schedulerState
+    $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config)
+    $aiActions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "aiActionable" -Default $false) })
+    $humanDecisions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "humanDecision" -Default $false) })
+    $blockedTaskCount = @($allTasks | Where-Object { [string]$_.status -eq "blocked" }).Count
     $cronId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $State -Name "cronJobId")
     $activity = if ($paused) { "paused" } elseif ($activeWorkers -gt 0) { "working" } else { "idle" }
     $scheduler = if ($paused -and $schedulerStatus -in @("running", "busy")) {
@@ -561,7 +572,10 @@ function Write-CliStatus {
     } elseif ($schedulerStatus -eq "failed") {
         "native failed$(if ($schedulerPid -gt 0) { ' (PID ' + $schedulerPid + '; retrying)' } else { '' })"
     } elseif ($schedulerStatus -eq "running") {
-        if ($runnable -eq 0) { "native sleeping (PID $schedulerPid)" } else { "native running (PID $schedulerPid)" }
+        if ($runnable -eq 0 -and $aiActions.Count -gt 0) { "native sleeping; waiting for AI orchestration ($($aiActions.Count)) (PID $schedulerPid)" }
+        elseif ($runnable -eq 0 -and $humanDecisions.Count -gt 0) { "native sleeping; waiting for human decision ($($humanDecisions.Count)) (PID $schedulerPid)" }
+        elseif ($runnable -eq 0) { "native sleeping (PID $schedulerPid)" }
+        else { "native running (PID $schedulerPid)" }
     } elseif ($cronId) {
         "legacy cron $cronId"
     } elseif ($runnable -eq 0) {
@@ -576,6 +590,7 @@ function Write-CliStatus {
     $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory $($script:Tree.Horizontal) $projectName")
     $workerRuntime = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Config -Name "workerAgent") -Fallback "claude"
     $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) runtime $workerRuntime $($script:Tree.Horizontal) coding slots $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
+    $lines.Add("$($script:Tree.Vertical)  attention $($script:Tree.Horizontal) AI actions $($aiActions.Count) $($script:Tree.Horizontal) human decisions $($humanDecisions.Count) $($script:Tree.Horizontal) blocked tasks $blockedTaskCount")
     try {
         $testLease = Invoke-CliJsonScript -ScriptName "test-lease.ps1" -Arguments @(
             "-Action", "status", "-Repository", [string]$Context.repositoryRoot
@@ -669,7 +684,7 @@ function Write-CliStatus {
     }
 
     $factoryMode = if ($paused) { "paused" } elseif ($active) { "enabled" } else { "idle" }
-    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) Factory $factoryMode $($script:Tree.Horizontal) $($allTasks.Count) saved task(s) $($script:Tree.Horizontal) scheduler $scheduler")
+    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) Factory $factoryMode $($script:Tree.Horizontal) $($allTasks.Count) saved task(s) $($script:Tree.Horizontal) native runnable $nativeRunnable $($script:Tree.Horizontal) AI $($aiActions.Count) $($script:Tree.Horizontal) human $($humanDecisions.Count) $($script:Tree.Horizontal) scheduler $scheduler")
     $lines | Write-Output
 }
 
@@ -1384,6 +1399,84 @@ function Invoke-CliSchedulerAction {
     Write-CliSchedulerResult -Result $result -Action $Action
 }
 
+function Get-CliResolvedCodexCommand {
+    param($Context)
+
+    $config = Read-FactoryJson -Path ([string]$Context.configPath)
+    $configured = Get-FactoryConfiguredCodexCommand -Config $config -ExplicitCommand $CodexCommand
+    $resolved = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $configured
+    $capabilities = Get-FactoryCodexCapabilities -CodexCommand $resolved
+    if (-not [bool]$capabilities.supported) {
+        throw "Codex shared-session runtime is unavailable: $($capabilities.detail)"
+    }
+    return $resolved
+}
+
+function Write-CliCodexServer {
+    param($Context, [string]$Action)
+
+    $actionKey = if ($Action) { $Action.ToLowerInvariant() } else { "status" }
+    if ($actionKey -notin @("status", "start", "stop", "restart")) {
+        throw "Unknown codex-server action '$Action'. Use: factory codex-server [status|start|stop|restart]"
+    }
+    $resolved = Get-CliResolvedCodexCommand -Context $Context
+    if ($actionKey -eq "stop" -or $actionKey -eq "restart") {
+        $stop = Stop-FactoryCodexSharedServer -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome)
+        Write-Output "Shared Codex app-server: $(if ([bool]$stop.alreadyStopped) { 'already stopped' } else { "stopped PID $([int]$stop.pid)" })"
+        if ($actionKey -eq "stop") { return }
+    }
+    if ($actionKey -eq "start" -or $actionKey -eq "restart") {
+        $server = Start-FactoryCodexSharedServer -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome)
+        $remote = $null
+        try {
+            $remote = Enable-FactoryCodexSharedRemoteControl -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome) -Endpoint ([string]$server.endpoint)
+        } catch {
+            Write-Warning "Server started, but Codex Remote could not be enabled: $($_.Exception.Message)"
+        }
+        Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Shared Codex app-server $($script:Tree.Horizontal) $(if ([bool]$server.created) { 'started' } else { 'already running' })"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Endpoint: $([string]$server.endpoint)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) PID: $([int]$server.pid)"
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Remote: $(if ($null -ne $remote) { [string]$remote.status } else { 'unavailable' })"
+        Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Agent dashboard: factory agents"
+        return
+    }
+
+    $status = Get-FactoryCodexSharedServerStatus -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome) -Probe
+    $remoteStatus = "unavailable"
+    if ([bool]$status.healthy) {
+        try {
+            $remote = Get-FactoryCodexSharedRemoteControlStatus -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome) -Endpoint ([string]$status.endpoint)
+            $remoteStatus = [string]$remote.status
+        } catch {
+            $remoteStatus = "unavailable ($($_.Exception.Message))"
+        }
+    }
+    Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Shared Codex app-server $($script:Tree.Horizontal) $(if ([bool]$status.healthy) { 'running' } elseif ([bool]$status.alive) { 'unhealthy' } else { 'stopped' })"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Endpoint: $(ConvertTo-CliLine -Value $status.endpoint -Fallback 'none')"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) PID: $(if ([int]$status.pid -gt 0) { [int]$status.pid } else { 'none' })"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Remote: $remoteStatus"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Record: $([string]$status.recordPath)"
+    Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Output: $([string]$status.stdoutPath)"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Errors: $([string]$status.stderrPath)"
+}
+
+function Start-CliCodexAgents {
+    param($Context)
+
+    if ($env:CLAUDE_FACTORY_ORCHESTRATOR) {
+        throw "'factory agents' opens an interactive TUI. Run it from a separate PowerShell window, not from inside the orchestrator."
+    }
+    $resolved = Get-CliResolvedCodexCommand -Context $Context
+    $server = Start-FactoryCodexSharedServer -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome)
+    try {
+        $null = Enable-FactoryCodexSharedRemoteControl -CodexCommand $resolved -RuntimeHome ([string]$Context.runtimeHome) -Endpoint ([string]$server.endpoint)
+    } catch {
+        Write-Warning "The agent dashboard is available locally, but Codex Remote could not be enabled: $($_.Exception.Message)"
+    }
+    & $resolved agents --remote ([string]$server.endpoint) -C ([string]$Context.repositoryRoot)
+    $script:CliExitCode = [int]$LASTEXITCODE
+}
+
 function Start-CliFactory {
     param($Context)
 
@@ -1552,15 +1645,16 @@ function Write-CliRotate {
 }
 
 function Write-CliWait {
-    param($Context, [int]$TimeoutSeconds)
+    param($Context, [int]$TimeoutSeconds, [long]$Cursor = -1)
 
     $arguments = @(
         "-Repository", [string]$Context.repositoryRoot,
         "-TimeoutSeconds", [string]$TimeoutSeconds
     )
+    if ($Cursor -ge 0) { $arguments += @("-Cursor", [string]$Cursor) }
     $result = Invoke-CliJsonScript -ScriptName "wait-factory.ps1" -Arguments $arguments
     if (-not [bool](Get-CliProperty -InputObject $result -Name "signaled" -Default $false)) {
-        Write-Output "No operator action became ready before the wait timeout."
+        Write-Output "No new factory attention edge became ready before the wait timeout. Cursor: $([long](Get-CliProperty -InputObject $result -Name 'cursor' -Default 0))."
         return
     }
 
@@ -1582,7 +1676,7 @@ function Write-CliWait {
         Add-CliWrappedLine -Lines $actionLines -FirstPrefix "$detailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "$($script:Tree.Arrow) Next: $([string]$action.command)"
         $actionLines | Write-Output
     }
-    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Signal detected $($script:Tree.Horizontal) $([string]$result.detectedAt)"
+    Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) Signal detected $($script:Tree.Horizontal) cursor $([long]$result.cursor) $($script:Tree.Horizontal) $([string]$result.detectedAt)"
 }
 
 function Write-CliPurge {
@@ -1626,6 +1720,8 @@ function Write-CliHelp {
             "  factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
             "  factory restart",
             "  factory rotate [status|cancel]",
+            "  factory agents",
+            "  factory codex-server [status|start|stop|restart]",
             "  factory status [state|all]",
             "  factory inspect <task-id>",
             "  factory preview [<task-id>|stop] [-NoOpen]",
@@ -1809,6 +1905,21 @@ function Write-CliHelp {
                 "Prints the private per-project config path or opens it in the configured editor."
             ) | Write-Output
         }
+        "agents" {
+            @(
+                "factory agents",
+                "Opens Codex's shared agent-session dashboard against the Factory-managed app-server.",
+                "Run it in a separate PowerShell window; it is an interactive TUI, not an orchestrator subcommand."
+            ) | Write-Output
+        }
+        "codex-server" {
+            @(
+                "factory codex-server [status|start|stop|restart]",
+                "Controls the persistent loopback Codex app-server shared by Factory projects in the same runtime home.",
+                "Codex orchestrators and 'factory agents' connect to this server; Remote is enabled for phone visibility.",
+                "Stopping or restarting it disconnects every attached Factory Codex terminal under that runtime home."
+            ) | Write-Output
+        }
         "scheduler" {
             @(
                 "factory scheduler [status|start|stop|tick]",
@@ -1819,10 +1930,10 @@ function Write-CliHelp {
         }
         "wait" {
             @(
-                "factory wait [timeout-seconds]",
-                "Blocks without AI until a task or scheduler condition requires operator action.",
+                "factory wait [timeout-seconds] [--cursor <revision>]",
+                "Blocks without AI until a new task or scheduler attention edge is recorded.",
                 "It returns for awaiting-input, blocked, failed, a stalled launch, a stopped scheduler with runnable work, or awaiting-review after the worker session closes.",
-                "It reads atomic factory state rather than following a log. Omit timeout for an indefinite wait."
+                "Repeated default waits acknowledge an edge and do not replay it. Pass a saved cursor for an explicit stateless consumer. Omit timeout for an indefinite wait."
             ) | Write-Output
         }
         "purge" {
@@ -1853,6 +1964,26 @@ function Write-CliHelp {
 }
 
 $normalizedCommand = $Command.ToLowerInvariant()
+$waitCursor = -1L
+if ($normalizedCommand -eq "wait") {
+    $waitTokens = New-Object Collections.Generic.List[string]
+    if ($Target) { $waitTokens.Add([string]$Target) }
+    foreach ($value in @($Remaining)) { $waitTokens.Add([string]$value) }
+    $positionalWait = New-Object Collections.Generic.List[string]
+    for ($index = 0; $index -lt $waitTokens.Count; $index++) {
+        if ([string]$waitTokens[$index] -eq "--cursor") {
+            if ($index + 1 -ge $waitTokens.Count -or -not [long]::TryParse([string]$waitTokens[$index + 1], [ref]$waitCursor) -or $waitCursor -lt 0) {
+                throw "wait --cursor requires a non-negative integer revision."
+            }
+            $index++
+            continue
+        }
+        $positionalWait.Add([string]$waitTokens[$index])
+    }
+    if ($positionalWait.Count -gt 1) { throw "wait accepts one optional timeout and --cursor <revision>." }
+    $Target = if ($positionalWait.Count -eq 1) { [string]$positionalWait[0] } else { "" }
+    $Remaining = @()
+}
 $remainingValues = New-Object Collections.Generic.List[string]
 foreach ($value in @($Remaining)) {
     if ($value -eq "--yes") { $Yes = $true }
@@ -1896,6 +2027,18 @@ if ($normalizedCommand -eq "completion") {
 }
 
 $context = Get-CliContext
+if ($normalizedCommand -eq "codex-server") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "codex-server accepts only status, start, stop, or restart." }
+    Write-CliCodexServer -Context $context -Action $Target
+    exit 0
+}
+
+if ($normalizedCommand -eq "agents") {
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "agents does not accept arguments. Use: factory agents" }
+    Start-CliCodexAgents -Context $context
+    exit $script:CliExitCode
+}
+
 if ($normalizedCommand -eq "doctor") {
     if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "doctor does not accept arguments. Use: factory doctor" }
     Write-CliDoctor -Context $context
@@ -1964,13 +2107,13 @@ if ($normalizedCommand -eq "scheduler") {
 
 if ($normalizedCommand -eq "wait") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {
-        throw "wait accepts only an optional timeout in seconds."
+        throw "wait accepts one optional timeout and --cursor <revision>."
     }
     $waitTimeout = 0
     if ($Target -and (-not [int]::TryParse($Target, [ref]$waitTimeout) -or $waitTimeout -lt 0)) {
         throw "wait timeout must be zero or a positive integer number of seconds."
     }
-    Write-CliWait -Context $context -TimeoutSeconds $waitTimeout
+    Write-CliWait -Context $context -TimeoutSeconds $waitTimeout -Cursor $waitCursor
     exit 0
 }
 

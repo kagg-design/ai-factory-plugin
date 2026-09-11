@@ -422,6 +422,7 @@ try {
         taskCommit = $taskCommit
         baseCommit = $remoteDevelopment
         mergeCommit = $integrationMerge
+        isolatedTestSetup = Get-FactoryNestedValue -Target $integrationCheckSet -Name "setup"
         tests = @($integrationTests)
         checksParallel = (-not $developmentOnly)
         validatedAt = Get-FactoryUtcTimestamp
@@ -446,6 +447,7 @@ try {
             baseCommit = $remoteProduction
             sourceCommit = $productionSource
             mergeCommit = $releaseMerge
+            isolatedTestSetup = Get-FactoryNestedValue -Target $releaseCheckSet -Name "setup"
             tests = @($releaseTests)
             checksParallel = $true
             validatedAt = Get-FactoryUtcTimestamp

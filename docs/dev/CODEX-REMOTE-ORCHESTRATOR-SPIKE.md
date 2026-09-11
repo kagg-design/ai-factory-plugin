@@ -10,13 +10,16 @@ accessed through Codex Desktop and, subject to Remote availability, a phone.
 
 ## Result
 
-The app-backed orchestrator design is technically viable on Windows with Codex
-CLI 0.153.4:
+The shared app-backed orchestrator design is technically viable on Windows
+with Codex CLI 0.153.4:
 
-1. Start a one-shot `codex app-server --stdio` client.
-2. Create and bootstrap a persisted thread through the app-server protocol.
-3. Save that thread ID in the Factory project runtime.
-4. Attach the terminal TUI to the same thread with `codex resume -C <repo>`.
+1. Start one persistent `codex app-server --listen ws://127.0.0.1:<port>` per
+   Factory runtime home.
+2. Create and bootstrap a persisted thread through that server.
+3. Save the thread ID in the Factory project runtime and the server PID,
+   process start time, and endpoint in shared runtime state.
+4. Enable Remote on the server and attach the terminal with `codex --remote
+   <endpoint> resume -C <repo> <thread-id>`.
 
 The proof thread appeared in the Codex Desktop task list and the same thread was
 successfully continued through `codex exec resume`. The existing standalone
@@ -85,56 +88,62 @@ the app-server project was found from its root and was accepted by
 `projectId=null`, but retained the correct repository `cwd` and displayed the
 task. This affects sidebar grouping, not resumability.
 
-### Terminal attachment works
+### Shared terminal attachment works
 
-The app-created proof thread completed a second turn through
-`codex exec resume`. Production terminal attachment can therefore continue to
-use the normal interactive form:
+Codex CLI exposes a supported remote TUI transport for a listening app-server.
+Production terminal attachment uses:
 
 ```text
-codex resume -C <canonical-repository> ... <thread-id>
+codex --remote ws://127.0.0.1:<port> resume -C <canonical-repository> ... <thread-id>
 ```
 
-Passing `-C` on every resume is mandatory. A spike invocation that omitted it
-changed the test thread's saved `cwd` to the caller's directory; app-server
-`thread/resume` repaired it.
+The TUI and phone can therefore be clients of the same server-owned thread;
+neither needs to take a separate direct JSONL writer lock. Passing `-C` on
+every resume remains mandatory.
 
-### Phone access is proven; explicit relay management is not required
+### Phone access requires a connected Remote relay
 
-A reversible protocol test produced an environment ID and moved from
-`disabled` to `connecting`, then to `errored`. The test called
-`remoteControl/disable` and restored the initial disabled state. No pairing code
-was created. Despite that explicit protocol result, the app-backed proof thread
-was visible and usable from the operator's phone through the already connected
-`P16` host. Factory therefore does not need to manage account-level Remote
-enablement or pairing. Those remain Codex application responsibilities.
+The app-backed proof thread was visible and usable from the operator's phone
+through the connected `P16` host. The shared implementation now calls
+`remoteControl/enable` on its own server and reports the returned state. Only
+`connected` confirms mobile readiness. `connecting` and `errored` leave local
+terminal operation intact but cannot promise phone access; Factory surfaces
+that distinction instead of silently claiming remote visibility.
 
 ## Implemented production design
 
-The app-server adapter is now used only to create and validate a Codex
-orchestrator thread. Workers continue using the existing non-interactive CLI
-adapter.
+The app-server adapter owns Codex orchestrator threads and serves every
+attached orchestrator TUI. Workers continue using the existing non-interactive
+CLI adapter.
 
 On the first `factory start -Agent codex`:
 
 1. Resolve the real current `codex.exe`.
-2. Start a bounded one-shot app-server process and negotiate experimental API
-   support.
-3. Find the saved Codex project by canonical repository root. Do not use a
+2. Start or reuse a healthy loopback app-server recorded under the selected
+   runtime home, and negotiate experimental API support over WebSocket.
+3. Enable Remote and print its actual state.
+4. Find the saved Codex project by canonical repository root. Do not use a
    Factory project key or an outer Desktop project ID.
-4. Create a non-ephemeral paginated thread with the repository `cwd`, the
+5. Create a non-ephemeral paginated thread with the repository `cwd`, the
    matched project ID when available, and an app-visible source.
-5. Run the minimal no-tool bootstrap turn and wait for `turn/completed`.
-6. Name the thread `Factory Orchestrator - <repository-name>`.
-7. Persist a versioned identity that records `backend: app-server` and the
-   thread ID.
-8. Close the one-shot app-server and launch interactive `codex resume` with the
-   canonical `-C`, Factory runtime environment, and writable roots.
+6. Run the minimal no-tool bootstrap turn and wait for `turn/completed`.
+7. Name the thread `Factory Orchestrator - <repository-name>`.
+8. Persist a versioned identity that records `backend: shared-app-server` and
+   the thread ID.
+9. Close only the short-lived bootstrap client and launch interactive `codex
+   --remote <endpoint> resume` with the canonical `-C` and writable roots. The
+   server remains alive when the TUI exits.
 
-On later starts, Factory validates the stored thread through app-server and
-resumes it directly. A legacy standalone identity that is absent from
-app-server is replaced once; its ID remains in migration metadata so Factory
-does not silently alternate between two orchestrators.
+On later starts, Factory reuses the server, validates the stored thread through
+it, and resumes through the same remote endpoint. A legacy standalone identity
+that is absent from app-server is replaced once; a prior one-shot app-backed
+identity is reused and upgraded in place.
+
+`factory agents` opens Codex's shared session dashboard in a second terminal.
+`factory codex-server status|start|stop|restart` provides explicit Windows
+lifecycle management because the CLI's native daemon lifecycle is unavailable
+on this host. Stop and restart affect all Factory Codex terminals sharing the
+runtime home, but not schedulers, workers, task state, or worktrees.
 
 Do not silently fall back to a standalone thread when app-backed creation
 fails. Such a fallback would recreate the exact visibility defect. Report the
@@ -148,9 +157,10 @@ app-server failure and leave the scheduler and task state untouched.
   pipe while waiting for a response.
 - The adapter must answer or fail closed on unexpected server approval/tool
   requests during bootstrap.
-- Tests include a fake line-oriented app-server covering initialization,
-  project lookup, thread creation, bootstrap completion, naming, stored
-  identity, failure cleanup, reuse, and legacy identity migration.
+- Tests include a persistent fake WebSocket app-server covering initialization,
+  Remote enablement, project lookup, thread creation, bootstrap completion,
+  naming, stored identity, shared reuse, dashboard routing, failure cleanup,
+  and legacy identity migration.
 - Factory runtime, scheduler, task state, worktrees, and worker sessions must
   remain unchanged if app-thread creation fails.
 

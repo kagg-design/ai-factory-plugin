@@ -32,6 +32,8 @@ not remove tasks, worker sessions, branches, commits, or worktrees.
 The launcher stores separate exact conversation UUIDs for the Claude and Codex
 orchestrators in private project runtime. Normal startup resumes the selected
 conversation. A per-repository mutex prevents two live orchestrators.
+Codex additionally uses one persistent loopback app-server per runtime home;
+all Factory Codex terminals under that home connect to it as clients.
 
 ## 2. Safe startup
 
@@ -55,10 +57,13 @@ project `config.json` and affects only new attempts. Existing Claude and Codex
 workers keep their original runtime and can coexist while they finish.
 
 The Codex form creates or reuses `Factory Orchestrator - <repository>` as an
-app-backed Codex task. It is visible in Codex Desktop and connected phone
-clients while the same thread remains attached to the terminal. The first
-start after upgrading replaces a saved standalone Codex orchestrator with one
-app-backed task; subsequent starts validate and reuse it without duplicates.
+app-backed Codex task, starts or reuses the Factory-managed app-server, enables
+Remote, and attaches the terminal with `codex --remote`. Desktop, phone, the
+terminal, and `factory agents` therefore address the same server-owned thread
+instead of competing for its JSONL file. Phone access is ready only when the
+launcher prints `Codex Remote: connected`. The first start after upgrading
+replaces a saved standalone Codex orchestrator with one app-backed task;
+subsequent starts validate and reuse it without duplicates.
 
 Then check its state without waiting for AI interpretation:
 
@@ -226,9 +231,24 @@ dispatcher, not the orchestrator prompt.
 If `/factory status` is entered directly in Agent View, Claude may dispatch a
 new agent for it. Return to the orchestrator and run the command there.
 
-Codex does not mirror Claude Agent View. `factory start -Agent codex` resumes
-the exact stored orchestrator thread, and `factory chat <task-id>` prints the
-exact command for a Codex worker thread.
+Codex does not mirror Claude's left-arrow Agent View. Run `factory agents` in a
+second PowerShell window to open Codex's dashboard on the Factory shared
+app-server. `factory start -Agent codex` resumes the exact stored orchestrator
+thread through that server, while `factory chat <task-id>` remains the
+authoritative capture-aware command for a specific worker thread.
+
+Inspect or control the shared server explicitly:
+
+```powershell
+factory codex-server status
+factory codex-server start
+factory codex-server restart
+factory codex-server stop
+```
+
+The server is shared across Factory projects that use the same runtime home.
+Stopping or restarting it disconnects their attached Codex terminals, but it
+does not stop the native scheduler, workers, tasks, or worktrees.
 
 ### Command help
 
@@ -308,13 +328,24 @@ a transient `loop-error`; that disposable bookkeeping write is skipped and the
 same daemon backs off and retries instead of exiting fatally. No Claude cron job
 is created.
 
-Use `factory wait [timeout-seconds]` when a shell or orchestrator should sleep
-until Factory needs a decision. It watches atomic state rather than logs and
+Use `factory wait [timeout-seconds] [--cursor <revision>]` when a shell or
+orchestrator should sleep until Factory needs a decision. It watches the
+durable, revisioned attention journal rather than logs and
 returns for input, a closed-session review, blockers, failures, abandoned
 launches, or a dead scheduler with runnable work. `awaiting-review` remains
 waiting while its worker session is still live. When the current commit already
 has an approved review, status shows `GO` and `factory wait` does not wake the AI
 orchestrator again; the human operator's `factory go <id>` decision remains.
+Default waits acknowledge returned edges so repeated calls do not replay the
+same failure. A stateless consumer can save the returned cursor and pass it on
+its next call.
+
+For a Codex runtime, the native scheduler forwards each new AI-actionable edge
+exactly once to the saved app-backed orchestrator through the Factory-managed
+shared app-server. The revision acknowledgement survives process restarts and
+prevents wake loops. Human input and GO decisions are not forwarded as AI work.
+Set private `orchestrator.autoGoApprovedReviews` to `true` only when explicit
+automatic approval is desired; the default is `false`.
 
 ## 5. IDs shown in status output
 
@@ -683,8 +714,12 @@ Other decisions:
 `rework` stops and removes the previous worker session, preserves the branch,
 worktree, validated commit, and result, clears review and approval, and queues
 a new attempt. The launcher embeds the findings and retained commit in the new
-prompt and clears the pending instructions only after that prompt is durable.
-No operator paste into an old conversation is required.
+prompt and clears the pending instructions only after the replacement session
+is durably recorded. If the launch fails first, `factory retry <task-id>` may
+requeue this exact clean worktree/commit/result/instruction combination for
+redelivery. This exception is deliberately narrow: other failed tasks with a
+validated commit or result cannot use generic retry. No operator paste into an
+old conversation is required.
 
 Use `release` only when the runtime no longer lists the stored session. It
 refuses live sessions and publication/sync states, clears the stale identity,
@@ -729,6 +764,10 @@ whose parent is the current configured development tip, then run the same
 clean tree, and exactly one task commit before adopting the new SHA. If
 validation is interrupted after a successful rebase, the task remains
 `syncing`, cannot be approved, and the same command resumes its checks.
+If the worker PATH contains Factory's Git shim, read-only validation still runs
+through that shim, but the sanctioned rebase resolves the verified real Git
+executable only after task, worktree, and lease validation. A worker-issued
+`git rebase` remains blocked.
 The preparation marker includes the exact fetched development SHA. If that tip
 moves before validation completes, another `sync` re-rebases and updates the
 marker instead of returning `alreadyPrepared` for stale work.
@@ -889,7 +928,7 @@ refreshes the file without duplicating the pointer or attempt.
 /factory transcript <task-id>
 /factory doctor
 factory scheduler status
-factory wait [timeout-seconds]
+factory wait [timeout-seconds] [--cursor <revision>]
 factory runtime [status|migrate]
 ```
 
@@ -936,7 +975,23 @@ If the launcher reports that a factory is already running, inspect Agent View
 and other terminals first. Only one lead factory process may run for a
 repository.
 
-## 13. Test database isolation
+## 13. Candidate-specific WordPress test setup
+
+For WordPress repositories, an isolated Git worktree does not prove that a
+PHPUnit bootstrap loaded the plugin from that worktree. Configure the optional
+private `isolatedTestSetup` hook to provision a WordPress root and config for
+each integrator/release candidate. The hook receives `{repository}`,
+`{worktree}`, `{scope}`, `{taskId}`, `{commit}`, and `{resultPath}` placeholders.
+
+Its version-1 JSON result must report the exact candidate worktree/commit,
+`wordpressRoot`, a `wordpressConfigPath` inside that root, `loadedCodePath`
+inside the candidate worktree, and restricted `environment` variables used by
+the actual checks. Factory rejects missing paths, a shared repository root,
+code loaded outside the candidate, unsafe environment names, and an enabled
+hook that produces no binding environment. The disabled default changes no
+existing repository; `factory doctor` validates the configured contract.
+
+## 14. Test database isolation
 
 Separate worktrees still share any database named by their copied `.env` or
 test-runner configuration. For a PostgreSQL project, enable isolation in the
@@ -971,7 +1026,7 @@ If isolation is disabled, the wrapper runs commands normally. Full suites are
 still protected by the factory's one-wide test lane, but targeted tests may run
 in parallel during coding, so database isolation remains strongly recommended.
 
-## 14. Coding concurrency and the serialized test lane
+## 15. Coding concurrency and the serialized test lane
 
 Show or change the current worker limit:
 
@@ -1028,7 +1083,7 @@ inferred as `php artisan test --parallel --processes=N`, where `N` is half the
 logical CPU count rounded up and clamped to 1–5. The explicit value appears in
 logs and audits.
 
-## 15. Operations to avoid
+## 16. Operations to avoid
 
 - Do not enter `/factory ...` commands directly in Agent View.
 - Do not use `-Continue` for normal factory startup.
@@ -1041,7 +1096,7 @@ logs and audits.
   with `factory runtime` and migrate it offline first.
 - Do not run `go` before reading `/factory review`.
 
-## 16. Daily checklist
+## 17. Daily checklist
 
 ```text
 1. Run factory start.

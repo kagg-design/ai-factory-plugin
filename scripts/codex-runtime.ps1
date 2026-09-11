@@ -86,20 +86,24 @@ function Get-FactoryCodexCapabilities {
         $exec = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("exec", "--help")
         $execResume = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("exec", "resume", "--help")
         $resume = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("resume", "--help")
+        $root = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("--help")
         $appServer = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("app-server", "--help")
+        $agents = Invoke-FactoryNativeProcess -Command $CodexCommand -Arguments @("agents", "--help")
         $supported = (
             [int]$version.exitCode -eq 0 -and
             [int]$exec.exitCode -eq 0 -and [string]$exec.stdout -match '(?m)^\s+--json\b' -and
             [string]$exec.stdout -match '--output-last-message' -and
             [int]$execResume.exitCode -eq 0 -and [string]$execResume.stdout -match '\[SESSION_ID\]' -and
             [int]$resume.exitCode -eq 0 -and [string]$resume.stdout -match '--include-non-interactive' -and
-            [int]$appServer.exitCode -eq 0 -and [string]$appServer.stdout -match '--stdio'
+            [int]$root.exitCode -eq 0 -and [string]$root.stdout -match '--remote' -and
+            [int]$appServer.exitCode -eq 0 -and [string]$appServer.stdout -match '--listen' -and
+            [int]$agents.exitCode -eq 0 -and [string]$agents.stdout -match '--remote'
         )
         return [pscustomobject]@{
             supported = $supported
             version = ([string]$version.stdout).Trim()
             command = $CodexCommand
-            detail = if ($supported) { "exec JSONL, app-server stdio, exec resume, and interactive resume are available" } else { "required Codex CLI session capabilities are missing" }
+            detail = if ($supported) { "exec JSONL, shared app-server WebSocket, agents dashboard, and interactive remote resume are available" } else { "required Codex CLI shared-session capabilities are missing" }
         }
     } catch {
         return [pscustomobject]@{ supported = $false; version = ""; command = $CodexCommand; detail = $_.Exception.Message }

@@ -327,41 +327,171 @@ function Invoke-SchedulerChildJson {
             }
         }
     }
+    $childRoot = Join-Path ([string]$context.projectData) "scheduler-children"
+    New-Item -ItemType Directory -Path $childRoot -Force | Out-Null
+    $childId = [Guid]::NewGuid().ToString("N")
+    $requestPath = Join-Path $childRoot "$childId.request.json"
+    $resultPath = Join-Path $childRoot "$childId.result.json"
+    $stdoutPath = Join-Path $childRoot "$childId.stdout.log"
+    $stderrPath = Join-Path $childRoot "$childId.stderr.log"
+    Write-FactoryJsonAtomic -Path $requestPath -Value ([ordered]@{
+        version = 1
+        scriptPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $ScriptName))
+        arguments = @($Arguments | ForEach-Object { [string]$_ })
+        workingDirectory = [string]$context.repositoryRoot
+        resultPath = $resultPath
+        stdoutPath = $stdoutPath
+        stderrPath = $stderrPath
+        createdAt = Get-FactoryUtcTimestamp
+    })
     $childArguments = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot $ScriptName)
-    ) + @($Arguments)
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "scheduler-child-runner.ps1"),
+        "-RequestPath", $requestPath
+    )
     $resolvedPowerShell = Get-Command powershell -ErrorAction Stop
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = if ([string]$resolvedPowerShell.Source) { [string]$resolvedPowerShell.Source } else { [string]$resolvedPowerShell.Path }
-    $startInfo.Arguments = (@($childArguments | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }) -join " ")
-    $startInfo.WorkingDirectory = [string]$context.repositoryRoot
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $utf8 = New-Object Text.UTF8Encoding($false)
-    if ($null -ne $startInfo.PSObject.Properties["StandardOutputEncoding"]) { $startInfo.StandardOutputEncoding = $utf8 }
-    if ($null -ne $startInfo.PSObject.Properties["StandardErrorEncoding"]) { $startInfo.StandardErrorEncoding = $utf8 }
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $startInfo
+    $powerShellExecutable = if ([string]$resolvedPowerShell.Source) { [string]$resolvedPowerShell.Source } else { [string]$resolvedPowerShell.Path }
+    $childArgumentLine = (@($childArguments | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }) -join " ")
+
+    if (-not ("ClaudeFactory.DetachedProcessLauncher" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace ClaudeFactory
+{
+    public static class DetachedProcessLauncher
+    {
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public int dwX;
+            public int dwY;
+            public int dwXSize;
+            public int dwYSize;
+            public int dwXCountChars;
+            public int dwYCountChars;
+            public int dwFillAttribute;
+            public int dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateProcess(
+            string lpApplicationName,
+            StringBuilder lpCommandLine,
+            IntPtr lpProcessAttributes,
+            IntPtr lpThreadAttributes,
+            bool bInheritHandles,
+            uint dwCreationFlags,
+            IntPtr lpEnvironment,
+            string lpCurrentDirectory,
+            ref STARTUPINFO lpStartupInfo,
+            out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        public static int Start(string applicationName, string arguments, string currentDirectory)
+        {
+            if (applicationName.IndexOf('\"') >= 0)
+                throw new ArgumentException("Executable path contains an invalid quote.", "applicationName");
+
+            var commandLine = new StringBuilder();
+            commandLine.Append('\"').Append(applicationName).Append('\"');
+            if (!String.IsNullOrWhiteSpace(arguments))
+                commandLine.Append(' ').Append(arguments);
+
+            var startup = new STARTUPINFO();
+            startup.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+            PROCESS_INFORMATION process;
+            if (!CreateProcess(
+                applicationName,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false,
+                CREATE_NO_WINDOW,
+                IntPtr.Zero,
+                currentDirectory,
+                ref startup,
+                out process))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            try { return process.dwProcessId; }
+            finally
+            {
+                if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
+                if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
+            }
+        }
+    }
+}
+'@
+    }
+    $runnerProcessId = [ClaudeFactory.DetachedProcessLauncher]::Start(
+        $powerShellExecutable,
+        $childArgumentLine,
+        [string]$context.repositoryRoot
+    )
     try {
-        if (-not $process.Start()) { throw "Could not start scheduler child '$ScriptName'." }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        while (-not $process.WaitForExit(1000)) { Touch-SchedulerHeartbeat }
-        $process.WaitForExit()
-        $stdout = ([string]$stdoutTask.Result).Trim()
-        $stderr = ([string]$stderrTask.Result).Trim()
-        if ([int]$process.ExitCode -ne 0) {
+        while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            Start-Sleep -Milliseconds 100
+            Touch-SchedulerHeartbeat
+            try {
+                $runnerAlive = $null -ne (Get-Process -Id $runnerProcessId -ErrorAction Stop)
+            } catch {
+                $runnerAlive = $false
+            }
+            if (-not $runnerAlive -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                Start-Sleep -Milliseconds 100
+                if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                    throw "Scheduler child runner for '$ScriptName' exited without an atomic result file."
+                }
+            }
+        }
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            throw "Scheduler child runner for '$ScriptName' exited without an atomic result file."
+        }
+        $result = Read-FactoryJson -Path $resultPath
+        $stdout = ([string](Get-CliSafeProperty -InputObject $result -Name "stdout" -Default "")).Trim()
+        $stderr = ([string](Get-CliSafeProperty -InputObject $result -Name "stderr" -Default "")).Trim()
+        $childExitCode = [int](Get-CliSafeProperty -InputObject $result -Name "exitCode" -Default 1)
+        if ($childExitCode -ne 0) {
             $detailParts = @($stdout, $stderr) | Where-Object { $_ } | ForEach-Object { [string]$_ }
             $detail = Remove-FactoryAnsiSequences -Value ($detailParts -join [Environment]::NewLine)
             $detail = (Get-FactoryBoundedTextTail -Value $detail -MaximumLength 8192).Trim()
-            throw "$ScriptName exited with code $($process.ExitCode): $detail"
+            throw "$ScriptName exited with code $childExitCode`: $detail"
         }
         if (-not $stdout) { return $null }
         return ($stdout | ConvertFrom-Json)
     } finally {
-        $process.Dispose()
+        foreach ($path in @($requestPath, $resultPath, $stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -482,6 +612,31 @@ function Invoke-SchedulerTick {
             $schedulerValues.lastTransitionAt = $now
         }
         Update-SchedulerState -Values $schedulerValues
+        $attention = $null
+        $attentionConfig = Read-FactoryJson -Path ([string]$context.configPath)
+        $attentionSettings = Get-CliSafeProperty -InputObject $attentionConfig -Name "orchestrator"
+        if (
+            [string](Get-CliSafeProperty -InputObject $attentionConfig -Name "workerAgent" -Default "claude") -eq "codex" -and
+            [bool](Get-CliSafeProperty -InputObject $attentionSettings -Name "attentionBridge" -Default $true)
+        ) {
+            try {
+                $attention = Invoke-SchedulerChildJson -ScriptName "orchestrator-attention.ps1" -Arguments @(
+                    "-Repository", [string]$context.repositoryRoot,
+                    "-Action", "dispatch"
+                )
+                if ($null -ne $attention -and [bool](Get-CliSafeProperty -InputObject $attention -Name "dispatched" -Default $false)) {
+                    Write-SchedulerLog -Stream stdout -Event "orchestrator-wake" -Values @{
+                        revision = [long](Get-CliSafeProperty -InputObject $attention -Name "revision" -Default 0)
+                        threadId = [string](Get-CliSafeProperty -InputObject $attention -Name "threadId" -Default "")
+                        turnId = [string](Get-CliSafeProperty -InputObject $attention -Name "turnId" -Default "")
+                    }
+                }
+            } catch {
+                # AI notification must never stop native reconciliation, launch, or
+                # publication. The durable attention journal remains pending.
+                Write-SchedulerLog -Stream stderr -Event "orchestrator-wake-error" -Values @{ error = $_.Exception.Message }
+            }
+        }
         $tickResult = [ordered]@{
             skipped = $false
             reconciledTransitions = [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0)
@@ -492,13 +647,14 @@ function Invoke-SchedulerTick {
             activeWorkers = $activeWorkers
             queued = $queuedCount
             approvedPipelineTasks = $approvedCount
+            attention = $attention
             errors = $errors.ToArray()
         }
         Write-SchedulerLog -Stream stdout -Event "tick" -Values @{
             startedAt = $tickStartedAt
             reconciledTransitions = [int](Get-CliSafeProperty -InputObject $reconcile -Name "changed" -Default 0)
-            launchedTaskIds = @($launched.ToArray() | ForEach-Object { [string]$_.taskId })
-            integratedTaskIds = @($integrated.ToArray() | ForEach-Object { [string]$_.taskId })
+            launchedTaskIds = @($launched.ToArray() | ForEach-Object { [string](Get-CliSafeProperty -InputObject $_ -Name "taskId" -Default "") } | Where-Object { $_ })
+            integratedTaskIds = @($integrated.ToArray() | ForEach-Object { [string](Get-CliSafeProperty -InputObject $_ -Name "taskId" -Default "") } | Where-Object { $_ })
             activeWorkers = $activeWorkers
             queued = $queuedCount
             approvedPipelineTasks = $approvedCount

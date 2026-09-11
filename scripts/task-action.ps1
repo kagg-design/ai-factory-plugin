@@ -160,6 +160,7 @@ try {
                     [string](Get-FactoryNestedValue -Target $task -Name "error" -Default "") -match "(?i)worker launch"
                 )
             )
+            $failedReworkDelivery = Test-FactoryRecoverableFailedReworkLaunch -Task $task
             if ($missingSessionLaunch) {
                 $launchProcess = [pscustomobject]@{
                     pid = Get-FactoryNestedValue -Target $task -Name "launchProcessId" -Default 0
@@ -168,6 +169,46 @@ try {
                 if (Test-FactoryRecordedProcess -ProcessRecord $launchProcess) {
                     throw "Task '$TaskId' still has an active launcher process. Wait for launch completion or the configured launch timeout before retrying."
                 }
+            }
+            if ($failedReworkDelivery) {
+                $launchProcess = [pscustomobject]@{
+                    pid = Get-FactoryNestedValue -Target $task -Name "launchProcessId" -Default 0
+                    processStartTimeUtc = Get-FactoryNestedValue -Target $task -Name "launchProcessStartTimeUtc"
+                }
+                if (Test-FactoryRecordedProcess -ProcessRecord $launchProcess) {
+                    throw "Task '$TaskId' still has an active failed-rework launcher process."
+                }
+                $retainedWorktree = [string](Get-FactoryNestedValue -Target $task -Name "worktree" -Default "")
+                $retainedBranch = [string](Get-FactoryNestedValue -Target $task -Name "branch" -Default "")
+                if (-not $retainedWorktree -or -not (Test-Path -LiteralPath $retainedWorktree -PathType Container)) {
+                    throw "Failed rework task '$TaskId' has no usable retained worktree."
+                }
+                if (-not $retainedBranch -or $retainedBranch -notlike "factory-worker/*") {
+                    throw "Failed rework task '$TaskId' has unsafe retained branch '$retainedBranch'."
+                }
+                $retainedHead = (& git -C $retainedWorktree rev-parse HEAD 2>$null).Trim()
+                $retainedCurrentBranch = (& git -C $retainedWorktree branch --show-current 2>$null).Trim()
+                $retainedDirty = @(& git -C $retainedWorktree status --porcelain 2>$null)
+                if ($retainedHead -ne [string]$task.commit -or $retainedCurrentBranch -ne $retainedBranch -or $retainedDirty.Count -gt 0) {
+                    throw "Failed rework task '$TaskId' no longer has its exact clean retained commit and branch."
+                }
+
+                # This narrow transition preserves the validated one-commit
+                # result and the undelivered rework instructions. It clears
+                # only failed launch ownership/error state before redelivery.
+                Set-FactoryProperty -Target $task -Name "backgroundSession" -Value $null
+                Set-FactoryProperty -Target $task -Name "agentId" -Value $null
+                Set-FactoryProperty -Target $task -Name "error" -Value $null
+                Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+                Set-FactoryProperty -Target $task -Name "launchStartedAt" -Value $null
+                Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $null
+                Set-FactoryProperty -Target $task -Name "launchFailedAt" -Value $null
+                Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
+                Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+                Set-FactoryProperty -Target $task -Name "status" -Value "queued"
+                Set-FactoryProperty -Target $state -Name "active" -Value $true
+                Set-FactoryProperty -Target $state -Name "paused" -Value $false
+                break
             }
             $retryable = $missingSessionLaunch -or [string]$task.status -in @("blocked", "failed") -or (
                 [string]$task.status -eq "held" -and [string]$task.holdReason -eq $machineHoldReason

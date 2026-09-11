@@ -63,6 +63,7 @@ $sessionsPath = Join-Path $projectData "sessions"
 $eventsPath = Join-Path $projectData "events"
 $previewPath = Join-Path $projectData "preview.json"
 $testLeasePath = Join-Path $projectData "test-lease.json"
+$attentionPath = Join-Path $projectData "orchestrator-attention.json"
 $previewRoot = Join-Path $projectData "preview"
 $worktreeContainer = Join-Path (Split-Path $repoRoot -Parent) ".claude-factory-worktrees"
 $worktreeRoot = Join-Path $worktreeContainer $projectKey
@@ -155,6 +156,7 @@ if ($Initialize) {
     eventsPath = $eventsPath
     previewPath = $previewPath
     testLeasePath = $testLeasePath
+    attentionPath = $attentionPath
     previewRoot = $previewRoot
     worktreeContainer = $worktreeContainer
     worktreeRoot = $worktreeRoot

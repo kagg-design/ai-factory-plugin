@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- Made scheduler child calls use atomic result/error files instead of redirected
+  parent pipes, so detached Codex descendants cannot hold a tick open and one
+  cycle can fill every free coding slot. Sanctioned sync now resolves a
+  verified real Git executable after lease/worktree validation while the worker
+  Git shim continues to deny direct rebase. Failed rework launches retain their
+  validated commit, result, worktree, and undelivered instructions for a narrow
+  `factory retry` recovery; ordinary validated failures remain non-retryable.
+- Added a durable, revisioned Codex attention bridge over the Factory-managed
+  shared app-server. New AI-actionable edges create one continuation turn and
+  persist acknowledgement across restarts; human GO decisions stay manual by
+  default, with explicit private `orchestrator.autoGoApprovedReviews` opt-in.
+  `factory wait --cursor <revision>` exposes the same edge journal to stateless
+  consumers without replaying acknowledged default waits.
+- Split status/doctor diagnostics into scheduler health, native runnable work,
+  AI actions, human decisions, and blocked task reasons. Added an optional
+  per-repository isolated-test setup hook whose attested WordPress root, config,
+  exact candidate code path, and restricted environment are validated and
+  applied to integration/release commands; shared-checkout attestations fail
+  closed.
+- Replaced the Codex orchestrator's one-shot app-server/direct-resume split
+  with one persistent loopback app-server per Factory runtime home. Terminal
+  orchestrators now attach through `codex --remote`, Remote is enabled on the
+  same server for phone access, legacy app-backed identities upgrade in place,
+  and PID/start-time records prevent accidental process reuse. Added `factory
+  agents` plus explicit `factory codex-server status|start|stop|restart`
+  lifecycle commands and WebSocket-backed integration coverage.
 - Kept the native scheduler alive when its loop-state or heartbeat bookkeeping
   cannot acquire the project state mutex: skipped telemetry is logged as a
   transient `loop-error`, backoff continues, and the next successful tick
@@ -12,16 +38,15 @@
 - Added development-only publication: an empty `productionBranch` now makes
   review, direct approval, integration, verification, and cleanup operate only
   on the configured development branch, without fetching or pushing a
-  production ref or touching the release worktree. Codex startup now also says
-  explicitly that app/phone and terminal share one active writer at a time.
+  production ref or touching the release worktree.
 - Removed runtime migration's dependency on the ambient `Get-FileHash` cmdlet;
   copy verification now uses Factory's module-independent SHA-256 helper.
   Config migration also preserves missing JSON array defaults as arrays under
   Windows PowerShell 5.1 instead of serializing them as `{ value, Count }`.
 - Made the Codex orchestrator app-backed and remotely visible. `factory start
-  -Agent codex` now creates a named, project-rooted task through the bounded
+  -Agent codex` creates a named, project-rooted task through the experimental
   app-server protocol, exposes it in Codex Desktop and connected phone clients,
-  attaches the terminal to the same thread, validates it before later resumes,
+  persists and validates its exact thread identity before later resumes,
   migrates a legacy standalone identity once, and archives a partially created
   thread when bootstrap fails instead of persisting a broken replacement.
 - Added `factory restart` for update-safe orchestrator replacement. It finds

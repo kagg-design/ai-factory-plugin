@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, retry, wait, rework, release, reject, cleanup, sync, preview, chat, restart, rotate, scheduler, or asks to manage factory tasks and workers.
+description: Operate the local Claude Factory Plugin from a Codex orchestrator. Use whenever the user says factory, factory status, factory new, factory add, inspect, review, go, hold, retry, wait, rework, release, reject, cleanup, sync, preview, chat, restart, rotate, agents, codex-server, scheduler, or asks to manage factory tasks and workers.
 ---
 
 # Factory orchestrator for Codex
@@ -45,9 +45,12 @@ integration, and output. Apply these Codex adaptations:
   old chat. `release` is the explicit stale-session escape hatch; use the
   canonical `task-action.ps1 -Action release` flow and never edit state JSON.
 - `factory wait` is the native orchestrator notification boundary. It waits on
-  atomic state, not logs; a review is actionable only after its worker session
+  the durable attention journal, not logs; a review is actionable only after its worker session
   closes, and a current approved review waiting only for the human operator's
-  `go` remains visible in status without waking the orchestrator again.
+  `go` remains visible in status without waking the orchestrator again. Default
+  waits acknowledge edges; use `factory wait --cursor <revision>` for a
+  stateless cursor. Codex AI-actionable edges are delivered once to the saved
+  shared-app-server orchestrator and acknowledged across restarts.
 - `factory runtime` shows the exact private-state placement and lock
   diagnostics. `factory runtime migrate` is an explicit offline, verified,
   copy-only move to LocalAppData; never migrate or delete live runtime state.
@@ -56,6 +59,12 @@ integration, and output. Apply these Codex adaptations:
   tasks, worktrees, and previews alone. Do not run it as a nested shell command
   from the process being replaced; use `factory rotate` only for a fresh
   handoff conversation.
+- Codex orchestrators attach to the persistent Factory-managed app-server.
+  `factory agents` opens its interactive session dashboard from a separate
+  PowerShell window. `factory codex-server status` is read-only; explicit
+  stop/restart disconnects all Factory Codex TUIs sharing the runtime home but
+  leaves schedulers, workers, task state, and worktrees intact. Only a startup
+  report of `Codex Remote: connected` confirms phone readiness.
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.

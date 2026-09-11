@@ -319,6 +319,23 @@ function Test-FactoryTaskHasCurrentApprovedReview {
     )
 }
 
+function Test-FactoryRecoverableFailedReworkLaunch {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    $commit = [string](Get-FactoryNestedValue -Target $Task -Name "commit" -Default "")
+    $result = Get-FactoryNestedValue -Target $Task -Name "workerResult"
+    return (
+        [string](Get-FactoryNestedValue -Target $Task -Name "status" -Default "") -eq "failed" -and
+        -not (Test-FactoryTaskHasRecordedSession -Task $Task) -and
+        [bool]$commit -and
+        $null -ne $result -and
+        [string](Get-FactoryNestedValue -Target $result -Name "commit" -Default "") -eq $commit -and
+        [bool][string](Get-FactoryNestedValue -Target $Task -Name "reworkRequestedAt" -Default "") -and
+        [bool][string](Get-FactoryNestedValue -Target $Task -Name "pendingInstructions" -Default "") -and
+        [bool][string](Get-FactoryNestedValue -Target $Task -Name "launchFailedAt" -Default "")
+    )
+}
+
 function Get-FactoryLaunchStallInfo {
     param(
         [Parameter(Mandatory = $true)]$Task,
@@ -381,7 +398,7 @@ function Get-FactoryOperatorActionEvents {
         if ([bool]$stall.stalled) {
             $events.Add([pscustomobject][ordered]@{
                 kind = "stalled-launch"; taskId = $taskId; title = $title; status = $status
-                audience = "orchestrator"
+                audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
                 reason = "Worker launch has no recorded session after $([int]$stall.ageSeconds) second(s)."
                 occurredAt = [string]$stall.startedAt; command = "factory retry $taskId"
             })
@@ -390,21 +407,23 @@ function Get-FactoryOperatorActionEvents {
         if ($status -eq "awaiting-input") {
             $events.Add([pscustomobject][ordered]@{
                 kind = "awaiting-input"; taskId = $taskId; title = $title; status = $status
-                audience = "orchestrator"
+                audience = "human"; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
                 reason = "Worker needs operator input."; occurredAt = $occurredAt; command = "factory chat $taskId"
             })
         } elseif ($status -eq "awaiting-review" -and -not (Test-FactoryTaskHasActiveSession -Task $task)) {
             if (Test-FactoryTaskHasCurrentApprovedReview -Task $task) {
+                $autoGo = [bool](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Config -Name "orchestrator") -Name "autoGoApprovedReviews" -Default $false)
                 $events.Add([pscustomobject][ordered]@{
-                    kind = "awaiting-approval"; taskId = $taskId; title = $title; status = $status
-                    audience = "human"
-                    reason = "The current commit has an approved review and is waiting for the operator's go decision."
+                    kind = if ($autoGo) { "auto-go" } else { "awaiting-approval" }; taskId = $taskId; title = $title; status = $status
+                    audience = if ($autoGo) { "orchestrator" } else { "human" }
+                    aiActionable = $autoGo; humanDecision = -not $autoGo; includeInDefaultWait = $false
+                    reason = if ($autoGo) { "The current approved review is covered by the explicit persisted auto-go policy." } else { "The current commit has an approved review and is waiting for the operator's go decision." }
                     occurredAt = $occurredAt; command = "factory go $taskId"
                 })
             } else {
                 $events.Add([pscustomobject][ordered]@{
                     kind = "awaiting-review"; taskId = $taskId; title = $title; status = $status
-                    audience = "orchestrator"
+                    audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
                     reason = "Validated result is ready and the worker session is closed."; occurredAt = $occurredAt; command = "factory inspect $taskId"
                 })
             }
@@ -414,15 +433,16 @@ function Get-FactoryOperatorActionEvents {
             ))
             $events.Add([pscustomobject][ordered]@{
                 kind = $status; taskId = $taskId; title = $title; status = $status
-                audience = "orchestrator"
-                reason = $reason; occurredAt = $occurredAt; command = "factory inspect $taskId"
+                audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
+                reason = $reason; occurredAt = $occurredAt
+                command = if (Test-FactoryRecoverableFailedReworkLaunch -Task $task) { "factory retry $taskId" } else { "factory inspect $taskId" }
             })
         } elseif ($status -eq "cleaning") {
             $cleanup = Get-FactoryNestedValue -Target $task -Name "cleanup"
             if (-not (Test-FactoryRecordedProcess -ProcessRecord $cleanup)) {
                 $events.Add([pscustomobject][ordered]@{
                     kind = "cleanup-interrupted"; taskId = $taskId; title = $title; status = $status
-                    audience = "orchestrator"
+                    audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
                     reason = "Cleanup has no live owner and must be resumed."
                     occurredAt = [string](Get-FactoryNestedValue -Target $cleanup -Name "startedAt" -Default $occurredAt)
                     command = "factory cleanup $taskId"
@@ -446,7 +466,7 @@ function Get-FactoryOperatorActionEvents {
         if (-not $reason) { $reason = "Runnable work exists, but the native scheduler process is not running." }
         $events.Add([pscustomobject][ordered]@{
             kind = "scheduler"; taskId = $null; title = "Native scheduler"; status = if ($paused) { "paused" } elseif ($schedulerAlive) { $schedulerStatus } else { "stopped" }
-            audience = "orchestrator"
+            audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
             reason = $reason
             occurredAt = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastFailureAt" -Default (
                 Get-FactoryNestedValue -Target $scheduler -Name "heartbeatAt" -Default ""
@@ -1327,6 +1347,145 @@ function Read-FactoryEnvironmentFile {
         $values[$name] = $value.Trim()
     }
     return $values
+}
+
+function Get-FactoryIsolatedTestSetupSettings {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $section = Get-FactoryNestedValue -Target $Config -Name "isolatedTestSetup"
+    if ($null -eq $section -or -not [bool](Get-FactoryNestedValue -Target $section -Name "enabled" -Default $false)) {
+        return $null
+    }
+    $command = ([string](Get-FactoryNestedValue -Target $section -Name "command" -Default "")).Trim()
+    $arguments = @((Get-FactoryNestedValue -Target $section -Name "arguments" -Default @()) | ForEach-Object { [string]$_ })
+    if (-not $command) { throw "isolatedTestSetup.command is required when the hook is enabled." }
+    if ($arguments.Count -eq 0 -or @($arguments | Where-Object { $_ -match '\{resultPath\}' }).Count -eq 0) {
+        throw "isolatedTestSetup.arguments must include {resultPath} so Factory can verify the hook result."
+    }
+    foreach ($argument in $arguments) {
+        if ($argument.Length -gt 4096 -or $argument -match '[\r\n]') {
+            throw "isolatedTestSetup arguments must be single-line strings no longer than 4096 characters."
+        }
+        foreach ($placeholder in @([regex]::Matches($argument, '\{[^}]+\}') | ForEach-Object { [string]$_.Value })) {
+            if ($placeholder -notin @("{repository}", "{worktree}", "{scope}", "{taskId}", "{commit}", "{resultPath}")) {
+                throw "isolatedTestSetup argument uses unsupported placeholder '$placeholder'."
+            }
+        }
+    }
+    return [pscustomobject]@{ command = $command; arguments = $arguments }
+}
+
+function Invoke-FactoryIsolatedTestSetup {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$Worktree,
+        [Parameter(Mandatory = $true)][ValidateSet("integrator", "release")][string]$Scope,
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$ResultPath
+    )
+
+    $settings = Get-FactoryIsolatedTestSetupSettings -Config $Config
+    if ($null -eq $settings) { return $null }
+    $repositoryPath = [IO.Path]::GetFullPath($RepositoryRoot)
+    $worktreePath = [IO.Path]::GetFullPath($Worktree)
+    $resultFullPath = [IO.Path]::GetFullPath($ResultPath)
+    $headResult = Invoke-FactoryNativeProcess -Command "git" -Arguments @("-C", $worktreePath, "rev-parse", "HEAD")
+    if ([int]$headResult.exitCode -ne 0 -or -not [string]$headResult.stdout) {
+        throw "Cannot resolve the $Scope candidate commit before isolated test setup."
+    }
+    $candidateCommit = ([string]$headResult.stdout).Trim()
+    Remove-Item -LiteralPath $resultFullPath -Force -ErrorAction SilentlyContinue
+    $values = @{
+        "{repository}" = $repositoryPath
+        "{worktree}" = $worktreePath
+        "{scope}" = $Scope
+        "{taskId}" = $TaskId
+        "{commit}" = $candidateCommit
+        "{resultPath}" = $resultFullPath
+    }
+    $arguments = @($settings.arguments | ForEach-Object {
+        $value = [string]$_
+        foreach ($entry in $values.GetEnumerator()) { $value = $value.Replace([string]$entry.Key, [string]$entry.Value) }
+        $value
+    })
+    $run = Invoke-FactoryNativeProcess -Command ([string]$settings.command) -Arguments $arguments -WorkingDirectory $worktreePath
+    if ([int]$run.exitCode -ne 0) {
+        $detail = (Get-FactoryBoundedTextTail -Value (Remove-FactoryAnsiSequences -Value ([string]$run.output)) -MaximumLength 8192).Trim()
+        throw "Isolated $Scope test setup failed: $detail"
+    }
+    if (-not (Test-Path -LiteralPath $resultFullPath -PathType Leaf)) {
+        throw "Isolated $Scope test setup returned successfully without its required result file: $resultFullPath"
+    }
+    $result = Read-FactoryJson -Path $resultFullPath
+    if ([int](Get-FactoryNestedValue -Target $result -Name "version" -Default 0) -ne 1) {
+        throw "Isolated $Scope test setup returned an unsupported result version."
+    }
+    $reportedWorktreeText = [string](Get-FactoryNestedValue -Target $result -Name "candidateWorktree" -Default "")
+    $reportedCommit = [string](Get-FactoryNestedValue -Target $result -Name "candidateCommit" -Default "")
+    $wordpressRootText = [string](Get-FactoryNestedValue -Target $result -Name "wordpressRoot" -Default "")
+    $wordpressConfigText = [string](Get-FactoryNestedValue -Target $result -Name "wordpressConfigPath" -Default "")
+    $loadedCodePathText = [string](Get-FactoryNestedValue -Target $result -Name "loadedCodePath" -Default "")
+    if (-not $reportedWorktreeText -or -not $reportedCommit -or -not $wordpressRootText -or -not $wordpressConfigText -or -not $loadedCodePathText) {
+        throw "Isolated $Scope test setup must report candidateWorktree, candidateCommit, wordpressRoot, wordpressConfigPath, and loadedCodePath."
+    }
+    $reportedWorktree = [IO.Path]::GetFullPath($reportedWorktreeText)
+    $wordpressRoot = [IO.Path]::GetFullPath($wordpressRootText)
+    $wordpressConfigPath = [IO.Path]::GetFullPath($wordpressConfigText)
+    $loadedCodePath = [IO.Path]::GetFullPath($loadedCodePathText)
+    if (-not (Test-FactorySamePath -Left $reportedWorktree -Right $worktreePath) -or $reportedCommit -ne $candidateCommit) {
+        throw "Isolated $Scope test setup did not attest the exact candidate worktree and commit."
+    }
+    if (-not (Test-Path -LiteralPath $wordpressRoot -PathType Container)) {
+        throw "Isolated $Scope test setup reported a missing WordPress root: $wordpressRoot"
+    }
+    $wordpressRootPrefix = $wordpressRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (
+        -not (Test-Path -LiteralPath $wordpressConfigPath -PathType Leaf) -or
+        -not $wordpressConfigPath.StartsWith($wordpressRootPrefix, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw "Isolated $Scope test setup did not provide a config file inside its WordPress root: $wordpressConfigPath"
+    }
+    $worktreePrefix = $worktreePath.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not (Test-FactorySamePath -Left $loadedCodePath -Right $worktreePath) -and
+        -not $loadedCodePath.StartsWith($worktreePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Isolated $Scope tests would load code outside the candidate worktree: $loadedCodePath"
+    }
+    if (-not (Test-Path -LiteralPath $loadedCodePath)) {
+        throw "Isolated $Scope test setup reported a missing candidate code path: $loadedCodePath"
+    }
+    if (Test-FactorySamePath -Left $wordpressRoot -Right $repositoryPath) {
+        throw "Isolated $Scope test setup reused the shared repository as its WordPress root."
+    }
+    $reportedEnvironment = Get-FactoryNestedValue -Target $result -Name "environment"
+    $verifiedEnvironment = [ordered]@{}
+    if ($null -ne $reportedEnvironment) {
+        foreach ($property in @($reportedEnvironment.PSObject.Properties)) {
+            $name = [string]$property.Name
+            $value = [string]$property.Value
+            if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$' -or $name -match '^(?i:PATH|PATHEXT|SystemRoot|ComSpec|CLAUDE_FACTORY_.+)$') {
+                throw "Isolated $Scope test setup returned unsafe environment variable '$name'."
+            }
+            if ($value.Length -gt 8192 -or $value.IndexOf([char]0) -ge 0) {
+                throw "Isolated $Scope test setup returned an unsafe value for '$name'."
+            }
+            $verifiedEnvironment[$name] = $value
+        }
+    }
+    if ($verifiedEnvironment.Count -eq 0) {
+        throw "Isolated $Scope test setup must return environment variables that bind test commands to the candidate-specific WordPress root and config."
+    }
+    return [pscustomobject][ordered]@{
+        enabled = $true
+        scope = $Scope
+        candidateWorktree = $worktreePath
+        candidateCommit = $candidateCommit
+        wordpressRoot = $wordpressRoot
+        wordpressConfigPath = $wordpressConfigPath
+        loadedCodePath = $loadedCodePath
+        environment = [pscustomobject]$verifiedEnvironment
+        summary = [string](Get-FactoryNestedValue -Target $result -Name "summary" -Default "Candidate-specific test environment verified.")
+    }
 }
 
 function Get-FactoryTestDatabaseSettings {

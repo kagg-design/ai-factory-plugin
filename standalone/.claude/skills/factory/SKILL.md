@@ -61,7 +61,8 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory go <id> [--direct] approve, optionally skipping AI review
   !factory hold <id>       retain task on hold
   !factory retry <id>      retry a recoverable worker/launch failure
-  !factory wait [seconds]  wait until operator action is ready
+  !factory wait [seconds] [--cursor REV]
+                           wait for a new attention edge
   !factory reject <id>     preview; add -Yes or -Keep
   !factory cleanup <id>    remove published artifacts
   !factory concurrency [N] show or change worker limit
@@ -72,6 +73,8 @@ Fast local commands (prefix with !; no AI interpretation)
 PowerShell entry point (outside Claude)
   factory start [-Agent]   open/reuse orchestrator + scheduler; select workers
   factory restart          restart orchestrator; resume the same conversation
+  factory agents           open the shared Codex session dashboard
+  factory codex-server     inspect/control the shared Codex app-server
   factory paths|config     inspect private project runtime
   factory runtime          show placement; migrate only while fully stopped
   factory scheduler        native process status/control
@@ -87,7 +90,8 @@ Open and understand
   inspect <id>             full task details
   preview <id>             run Laravel/Vite from that worktree in a browser
   transcript <id>          worker conversation summary
-  wait [seconds]           block natively until action is required
+  wait [seconds] [--cursor REV]
+                           block natively until a new edge is ready
 
 Prepare and decide
   sync <id>                update worktree from development
@@ -152,6 +156,29 @@ This differs from `rotate`: `restart` preserves the current conversation and
 only replaces its process, while `rotate` deliberately creates a fresh
 conversation from a durable handoff. If a rotation is already pending,
 `restart` must refuse until the operator either cancels or activates it.
+
+### Codex shared app-server
+
+Codex orchestrators attach through one persistent loopback app-server per
+Factory runtime home. The server owns the thread while terminal, Desktop,
+Remote phone, and the Codex agents dashboard act as clients. Startup reports
+the Remote state; only `connected` confirms that the phone can reach this
+server. A non-connected Remote state is not a local Factory failure.
+
+From a separate PowerShell window, the operator can run:
+
+```powershell
+factory agents
+factory codex-server status
+factory codex-server start
+factory codex-server restart
+factory codex-server stop
+```
+
+`factory agents` is interactive and must not be launched as a nested
+orchestrator command. Server stop/restart disconnects every Codex Factory TUI
+using the same runtime home, but does not stop schedulers, workers, tasks, or
+worktrees. Never stop or restart it merely to inspect status.
 
 ### `rotate`
 
@@ -542,8 +569,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 The bundled script requires a clean, idle `awaiting-review` or `held` task with
 one validated single-parent task commit. It fetches the configured development
 branch and rebases that one commit onto it. A conflict is aborted and reported,
-leaving the original branch intact. The operator or worker may then resolve and
-rebase the same recorded worker branch manually. `finalize` accepts that clean
+leaving the original branch intact. A worker's Git shim continues to block
+direct `git rebase`; the sanctioned script resolves verified real Git only
+after task/worktree/lease validation. The operator may then resolve the same
+recorded worker branch manually, or the worker may produce a clean replacement
+commit without bypassing the shim. `finalize` accepts that clean
 replacement HEAD only when it is a single-parent commit, the current configured
 development base is its ancestor, and it is exactly one commit above that base.
 A successful rebase changes the SHA, clears stale review and approval, and
@@ -685,7 +715,9 @@ the previous worker session, preserves its branch, worktree, commit, and result,
 clears review and approval, and queues a new attempt. The launcher writes the
 findings verbatim into the durable worker prompt, tells the worker to amend the
 existing one task commit, and clears `pendingInstructions` only after that
-prompt exists. Resume the native scheduler after the action succeeds. Do not
+replacement session is durably recorded. If launch fails before a session is
+saved, use the narrow `retry` recovery described below; it preserves the exact
+commit, result, worktree, and undelivered instructions. Resume the native scheduler after the action succeeds. Do not
 ask the operator to attach and paste the findings manually.
 
 `hold` preserves the worktree, commit, transcript, and session. It also accepts
@@ -810,15 +842,18 @@ This resumes orchestration, not a specific worker conversation.
 Run `task-action.ps1 -Action retry`. It accepts `blocked`, `failed`, `held` only
 when `holdReason` identifies a background session that stopped without a
 `FACTORY_RESULT`, and `starting`/`planning` when no session was recorded. It
-refuses tasks with a validated result/commit. A failed launch may lack a
-worktree; the other retry paths require their retained worktree. It clears
+refuses tasks with a validated result/commit except for the narrow failed
+rework-launch case: no recorded session, a matching retained commit/result,
+clean exact worker branch/worktree, `reworkRequestedAt`, undelivered
+`pendingInstructions`, and `launchFailedAt`. That case preserves all artifacts
+and queues redelivery. A failed launch may lack a worktree; the other retry paths require their retained worktree. It clears
 obsolete session/error/launch ownership fields, retains safe artifacts, and
 queues the task. Run `factory-scheduler.ps1 -Action resume` afterward. A manual
 `hold` is never retryable through this path.
 
-### `wait [timeout-seconds]`
+### `wait [timeout-seconds] [--cursor <revision>]`
 
-Run native `factory wait [timeout-seconds]`. It blocks without AI and without
+Run native `factory wait [timeout-seconds] [--cursor <revision>]`. It blocks without AI and without
 tailing scheduler logs until input, a closed-session review, a blocker, a
 failure, a stale sessionless launch, or a dead scheduler with runnable work
 requires the operator. Omit the timeout (or use zero) to wait indefinitely.
@@ -828,6 +863,12 @@ current approved review that is waiting only for the human operator's `go`.
 That decision remains visible as `GO` in `factory status`. Native callers that
 explicitly need human-decision notifications may use the script's
 `-IncludeOperatorApproval` switch.
+Default waits acknowledge returned attention revisions and do not replay the
+same active failure. A stateless consumer saves the returned cursor and passes
+it back with `--cursor`. For Codex, each new AI-actionable edge is forwarded
+once through the Factory-managed shared app-server to the saved orchestrator;
+the acknowledgement survives restarts. Human input and GO remain human-owned
+unless private `orchestrator.autoGoApprovedReviews` is explicitly true.
 
 ### `runtime [status|migrate]`
 

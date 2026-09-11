@@ -76,8 +76,10 @@ can run separate factory sessions at the same time.
 startup reuses the selected runtime's exact stored conversation. Claude may
 attach an existing background Agent View row. Codex creates an app-backed task
 named `Factory Orchestrator - <repository>`, so the same conversation appears
-in Codex Desktop and on connected phone clients, then resumes that exact thread
-in the terminal. Use `-New` only when a genuinely new conversation is required.
+in Codex Desktop and on connected phone clients. Factory keeps one persistent
+loopback app-server per runtime home and connects the terminal to that server,
+so the terminal and Remote are clients of the same thread rather than competing
+JSONL writers. Use `-New` only when a genuinely new conversation is required.
 
 ## Fast local commands
 
@@ -88,6 +90,8 @@ operations that do not need AI interpretation:
 cd D:\Projects\MotiveHR
 factory start
 factory restart
+factory agents
+factory codex-server status
 factory status
 factory inspect 1216632072822682
 factory preview 1216632072822682
@@ -267,11 +271,23 @@ user-level Codex skill directory. The link points back to this plugin; no
 commands use `factory status`, `factory new`, `factory review <id>`, and so on;
 `$factory` is an internal explicit skill name, not the operator interface.
 
-Codex orchestrator bootstrap uses a bounded one-shot app-server connection to
-create, name, and validate an app-visible task before attaching the terminal
-TUI. A pre-upgrade standalone orchestrator ID is retained in the versioned
-identity while the first post-upgrade start creates one app-backed replacement.
-Later starts validate the saved task and never silently create a duplicate.
+Codex orchestration uses one persistent app-server bound only to loopback and
+shared by Factory projects under the same runtime home. Factory records its
+endpoint, PID, and process start time under `<runtime-home>\codex-app-server`,
+reuses a healthy server, enables Codex Remote on it, and attaches the terminal
+with `codex --remote <endpoint> resume ...`. A pre-upgrade standalone
+orchestrator ID is retained while the first app-backed start creates one
+replacement. Existing one-shot app-backed identities are upgraded in place;
+later starts validate the saved task and never silently create a duplicate.
+
+Use `factory agents` in a second PowerShell window to open Codex's shared
+session dashboard. `factory codex-server status` shows the endpoint and exact
+process record; `start`, `stop`, and `restart` explicitly control it. Stopping
+the shared server disconnects every Codex Factory TUI using the same runtime
+home. Phone access requires startup to report `Codex Remote: connected`;
+`connecting` or `errored` does not prevent local terminal use but does not
+guarantee mobile access.
+
 Codex workers use the supported resumable session interfaces. Worker
 thread UUID, PID, transcript, and exact resume command are stored in private
 runtime state. They do not appear in Claude Agent View. Use `factory chat
@@ -520,7 +536,11 @@ Other decisions:
 `rework` stops the previous worker session, preserves its branch, worktree,
 commit, and result, clears review and approval, and queues a new attempt. The
 launcher writes the findings and retained commit into the new worker prompt,
-then clears the pending delivery marker. `release` is the explicit recovery
+then clears the pending delivery marker only after the replacement session has
+been durably recorded. If that launch fails before a session exists, `factory
+retry <task-id>` narrowly requeues the same rework delivery while retaining the
+clean exact commit, result, worktree, and instructions. A generic failed task
+that already has a validated commit/result remains non-retryable. `release` is the explicit recovery
 path for a saved session identity that is no longer present in the runtime; it
 restores the state implied by validated artifacts without changing Git.
 
@@ -619,7 +639,7 @@ doctor` reports both fresh and timed-out blocked worker sessions.
 /factory reject <task-id> [reason] [--yes|--keep]
 /factory cleanup <task-id>
 /factory retry <task-id>
-/factory wait [timeout-seconds]
+/factory wait [timeout-seconds] [--cursor <revision>]
 /factory rotate
 /factory pause
 /factory resume
@@ -680,6 +700,12 @@ and keeps its daemon ownership. Its normal exponential backoff still applies,
 and the first successful later write preserves the pending failure time; mutex
 contention alone is never a `fatal scheduler error`.
 
+Scheduler child commands publish their exit code and output through atomic
+files. The scheduler waits only for the direct launcher process, not for pipe
+EOF that a detached worker descendant might retain. A single tick can therefore
+continue launching until all free coding slots are filled while the workers
+remain alive.
+
 `factory wait` is the native, log-free notification boundary. It reads the
 atomic state snapshot until input, a closed-session review, a blocker, a
 failure, a stale sessionless launch, or a dead scheduler with runnable work
@@ -687,7 +713,17 @@ needs the operator. An optional timeout returns cleanly when nothing changes.
 It deliberately does not signal for `awaiting-review` while that task's worker
 session remains live. It also does not wake the orchestrator after an approved
 review is already recorded; that human-only `go` decision remains visible in
-`factory status`.
+`factory status`. Attention is edge-triggered and revisioned: default waits
+durably acknowledge a returned edge, while `--cursor <revision>` lets a
+stateless consumer request only later journal entries and retain the returned
+cursor for its next call.
+
+With a Codex runtime, the native scheduler also forwards each new
+AI-actionable edge once to the saved orchestrator through the Factory-managed
+shared app-server. Acknowledgement is persisted before the continuation is
+sent, preventing restart/retry loops. Input and GO decisions remain human-only.
+The private config may explicitly set
+`orchestrator.autoGoApprovedReviews=true`; it is `false` by default.
 
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,
@@ -705,6 +741,10 @@ the global mutex is reacquired only for guarded atomic state updates.
 The preparation marker records the exact remote development SHA. Running
 `sync` again after that tip moves re-rebases the task onto the new tip instead
 of trusting the older marker.
+Worker shells still receive the Git shim and cannot run `git rebase` directly.
+The sanctioned sync path validates its task, exact clean worktree, branch, and
+test lease first, then invokes a verified real Git executable for its controlled
+fetch/rebase sequence.
 
 Worktree creation, task synchronization, and both publication candidate
 preparations align dependencies with the lock files in that exact worktree.
@@ -960,6 +1000,35 @@ releases. Review uses phase `review`. Native publication acquires one
 higher-priority lease for both its integrator and release check sets; those two
 sets may run in parallel with each other because they belong to the same
 publication. Laravel inference uses the bounded commands described above.
+
+### Candidate-specific WordPress test setup
+
+WordPress integration suites must not silently load a plugin from the shared
+repository checkout. A repository may opt into a private setup hook:
+
+```json
+{
+  "isolatedTestSetup": {
+    "enabled": true,
+    "command": "powershell",
+    "arguments": [
+      "-NoProfile", "-File", "tools/factory-wordpress-tests.ps1",
+      "-Worktree", "{worktree}", "-Scope", "{scope}",
+      "-Commit", "{commit}", "-ResultPath", "{resultPath}"
+    ]
+  }
+}
+```
+
+The trusted hook provisions a candidate-specific WordPress root and config,
+then writes result JSON version 1 containing `candidateWorktree`,
+`candidateCommit`, `wordpressRoot`, `wordpressConfigPath`, `loadedCodePath`,
+and an `environment` object for the test commands. Factory verifies the exact
+candidate commit, requires the config inside the reported WordPress root,
+requires loaded code to be the integrator/release worktree, rejects the shared
+repository checkout, and passes only restricted environment variables to the
+actual check processes. The hook is disabled by default; an enabled but invalid
+hook fails `factory doctor` and causes the pipeline to fail closed.
 
 ### Isolated PostgreSQL test databases
 

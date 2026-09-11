@@ -30,6 +30,28 @@ function Test-FactoryPathInsideRoot {
     )
 }
 
+function Resolve-FactorySyncGit {
+    $candidate = ([string]$env:CLAUDE_FACTORY_REAL_GIT).Trim()
+    if ($candidate) {
+        $candidate = [IO.Path]::GetFullPath($candidate)
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            throw "CLAUDE_FACTORY_REAL_GIT does not identify an existing file: $candidate"
+        }
+    } else {
+        $commandName = if ($env:OS -eq "Windows_NT") { "git.exe" } else { "git" }
+        $resolved = Get-Command $commandName -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $candidate = if ([string]$resolved.Source) { [string]$resolved.Source } else { [string]$resolved.Path }
+    }
+    if (-not $candidate -or ($env:OS -eq "Windows_NT" -and [IO.Path]::GetExtension($candidate) -ne ".exe")) {
+        throw "Authorized sync requires a real Git executable, not a command shim."
+    }
+    $version = Invoke-FactoryNativeProcess -Command $candidate -Arguments @("--version")
+    if ([int]$version.exitCode -ne 0 -or [string]$version.stdout -notmatch '^git version\s+') {
+        throw "Authorized sync could not verify the configured Git executable '$candidate'."
+    }
+    return [IO.Path]::GetFullPath($candidate)
+}
+
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
@@ -163,22 +185,25 @@ try {
             throw "Sync test report '$resolvedTestsPath' field 'tests' requires at least one passed check."
         }
 
+        # All task, worktree, and lease validation is complete before the
+        # control plane bypasses the worker PATH shim.
+        $controlGit = Resolve-FactorySyncGit
         $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
         $development = if ([string]$config.developmentBranch) { [string]$config.developmentBranch } else { "develop" }
         $baseRef = "$remote/$development"
-        & git -C $repositoryRoot fetch $remote $development 1> $null
+        & $controlGit -C $repositoryRoot fetch $remote $development 1> $null
         if ($LASTEXITCODE -ne 0) { throw "Failed to fetch '$baseRef' while finalizing sync." }
-        $baseCommit = (& git -C $repositoryRoot rev-parse "$baseRef^{commit}" 2>$null).Trim()
+        $baseCommit = (& $controlGit -C $repositoryRoot rev-parse "$baseRef^{commit}" 2>$null).Trim()
         if (-not $baseCommit) { throw "Configured development branch does not exist: $baseRef" }
-        & git -C $worktree merge-base --is-ancestor $baseCommit $head
+        & $controlGit -C $worktree merge-base --is-ancestor $baseCommit $head
         if ($LASTEXITCODE -ne 0) {
             throw "Sync candidate '$head' does not contain current development base '$baseCommit'."
         }
-        $parentLine = (& git -C $worktree rev-list --parents -n 1 $head 2>$null).Trim()
+        $parentLine = (& $controlGit -C $worktree rev-list --parents -n 1 $head 2>$null).Trim()
         if (($parentLine -split '\s+').Count -ne 2) {
             throw "Sync candidate '$head' is not a single-parent task commit."
         }
-        $commitCount = (& git -C $worktree rev-list --count "$baseRef..$head").Trim()
+        $commitCount = (& $controlGit -C $worktree rev-list --count "$baseRef..$head").Trim()
         if ([int]$commitCount -ne 1) {
             throw "Synchronized branch contains $commitCount task commits above '$baseRef'; expected one."
         }
@@ -257,6 +282,10 @@ try {
         throw "Task '$TaskId' has no worker result matching '$commit'."
     }
 
+    # Resolve the verified control-plane executable only after the caller has
+    # proven the task, worktree, branch, cleanliness, and exclusive test lease.
+    # Direct worker `git rebase` remains denied by codex-git-proxy.ps1.
+    $controlGit = Resolve-FactorySyncGit
     $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
     $development = if ([string]$config.developmentBranch) {
         [string]$config.developmentBranch
@@ -264,16 +293,16 @@ try {
         "develop"
     }
     $baseRef = "$remote/$development"
-    & git -C $repositoryRoot fetch $remote $development 1> $null
+    & $controlGit -C $repositoryRoot fetch $remote $development 1> $null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to fetch '$baseRef'."
     }
-    $baseCommit = (& git -C $repositoryRoot rev-parse "$baseRef^{commit}" 2>$null).Trim()
+    $baseCommit = (& $controlGit -C $repositoryRoot rev-parse "$baseRef^{commit}" 2>$null).Trim()
     if (-not $baseCommit) {
         throw "Configured development branch does not exist: $baseRef"
     }
 
-    & git -C $worktree merge-base --is-ancestor $baseCommit $commit
+    & $controlGit -C $worktree merge-base --is-ancestor $baseCommit $commit
     if ($LASTEXITCODE -eq 0) {
         $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task -AllowTaskOwnedSession)
         $preparation = Get-FactoryNestedValue -Target $task -Name "syncPreparation"
@@ -295,12 +324,12 @@ try {
         exit 0
     }
 
-    $parentLine = (& git -C $worktree rev-list --parents -n 1 $commit 2>$null).Trim()
+    $parentLine = (& $controlGit -C $worktree rev-list --parents -n 1 $commit 2>$null).Trim()
     if (($parentLine -split '\s+').Count -ne 2) {
         throw "Task commit '$commit' is not a single-parent commit and cannot be safely rebased."
     }
     $oldCommit = $commit
-    $oldParent = (& git -C $worktree rev-parse "$oldCommit^" 2>$null).Trim()
+    $oldParent = (& $controlGit -C $worktree rev-parse "$oldCommit^" 2>$null).Trim()
     $existingPreparation = Get-FactoryNestedValue -Target $task -Name "syncPreparation"
     $previousTests = if ($workerVerification) {
         @()
@@ -316,14 +345,14 @@ try {
         # that text as an error record even when Git succeeds, so the native
         # exit code must remain decisive.
         $ErrorActionPreference = "Continue"
-        $rebaseOutput = @(& git -c core.longpaths=true -C $worktree rebase --onto $baseRef $oldParent $branch 2>&1 | ForEach-Object { [string]$_ })
+        $rebaseOutput = @(& $controlGit -c core.longpaths=true -C $worktree rebase --onto $baseRef $oldParent $branch 2>&1 | ForEach-Object { [string]$_ })
         $rebaseExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     if ($rebaseExitCode -ne 0) {
-        $conflicts = @(& git -C $worktree diff --name-only --diff-filter=U 2>$null)
-        & git -c core.longpaths=true -C $worktree rebase --abort 1> $null 2> $null
+        $conflicts = @(& $controlGit -C $worktree diff --name-only --diff-filter=U 2>$null)
+        & $controlGit -c core.longpaths=true -C $worktree rebase --abort 1> $null 2> $null
         $details = if ($conflicts.Count -gt 0) {
             " Conflicts: $($conflicts -join ', ')."
         } else {
@@ -332,15 +361,15 @@ try {
         throw "Could not synchronize task '$TaskId' with '$baseRef'.$details"
     }
 
-    $newCommit = (& git -C $worktree rev-parse HEAD).Trim()
-    $commitCount = (& git -C $worktree rev-list --count "$baseRef..$newCommit").Trim()
+    $newCommit = (& $controlGit -C $worktree rev-parse HEAD).Trim()
+    $commitCount = (& $controlGit -C $worktree rev-list --count "$baseRef..$newCommit").Trim()
     if ([int]$commitCount -ne 1) {
         throw "Synchronized branch contains $commitCount task commits above '$baseRef'; expected one."
     }
     try {
         $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task -AllowTaskOwnedSession)
     } catch {
-        & git -c core.longpaths=true -C $worktree reset --hard $oldCommit 1> $null 2> $null
+        & $controlGit -c core.longpaths=true -C $worktree reset --hard $oldCommit 1> $null 2> $null
         throw
     }
     $changedFiles = @(Get-FactoryChangedFiles -Worktree $worktree -Commit $newCommit)

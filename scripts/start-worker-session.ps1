@@ -69,7 +69,7 @@ $existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -
             backgroundSession = $task.backgroundSession
             testDatabase = if ($null -ne $task.PSObject.Properties["testDatabase"]) { $task.testDatabase } else { $null }
         } | ConvertTo-Json -Depth 20
-        exit 0
+        return
     }
 
     $previousAttempts = if ($null -ne $task.attempts) { [int]$task.attempts } else { 0 }
@@ -314,26 +314,6 @@ $reworkInstruction
     $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($promptPath, $prompt, $utf8WithoutBom)
     $promptSha256 = Get-FactoryFileSha256 -Path $promptPath
-    if ($pendingInstructions) {
-        $promptMutex = $null
-        try {
-            $promptMutex = Enter-FactoryMutex -ProjectKey $context.projectKey
-            $promptState = Read-FactoryJson -Path $context.statePath
-            $promptTask = Get-FactoryTask -State $promptState -TaskId $TaskId
-            $stillPending = [string](Get-FactoryNestedValue -Target $promptTask -Name "pendingInstructions" -Default "")
-            $sameRequest = [string](Get-FactoryNestedValue -Target $promptTask -Name "reworkRequestedAt" -Default "") -eq $reworkRequestedAt
-            if ($stillPending -eq $pendingInstructions -and $sameRequest) {
-                Set-FactoryProperty -Target $promptTask -Name "pendingInstructions" -Value $null
-                Set-FactoryProperty -Target $promptTask -Name "reworkInstructionsDeliveredAt" -Value (Get-FactoryUtcTimestamp)
-                Set-FactoryProperty -Target $promptTask -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
-                Set-FactoryProperty -Target $promptState -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
-                Write-FactoryJsonAtomic -Path $context.statePath -Value $promptState
-            }
-        } finally {
-            Exit-FactoryMutex -Mutex $promptMutex
-        }
-    }
-
     $metadata = [ordered]@{
         taskId = $TaskId
         runtime = $workerRuntime
@@ -421,6 +401,14 @@ $reworkInstruction
             Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $launchCompletedAt
             Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
             Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+            if (
+                $pendingInstructions -and
+                [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "") -eq $pendingInstructions -and
+                [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -eq $reworkRequestedAt
+            ) {
+                Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
+                Set-FactoryProperty -Target $task -Name "reworkInstructionsDeliveredAt" -Value $launchCompletedAt
+            }
             Set-FactoryProperty -Target $task -Name "updatedAt" -Value $launchCompletedAt
             Set-FactoryProperty -Target $state -Name "updatedAt" -Value $launchCompletedAt
             Write-FactoryJsonAtomic -Path $context.statePath -Value $state
@@ -438,7 +426,7 @@ $reworkInstruction
             backgroundSession = $session
             testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
         } | ConvertTo-Json -Depth 20
-        exit 0
+        return
     }
 
     $permissionMode = if ([string]$config.workerPermissionMode) {
@@ -542,6 +530,14 @@ $reworkInstruction
         Set-FactoryProperty -Target $task -Name "launchCompletedAt" -Value $launchCompletedAt
         Set-FactoryProperty -Target $task -Name "launchProcessId" -Value $null
         Set-FactoryProperty -Target $task -Name "launchProcessStartTimeUtc" -Value $null
+        if (
+            $pendingInstructions -and
+            [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "") -eq $pendingInstructions -and
+            [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -eq $reworkRequestedAt
+        ) {
+            Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
+            Set-FactoryProperty -Target $task -Name "reworkInstructionsDeliveredAt" -Value $launchCompletedAt
+        }
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value $launchCompletedAt
         Set-FactoryProperty -Target $state -Name "agentResolutionCache" -Value ([pscustomobject]@{
             schemaVersion = 2

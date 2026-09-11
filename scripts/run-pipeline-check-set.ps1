@@ -31,6 +31,29 @@ if ($commands.Count -eq 0) { throw "Pipeline check input contains no commands." 
 $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $taskId
 $taskEventRoot = Join-Path ([string]$context.eventsPath) $safeTaskId
 New-Item -ItemType Directory -Path $taskEventRoot -Force | Out-Null
+$config = Read-FactoryJson -Path ([string]$context.configPath)
+$setupResultPath = Join-Path ([string]$context.sessionsPath) "$safeTaskId.$Scope-test-setup.$([Guid]::NewGuid().ToString('N')).json"
+$setup = $null
+try {
+    $setup = Invoke-FactoryIsolatedTestSetup `
+        -Config $config `
+        -RepositoryRoot ([string]$context.repositoryRoot) `
+        -Worktree $WorkingDirectory `
+        -Scope $Scope `
+        -TaskId $taskId `
+        -ResultPath $setupResultPath
+} finally {
+    Remove-Item -LiteralPath $setupResultPath -Force -ErrorAction SilentlyContinue
+}
+$setupEnvironment = @{}
+if ($null -ne $setup) {
+    $reportedEnvironment = Get-FactoryNestedValue -Target $setup -Name "environment"
+    if ($null -ne $reportedEnvironment) {
+        foreach ($property in @($reportedEnvironment.PSObject.Properties)) {
+            $setupEnvironment[[string]$property.Name] = [string]$property.Value
+        }
+    }
+}
 
 $results = New-Object System.Collections.Generic.List[object]
 $success = $true
@@ -49,7 +72,7 @@ foreach ($command in $commands) {
         "-WorkingDirectory", $WorkingDirectory,
         "-Command", $command,
         "-SkipContextInitialization"
-    )
+    ) -Environment $setupEnvironment
     $cleanOutput = Remove-FactoryAnsiSequences -Value ([string]$run.output)
     $cleanOutput = $cleanOutput.Replace([string][char]0, "")
     $outputPath = Join-Path $taskEventRoot ("pipeline-{0}-{1:D2}-{2}.log" -f $Scope, $commandIndex, [Guid]::NewGuid().ToString('N'))
@@ -80,5 +103,6 @@ foreach ($command in $commands) {
     scope = $Scope
     success = $success
     failure = $failure
+    setup = $setup
     tests = @($results | ForEach-Object { $_ })
 } | ConvertTo-Json -Depth 30

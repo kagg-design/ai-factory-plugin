@@ -288,6 +288,17 @@ $blockedWorkerDetail = if ($blockedWorkerTasks.Count -eq 0) {
 }
 Add-DoctorCheck -Name "blockedWorkerSessions" -Passed ($blockedWorkerTasks.Count -eq 0) -Severity "warning" -Detail $blockedWorkerDetail
 
+try {
+    $isolatedSetup = Get-FactoryIsolatedTestSetupSettings -Config $config
+    Add-DoctorCheck `
+        -Name "isolatedTestSetup" `
+        -Passed $true `
+        -Severity "info" `
+        -Detail $(if ($null -eq $isolatedSetup) { "disabled" } else { "enabled: $([string]$isolatedSetup.command); candidate attestation required" })
+} catch {
+    Add-DoctorCheck -Name "isolatedTestSetup" -Passed $false -Severity "required" -Detail $_.Exception.Message
+}
+
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $sessionMutex = New-Object System.Threading.Mutex($false, "Local\ClaudeFactorySession-$safeProjectKey")
 $factorySessionActive = $false
@@ -366,8 +377,44 @@ $schedulerDetail = if ($schedulerCommandPassed) {
 } else {
     ([string]$schedulerCheck.output -replace '[\r\n\t]+', ' ').Trim()
 }
-$schedulerPassed = $schedulerCommandPassed -and ($null -eq $schedulerInfo -or [string]$schedulerInfo.status -ne "failed")
+$schedulerPassed = $schedulerCommandPassed -and (
+    $null -eq $schedulerInfo -or
+    ([string]$schedulerInfo.status -ne "failed" -and -not [bool](Get-FactoryNestedValue -Target $schedulerInfo -Name "actionRequired" -Default $false))
+)
 Add-DoctorCheck -Name "scheduler" -Passed $schedulerPassed -Severity "warning" -Detail $schedulerDetail
+
+$nativeRunnableTasks = @($state.tasks | Where-Object {
+    [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -in @("queued", "approved")
+})
+$nativeRunnableDetail = if ($nativeRunnableTasks.Count -eq 0) {
+    "none"
+} else {
+    @($nativeRunnableTasks | ForEach-Object { "'$([string]$_.id)'/$([string]$_.status)" }) -join "; "
+}
+Add-DoctorCheck -Name "runnableNativeWork" -Passed $true -Severity "info" -Detail "$($nativeRunnableTasks.Count): $nativeRunnableDetail"
+
+$attentionEvents = @(Get-FactoryOperatorActionEvents -State $state -Config $config)
+$aiActions = @($attentionEvents | Where-Object { [bool](Get-FactoryNestedValue -Target $_ -Name "aiActionable" -Default $false) })
+$humanDecisions = @($attentionEvents | Where-Object { [bool](Get-FactoryNestedValue -Target $_ -Name "humanDecision" -Default $false) })
+$aiDetail = if ($aiActions.Count -eq 0) { "none" } else {
+    @($aiActions | ForEach-Object { "'$([string]$_.taskId)'/$([string]$_.kind): $([string]$_.reason)" }) -join "; "
+}
+$humanDetail = if ($humanDecisions.Count -eq 0) { "none" } else {
+    @($humanDecisions | ForEach-Object { "'$([string]$_.taskId)'/$([string]$_.kind): $([string]$_.reason)" }) -join "; "
+}
+Add-DoctorCheck -Name "aiActionsWaiting" -Passed ($aiActions.Count -eq 0) -Severity "warning" -Detail "$($aiActions.Count): $aiDetail"
+Add-DoctorCheck -Name "humanDecisionsWaiting" -Passed ($humanDecisions.Count -eq 0) -Severity "warning" -Detail "$($humanDecisions.Count): $humanDetail"
+
+$blockedTasks = @($state.tasks | Where-Object { [string](Get-FactoryNestedValue -Target $_ -Name "status" -Default "") -eq "blocked" })
+$blockedTaskDetail = if ($blockedTasks.Count -eq 0) { "none" } else {
+    @($blockedTasks | ForEach-Object {
+        $reason = [string](Get-FactoryNestedValue -Target $_ -Name "error" -Default (
+            Get-FactoryNestedValue -Target $_ -Name "holdReason" -Default "reason unavailable"
+        ))
+        "'$([string]$_.id)': $reason"
+    }) -join "; "
+}
+Add-DoctorCheck -Name "blockedTasks" -Passed ($blockedTasks.Count -eq 0) -Severity "warning" -Detail "$($blockedTasks.Count): $blockedTaskDetail"
 
 $requiredFailures = @($checks | Where-Object { $_.severity -eq "required" -and -not $_.passed })
 $warnings = @($checks | Where-Object { $_.severity -eq "warning" -and -not $_.passed })
