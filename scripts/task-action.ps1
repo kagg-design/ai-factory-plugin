@@ -291,15 +291,15 @@ try {
                 } | Select-Object -First 1)
                 $liveSession = if ($liveSession.Count -gt 0) { $liveSession[0] } else { $null }
             }
+            $validatedResult = Test-FactoryTaskHasValidatedResult -Task $task
             $liveState = [string](Get-FactoryNestedValue -Target $liveSession -Name "state" -Default (Get-FactoryNestedValue -Target $liveSession -Name "status" -Default ""))
-            if ($null -ne $liveSession -and $liveState -notin @("stopped", "done", "failed")) {
+            if (
+                $null -ne $liveSession -and
+                $liveState -notin @("stopped", "done", "failed") -and
+                -not $validatedResult
+            ) {
                 throw "Task '$TaskId' session is still reported as '$liveState'; use chat, answer, or rework instead of release."
             }
-            $validatedResult = (
-                [string]$task.commit -and
-                $null -ne $task.workerResult -and
-                [string](Get-FactoryNestedValue -Target $task.workerResult -Name "commit" -Default "") -eq [string]$task.commit
-            )
             $hasReworkDelivery = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -and
                 [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")
             $restoredStatus = if ($validatedResult) {

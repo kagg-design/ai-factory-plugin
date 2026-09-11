@@ -278,8 +278,8 @@ function Get-FactoryLaunchedWorkerCount {
     # A task state is not proof that a worker exists. In particular, a launcher
     # can be terminated after writing `starting` but before recording a session.
     # Count only recorded, non-terminal sessions so an orphaned launch cannot
-    # permanently consume capacity. An awaiting-review worker continues to own
-    # its slot until the runtime confirms that the session has closed.
+    # permanently consume capacity. A validated worker result releases its slot
+    # even when the runtime keeps the completed conversation resident.
     return @(
         $State.tasks | Where-Object {
             [string]$_.status -in @("starting", "planning", "awaiting-input", "running", "awaiting-review") -and
@@ -295,9 +295,22 @@ function Test-FactoryTaskHasRecordedSession {
     return $null -ne $session -and [string](Get-FactoryNestedValue -Target $session -Name "id" -Default "")
 }
 
+function Test-FactoryTaskHasValidatedResult {
+    param([Parameter(Mandatory = $true)]$Task)
+
+    $commit = [string](Get-FactoryNestedValue -Target $Task -Name "commit" -Default "")
+    $workerResult = Get-FactoryNestedValue -Target $Task -Name "workerResult"
+    return (
+        [bool]$commit -and
+        $null -ne $workerResult -and
+        [string](Get-FactoryNestedValue -Target $workerResult -Name "commit" -Default "") -eq $commit
+    )
+}
+
 function Test-FactoryTaskHasActiveSession {
     param([Parameter(Mandatory = $true)]$Task)
 
+    if (Test-FactoryTaskHasValidatedResult -Task $Task) { return $false }
     if (-not (Test-FactoryTaskHasRecordedSession -Task $Task)) { return $false }
     $session = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
     $sessionState = [string](Get-FactoryNestedValue -Target $session -Name "state" -Default (

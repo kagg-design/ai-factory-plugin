@@ -52,6 +52,7 @@ public static class FakeClaude
         public string Cwd;
         public string Name;
         public string State;
+        public string Status;
         public bool HasPid;
         public string TranscriptPath;
     }
@@ -118,12 +119,13 @@ public static class FakeClaude
 
     private static string SessionJson(SessionRow row)
     {
+        string status = String.IsNullOrEmpty(row.Status) ? row.State : row.Status;
         string pid = row.HasPid ? "\"pid\":4242," : "";
         string transcript = String.IsNullOrEmpty(row.TranscriptPath) ? "" :
             ",\"transcriptPath\":\"" + Json(row.TranscriptPath) + "\",\"lastAssistantMessage\":\"live\"";
         return "{" + pid + "\"id\":\"" + Json(row.Id) + "\",\"sessionId\":\"" +
             Json(row.SessionId) + "\",\"state\":\"" + Json(row.State) +
-            "\",\"status\":\"" + Json(row.State) + "\",\"kind\":\"background\",\"name\":\"" +
+            "\",\"status\":\"" + Json(status) + "\",\"kind\":\"background\",\"name\":\"" +
             Json(row.Name) + "\",\"cwd\":\"" + Json(row.Cwd) + "\"" + transcript + "}";
     }
 
@@ -166,6 +168,7 @@ public static class FakeClaude
             }
             Dictionary<string, SessionRow> sessions = ReadSessions(rawCwd);
             string status = Env("CLAUDE_FACTORY_TEST_AGENT_STATUS");
+            string liveStatus = Env("CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS");
             string liveTerminalId = Env("CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID");
             List<string> jsonRows = new List<string>();
             jsonRows.Add("{\"sessionId\":\"interactive-session\",\"status\":\"idle\",\"kind\":\"interactive\",\"name\":\"unrelated interactive session\",\"cwd\":\"" + cwd + "\"}");
@@ -176,6 +179,7 @@ public static class FakeClaude
             foreach (SessionRow row in sessions.Values)
             {
                 if (!String.IsNullOrEmpty(status) && row.Id == "test1234") row.State = status;
+                if (!String.IsNullOrEmpty(liveStatus) && row.Id == "test1234") row.Status = liveStatus;
                 if (row.Id == liveTerminalId && row.State != "stopped") { row.State = "done"; row.HasPid = true; }
                 jsonRows.Add(SessionJson(row));
             }

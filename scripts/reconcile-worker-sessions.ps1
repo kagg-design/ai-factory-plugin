@@ -445,13 +445,7 @@ try {
             Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value ([string]$latestEvent.capturedAt)
         } elseif ($null -ne $sessionRow -or $sessionMarkedMissing) {
             $sessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
-            $validatedArtifacts = (
-                [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "") -and
-                $null -ne (Get-FactoryNestedValue -Target $task -Name "workerResult") -and
-                [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "workerResult") -Name "commit" -Default "") -eq
-                    [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "")
-            )
-            if ($validatedArtifacts) {
+            if (Test-FactoryTaskHasValidatedResult -Task $task) {
                 # Validated Git artifacts outrank a lagging or vanished session row.
             } elseif ($sessionState -eq "working" -and [string]$task.status -in @("starting", "planning")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value $(if ([string]$task.startMode -eq "interactive") { "planning" } else { "running" })

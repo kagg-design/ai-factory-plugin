@@ -78,7 +78,11 @@ try {
             throw "Direct approval requires at least one passed worker check."
         }
     }
-    if ($null -ne $task.backgroundSession -and [string]$task.backgroundSession.state -eq "working") {
+    if (
+        $null -ne $task.backgroundSession -and
+        [string]$task.backgroundSession.state -eq "working" -and
+        -not (Test-FactoryTaskHasValidatedResult -Task $task)
+    ) {
         throw "Task '$TaskId' still has a working background session."
     }
     $worktree = [IO.Path]::GetFullPath([string]$task.worktree)

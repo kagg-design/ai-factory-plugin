@@ -2335,6 +2335,92 @@ try {
     Assert-Equal $resultNotesWithMarker ([string]$task.workerResult.notes) "Stop-hook input corrupted UTF-8 worker output or selected a marker inside notes."
     Assert-True (-not [string]$task.approval) "Task was approved automatically."
 
+    $env:CLAUDE_FACTORY_TEST_AGENT_STATUS = "working"
+    $env:CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS = "idle"
+    try {
+        $divergentAgentRows = (& $fakeClaude agents --json | Out-String) | ConvertFrom-Json
+        $divergentAgentRow = $null
+        foreach ($candidateAgentRow in $divergentAgentRows) {
+            if ($null -ne $candidateAgentRow.PSObject.Properties["id"] -and [string]$candidateAgentRow.id -eq "test1234") {
+                $divergentAgentRow = $candidateAgentRow
+                break
+            }
+        }
+        Assert-True ($null -ne $divergentAgentRow) "Fake Claude omitted the live worker fixture."
+        Assert-Equal "working" ([string]$divergentAgentRow.state) "Fake Claude did not expose the live worker state fixture."
+        Assert-Equal "idle" ([string]$divergentAgentRow.status) "Fake Claude did not expose an independently controlled live worker status."
+
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+        $validatedLiveState = Read-FactoryJson -Path $context.statePath
+        $validatedLiveTask = Get-FactoryTask -State $validatedLiveState -TaskId "test-task"
+        Assert-Equal "awaiting-review" ([string]$validatedLiveTask.status) "A live working/idle row overrode a validated review state."
+        Assert-True (Test-FactoryTaskHasValidatedResult -Task $validatedLiveTask) "The shared result predicate rejected matching commit evidence."
+        Assert-True (-not (Test-FactoryTaskHasActiveSession -Task $validatedLiveTask)) "A validated result still counted its resident worker conversation as active."
+
+        $validatedLiveCliStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+        Assert-True ($validatedLiveCliStatus.Contains("/factory review test-task")) "Factory status did not offer review for a validated result with a resident working/idle session."
+
+        $liveReviewPath = Join-Path $context.sessionsPath "test-task.live-review.json"
+        Write-FactoryJsonAtomic -Path $liveReviewPath -Value ([pscustomobject]@{
+            commit = $commit
+            verdict = "changes-required"
+            summary = "Synthetic review proves that validated Git evidence opens the review gate."
+            riskNotes = @("No publication is requested by this fixture.")
+        })
+        $liveReview = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "test-task" -ReviewPath $liveReviewPath) | ConvertFrom-Json
+        Assert-Equal "changes-required" ([string]$liveReview.verdict) "A resident working/idle worker session blocked review of its validated result."
+
+        $validatedRelease = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action release -TaskId "test-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+        Assert-Equal "awaiting-review" ([string]$validatedRelease.status) "Release did not restore the validated artifact-derived review state."
+        $validatedReleasedState = Read-FactoryJson -Path $context.statePath
+        $validatedReleasedTask = Get-FactoryTask -State $validatedReleasedState -TaskId "test-task"
+        Assert-True ($null -eq $validatedReleasedTask.backgroundSession) "Release retained the resident session identity for a validated result."
+
+        Set-FactoryProperty -Target $validatedReleasedTask -Name "backgroundSession" -Value $validatedLiveTask.backgroundSession
+        Set-FactoryProperty -Target $validatedReleasedTask -Name "review" -Value $null
+        $unvalidatedTask = New-FactoryTestTask -Id "unvalidated-live-task" -Title "Unvalidated live worker" -Now (Get-FactoryUtcTimestamp)
+        $unvalidatedTask.status = "awaiting-review"
+        $unvalidatedTask.branch = [string]$launch.branch
+        $unvalidatedTask.commit = $commit
+        $unvalidatedTask.worktree = [string]$launch.worktree
+        $unvalidatedTask.backgroundSession = [pscustomobject]@{
+            runtime = "claude"; id = "test1234"; sessionId = $fakeSessionId
+            name = "factory-unvalidated-live-task"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
+        }
+        $validatedReleasedState.tasks = @($validatedReleasedState.tasks) + @($unvalidatedTask)
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $validatedReleasedState
+
+        $unvalidatedReviewPath = Join-Path $context.sessionsPath "unvalidated-live-task.review.json"
+        Write-FactoryJsonAtomic -Path $unvalidatedReviewPath -Value ([pscustomobject]@{
+            commit = $commit
+            verdict = "changes-required"
+            summary = "This review must be refused without a validated worker result."
+            riskNotes = @()
+        })
+        $previousUnvalidatedErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $unvalidatedReviewOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\record-review.ps1") -Repository $repository -TaskId "unvalidated-live-task" -ReviewPath $unvalidatedReviewPath 2>&1) | Out-String
+            $unvalidatedReviewExit = $LASTEXITCODE
+            $unvalidatedReleaseOutput = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action release -TaskId "unvalidated-live-task" -ClaudeCommand $fakeClaude 2>&1) | Out-String
+            $unvalidatedReleaseExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousUnvalidatedErrorAction
+        }
+        Assert-True ($unvalidatedReviewExit -ne 0) "Review accepted a live task without a validated worker result."
+        Assert-True ($unvalidatedReviewOutput.Contains("has no validated worker result")) "Unvalidated review refusal changed its existing diagnostic."
+        Assert-True ($unvalidatedReleaseExit -ne 0) "Release accepted a live task without a validated worker result."
+        Assert-True ($unvalidatedReleaseOutput.Contains("session is still reported as 'working'")) "Unvalidated release did not preserve the live-session refusal."
+
+        $postLiveGateState = Read-FactoryJson -Path $context.statePath
+        $postLiveGateState.tasks = @($postLiveGateState.tasks | Where-Object { [string]$_.id -ne "unvalidated-live-task" })
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $postLiveGateState
+        Remove-Item -LiteralPath $unvalidatedReviewPath -Force -ErrorAction SilentlyContinue
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_STATUS -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS -ErrorAction SilentlyContinue
+    }
+
     $renameTaskId = "rename-result-task"
     $renameBranch = "factory-worker/$renameTaskId-a1"
     $renameWorktree = Join-Path ([string]$context.worktreeRoot) "worker-$renameTaskId-a1"
@@ -2406,9 +2492,18 @@ try {
     $operatorStateTask.worktree = [string]$launch.worktree
     $operatorState.tasks = @($operatorState.tasks) + @($operatorStateTask)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorState
-    $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
-    $operatorStateAfter = Read-FactoryJson -Path $context.statePath
-    Assert-Equal "awaiting-input" ([string](Get-FactoryTask -State $operatorStateAfter -TaskId "operator-state-task").status) "A working row overrode an operator-owned awaiting-input state."
+    $env:CLAUDE_FACTORY_TEST_AGENT_STATUS = "working"
+    $env:CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS = "idle"
+    try {
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+        $operatorStateAfter = Read-FactoryJson -Path $context.statePath
+        Assert-Equal "awaiting-input" ([string](Get-FactoryTask -State $operatorStateAfter -TaskId "operator-state-task").status) "A working/idle row overrode an operator-owned awaiting-input state."
+        $operatorInputCliStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
+        Assert-True ($operatorInputCliStatus.Contains("/factory chat operator-state-task")) "Factory status stopped presenting a working/idle interactive task as INPUT."
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_STATUS -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS -ErrorAction SilentlyContinue
+    }
     $operatorStateAfter.tasks = @($operatorStateAfter.tasks | Where-Object { [string]$_.id -ne "operator-state-task" })
     Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorStateAfter
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Made a matching task commit and validated worker result authoritative over a
+  resident Claude worker row. Such tasks now release their coding slot, appear
+  as ready for review, and permit review or explicit session release, while
+  live interactive and unvalidated workers remain protected.
 - Made scheduler child calls use atomic result/error files instead of redirected
   parent pipes, so detached Codex descendants cannot hold a tick open and one
   cycle can fill every free coding slot. Sanctioned sync now resolves a
