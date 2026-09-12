@@ -2,7 +2,9 @@
 param(
     [switch]$KeepTemp,
     [switch]$LedgerOnly,
-    [switch]$NativeLedgerRace
+    [switch]$NativeLedgerRace,
+    [switch]$ArchiveOnly,
+    [switch]$ArchiveBaseline
 )
 
 if ([string]$PSVersionTable.PSEdition -eq "Core") {
@@ -14,15 +16,22 @@ if ([string]$PSVersionTable.PSEdition -eq "Core") {
     if ($KeepTemp) { $desktopArguments += "-KeepTemp" }
     if ($LedgerOnly) { $desktopArguments += "-LedgerOnly" }
     if ($NativeLedgerRace) { $desktopArguments += "-NativeLedgerRace" }
+    if ($ArchiveOnly) { $desktopArguments += "-ArchiveOnly" }
+    if ($ArchiveBaseline) { $desktopArguments += "-ArchiveBaseline" }
     & $windowsPowerShell @desktopArguments
     exit $LASTEXITCODE
 }
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
+if (-not $LedgerOnly) {
+    & (Join-Path $PSScriptRoot "completed-archive.tests.ps1") -PluginRoot $pluginRoot -ObserveBaseline:$ArchiveBaseline
+    if ($ArchiveOnly) { return }
+}
 & (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
 if ($LedgerOnly) { return }
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
+. (Join-Path $pluginRoot "scripts\completed-archive.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 . (Join-Path $pluginRoot "scripts\worker-event.ps1")
@@ -2952,6 +2961,7 @@ try {
         $cleanupProcess.Dispose()
     }
     Assert-Equal "done" ([string]$cleanup.status) "Task cleanup did not mark the task done."
+    Assert-Equal 1 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'test-task' -and $_.outcome -eq 'production' }).Count) "Cleanup did not archive exactly one production summary."
     Assert-True (-not (Test-Path -LiteralPath $launch.worktree)) "Task cleanup did not remove the worker worktree."
     $remainingWorkerBranch = @(& git -C $repository branch --list ([string]$launch.branch))
     Assert-Equal 0 $remainingWorkerBranch.Count "Task cleanup did not remove the local worker branch."
@@ -3044,11 +3054,18 @@ try {
     }
     $staleCleanupTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
     Assert-Equal "cleaning" ([string]$staleCleanupTask.status) "Interrupted cleanup did not retain its recoverable in-progress state."
+    Assert-Equal 0 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'interrupted-cleanup-task' }).Count) "Interrupted cleanup archived a task before finalization."
     Assert-Equal $false (Test-FactoryRecordedProcess -ProcessRecord $staleCleanupTask.cleanup) "Interrupted cleanup still appeared to have a live owner."
     $interruptedCleanupStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status cleaning -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($interruptedCleanupStatus.Contains("CLEANUP INTERRUPTED") -and $interruptedCleanupStatus.Contains("factory cleanup interrupted-cleanup-task")) "Status did not expose the interrupted cleanup recovery command."
     $resumedCleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\cleanup-task.ps1") -Repository $repository -TaskId "interrupted-cleanup-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "done" ([string]$resumedCleanup.status) "Re-running an interrupted cleanup did not complete it."
+    $cleanupArchivePath = Get-FactoryCompletedArchivePath $context
+    Assert-Equal 1 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'interrupted-cleanup-task' }).Count) "Resumed cleanup did not append exactly one summary."
+    $cleanupArchiveHash = (Get-FileHash -LiteralPath $cleanupArchivePath).Hash
+    $repeatCleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot 'scripts\cleanup-task.ps1') -Repository $repository -TaskId 'interrupted-cleanup-task' -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal 'done' ([string]$repeatCleanup.status) 'Repeated cleanup failed.'
+    Assert-Equal $cleanupArchiveHash ((Get-FileHash -LiteralPath $cleanupArchivePath).Hash) 'Repeated cleanup changed the archive.'
     $resumedCleanupTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
     Assert-Equal "done" ([string]$resumedCleanupTask.status) "Interrupted cleanup recovery was not persisted."
     Assert-Equal "completed" ([string]$resumedCleanupTask.cleanup.status) "Interrupted cleanup recovery retained a stale running audit."
@@ -3617,6 +3634,8 @@ $result = [ordered]@{
     $kept = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "keep-task" -Reason "Needs an audit trail" -Keep -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
     Assert-Equal "rejected" ([string]$kept.status) "Reject --keep did not retain a rejected task."
+    Assert-Equal 1 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'keep-task' -and $_.outcome -eq 'rejected' }).Count) 'Reject --keep did not archive its rejected outcome.'
+    Assert-Equal 0 (@((Get-FactoryCompletedHistory $context (Read-FactoryJson $context.statePath) (Read-FactoryJson $context.configPath)).rows | Where-Object { $_.id -eq 'keep-task' }).Count) 'Rejected task entered completed history.'
     $keptState = Read-FactoryJson -Path $context.statePath
     $keptTask = @($keptState.tasks | Where-Object { [string]$_.id -eq "keep-task" })[0]
     Assert-Equal "Needs an audit trail" ([string]$keptTask.rejectionReason) "Reject --keep did not record its reason."
@@ -3671,6 +3690,7 @@ $result = [ordered]@{
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RM_FAIL -ErrorAction SilentlyContinue
     Assert-True ([bool]$discarded.removedFromState) "Confirmed reject did not forget the task."
+    Assert-Equal 1 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'discard-task' -and $_.outcome -eq 'rejected' }).Count) 'Discard removed a task without archiving its rejection.'
     Assert-True ([bool]$discarded.stoppedSession) "Confirmed reject did not stop the session."
     Assert-True ([bool]$discarded.removedTestDatabase) "Confirmed reject did not drop the isolated test database."
     Assert-Equal 1 (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE | Where-Object {

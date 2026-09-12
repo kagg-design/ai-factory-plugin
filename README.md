@@ -675,6 +675,19 @@ exact next command. Completed rows are collapsed by default. Use
 `/factory status done`, or `/factory status all` to filter the report. Status is
 read-only: it reports commands but never launches or changes a task by itself.
 
+The COMPLETED figure counts distinct task IDs across the summary archive and
+live completed tasks. Rejected outcomes are archived but excluded from that
+figure. History shows the newest 50 completion rows by default; use
+`factory status done --limit 25` (or `-Limit 25`) to change the limit. A reopened
+task can have several delivery rows while counting as one completed ID.
+
+Use `factory archive:seed --preview` to inspect recovery sources, then
+`factory archive:seed` to append missing summaries from retained snapshots,
+the legacy archive, live terminal tasks, and Git publication history. Repeating
+the command adds no duplicates and preserves all source files. Status explicitly
+reports when the archive is missing. See [completed history](docs/completed-task-archive.md)
+for the source-count discrepancy and recovery details.
+
 When the queue contains only tasks waiting for input or review, the native
 scheduler remains asleep and emits no AI messages. Adding a task, approving one,
 or explicitly resuming wakes it. Changing coding concurrency does not override

@@ -30,6 +30,7 @@
     "scripts/approve-direct.ps1",
     "scripts/capture-worker-stop.ps1",
     "scripts/cleanup-task.ps1",
+    "scripts/completed-archive.ps1",
     "scripts/codex-git-proxy.ps1",
     "scripts/codex-git.cmd",
     "scripts/codex-orchestrator.ps1",
@@ -56,6 +57,7 @@
     "scripts/scheduler-child-runner.ps1",
     "scripts/run-isolated-test-command.ps1",
     "scripts/set-concurrency.ps1",
+    "scripts/seed-completed-archive.ps1",
     "scripts/start-worker-session.ps1",
     "scripts/sync-task.ps1",
     "scripts/test-lease.ps1",
@@ -75,8 +77,10 @@
     "tests/FakePsql.cs",
     "tests/FakePreviewServer.ps1",
     "tests/run-tests.ps1",
+    "tests/completed-archive.tests.ps1",
     "tests/state-ledger.tests.ps1",
     "tests/scheduler-ledger.tests.ps1",
-    "docs/state-ledger-safety.md"
+    "docs/state-ledger-safety.md",
+    "docs/completed-task-archive.md"
   ]
 }

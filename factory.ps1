@@ -4,7 +4,7 @@ param(
     [ValidateSet(
         "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
         "cleanup", "concurrency", "completion", "start", "restart", "rotate", "agents", "codex-server", "paths", "runtime", "config",
-        "scheduler", "tick", "pause", "resume", "stop", "wait", "purge"
+        "scheduler", "tick", "pause", "resume", "stop", "wait", "purge", "archive:seed"
     )]
     [string]$Command = "help",
 
@@ -27,7 +27,7 @@ param(
                     "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
                     "cleanup", "concurrency", "completion", "start", "restart", "agents", "codex-server", "paths", "runtime",
                     "rotate", "config", "scheduler", "tick", "pause", "resume", "stop", "wait",
-                    "purge", "help"
+                    "purge", "archive:seed", "help"
                 )
             }
             "status" {
@@ -135,6 +135,7 @@ param(
     [switch]$Auto,
     [switch]$Direct,
     [switch]$NoOpen,
+    [ValidateRange(1, 1000)][int]$Limit = 50,
 
     [string]$Repository = (Get-Location).Path,
     [string]$ClaudeCommand = "claude",
@@ -163,6 +164,7 @@ try {
         -Auto:$Auto `
         -Direct:$Direct `
         -NoOpen:$NoOpen `
+        -Limit $Limit `
         -Repository $Repository `
         -ClaudeCommand $ClaudeCommand `
         -CodexCommand $CodexCommand `

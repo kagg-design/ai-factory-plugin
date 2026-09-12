@@ -12,6 +12,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "completed-archive.ps1")
 
 function Test-FactoryPathInsideRoot {
     param(
@@ -127,6 +128,8 @@ try {
         Set-FactoryProperty -Target $task -Name "rejectedAt" -Value $now
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+        $archiveRow = New-FactoryCompletedArchiveRow -Task $task -Outcome rejected
+        $null = Add-FactoryCompletedArchiveRows -Context $context -Rows @($archiveRow)
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
         [ordered]@{
             taskId = $TaskId
@@ -313,6 +316,8 @@ try {
     $remainingTasks = @($state.tasks | Where-Object { [string]$_.id -ne $TaskId })
     Set-FactoryProperty -Target $state -Name "tasks" -Value $remainingTasks
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+    $archiveRow = New-FactoryCompletedArchiveRow -Task $task -Outcome rejected
+    $null = Add-FactoryCompletedArchiveRows -Context $context -Rows @($archiveRow)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state -RemovedTaskIds @([string]$task.id)
 
     [ordered]@{

@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "completed-archive.ps1")
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -465,6 +466,9 @@ try {
         Set-FactoryProperty -Target $task -Name "testDatabase" -Value $null
         Set-FactoryProperty -Target $task -Name "updatedAt" -Value $now
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
+        $archiveOutcome = if ($developmentOnly) { 'development' } else { 'production' }
+        $archiveRow = New-FactoryCompletedArchiveRow -Task $task -Outcome $archiveOutcome
+        $null = Add-FactoryCompletedArchiveRows -Context $context -Rows @($archiveRow)
         Write-FactoryJsonAtomic -Path $context.statePath -Value $state
     } finally {
         Exit-FactoryMutex -Mutex $mutex

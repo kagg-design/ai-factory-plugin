@@ -15,6 +15,7 @@ param(
     [switch]$Auto,
     [switch]$Direct,
     [switch]$NoOpen,
+    [ValidateRange(1, 1000)][int]$Limit = 50,
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [string]$CodexCommand = "",
@@ -24,6 +25,7 @@ param(
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot "completed-archive.ps1")
 . (Join-Path $PSScriptRoot "orchestrator-session.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "codex-orchestrator.ps1")
@@ -263,6 +265,7 @@ function Get-CliTaskSourceInfo {
     $adapter = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $source -Name "adapter")
     $sourceId = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $source -Name "id")
     $url = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $Task -Name "url")
+    if (-not $url) { $url = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $source -Name "url") }
     return [pscustomobject]@{
         Adapter = $adapter
         Id = $sourceId
@@ -490,28 +493,30 @@ function Add-CliTaskTree {
 function Add-CliDoneTree {
     param(
         [Collections.Generic.List[string]]$Lines,
-        [object[]]$Tasks
+        [object[]]$Tasks,
+        [int]$Total,
+        [int]$RowCount
     )
 
-    $Lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) COMPLETED $($script:Tree.Horizontal) $($Tasks.Count)")
+    $Lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) COMPLETED $($script:Tree.Horizontal) $Total distinct task IDs")
     if ($Tasks.Count -eq 0) {
         $Lines.Add("$($script:Tree.Vertical)  $($script:Tree.Last)$($script:Tree.Horizontal) No completed tasks.")
         return
     }
+    $Lines.Add("$($script:Tree.Vertical)  Showing $($Tasks.Count) of $RowCount completion rows, newest first (limit $Limit).")
     for ($index = 0; $index -lt $Tasks.Count; $index++) {
         $task = $Tasks[$index]
         $id = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "id") -Fallback "unknown-id"
         $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
         $source = Get-CliTaskSourceInfo -Task $task
-        $summary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "production") -Name "summary")
-        if (-not $summary) { $summary = ConvertTo-CliLine -Value (Get-CliProperty -InputObject (Get-CliProperty -InputObject $task -Name "workerResult") -Name "notes") -Fallback "completed" }
         $taskConnector = if ($index -eq $Tasks.Count - 1) { "$($script:Tree.Last)$($script:Tree.Horizontal)" } else { "$($script:Tree.Branch)$($script:Tree.Horizontal)" }
         $detailPrefix = if ($index -eq $Tasks.Count - 1) { "$($script:Tree.Vertical)     " } else { "$($script:Tree.Vertical)  $($script:Tree.Vertical)  " }
         Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)  $taskConnector " -ContinuationPrefix $detailPrefix -Text "DONE $($script:Tree.Horizontal) $id $($script:Tree.Horizontal) $title"
         $sourceText = if ($source.IsLocal) { "Source: local / $($source.Id)" } else { "URL: $(if ($source.Url) { $source.Url } else { 'unavailable' })" }
         Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text $sourceText
-        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix$($script:Tree.Vertical)  " -Text "Summary: $summary"
-        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "Inspect: factory inspect $id"
+        $landedAt = ConvertTo-CliLine -Value $task.landedAt -Fallback 'date unavailable'
+        $commit = ConvertTo-CliLine -Value $task.commit -Fallback 'unavailable'
+        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$detailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$detailPrefix   " -Text "$($task.outcome) / $landedAt / commit $commit"
     }
 }
 
@@ -523,7 +528,7 @@ function Write-CliStatus {
     }
 
     $allTasks = @($State.tasks)
-    $doneTasks = @($allTasks | Where-Object { [string]$_.status -eq "done" })
+    $history = Get-FactoryCompletedHistory -Context $Context -State $State -Config $Config
     $unfinished = @($allTasks | Where-Object { [string]$_.status -ne "done" })
     $showDoneRows = $Filter -in @("done", "all")
     $selected = @(
@@ -677,10 +682,16 @@ function Write-CliStatus {
     }
 
     if ($showDoneRows) {
-        Add-CliDoneTree -Lines $lines -Tasks $doneTasks
+        Add-CliDoneTree -Lines $lines -Tasks @($history.rows | Select-Object -First $Limit) -Total $history.count -RowCount $history.rows.Count
     } else {
-        $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) COMPLETED $($script:Tree.Horizontal) $($doneTasks.Count)")
+        $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) COMPLETED $($script:Tree.Horizontal) $($history.count) distinct task IDs")
         $lines.Add("$($script:Tree.Vertical)  $($script:Tree.Last)$($script:Tree.Horizontal) History: factory status done")
+    }
+    if (-not $history.archiveExists) {
+        $lines.Add("$($script:Tree.Vertical)  Archive missing: showing $($history.count) live completed task IDs only. Run factory archive:seed.")
+    }
+    foreach ($warning in $history.warnings) {
+        Add-CliWrappedLine -Lines $lines -FirstPrefix "$($script:Tree.Vertical)  WARNING: " -ContinuationPrefix "$($script:Tree.Vertical)  " -Text $warning
     }
 
     $factoryMode = if ($paused) { "paused" } elseif ($active) { "enabled" } else { "idle" }
@@ -1722,7 +1733,8 @@ function Write-CliHelp {
             "  factory rotate [status|cancel]",
             "  factory agents",
             "  factory codex-server [status|start|stop|restart]",
-            "  factory status [state|all]",
+            "  factory status [state|all] [-Limit 50]",
+            "  factory archive:seed [--preview]",
             "  factory inspect <task-id>",
             "  factory preview [<task-id>|stop] [-NoOpen]",
             "  factory chat <task-id>",
@@ -1760,9 +1772,11 @@ function Write-CliHelp {
     switch ($topicKey) {
         "status" {
             @(
-                "factory status [state|all] [-NoReconcile]",
+                "factory status [state|all] [-NoReconcile] [-Limit 50]",
                 "Shows the actionable workflow tree from private factory state.",
-                "Default hides completed rows; use 'factory status done' for history.",
+                "COMPLETED counts distinct produced task IDs across archive and live state; rejected outcomes are excluded.",
+                "Default hides completed rows; use 'factory status done --limit 25' for newest history rows.",
+                "Missing archives are reported explicitly; use 'factory archive:seed' to recover history.",
                 "Reconciliation updates session-derived state first unless -NoReconcile is supplied."
             ) | Write-Output
         }
@@ -1958,12 +1972,35 @@ function Write-CliHelp {
                 "It inspects Git remote refs, verifies the selected Claude or Codex runtime, and may connect to the configured test database."
             ) | Write-Output
         }
+        "archive:seed" {
+            @(
+                "factory archive:seed [--preview]",
+                "Append summary rows from retained snapshots, the legacy archive, live terminal tasks, and all reachable publication fix/feat subjects.",
+                "Rows are unique by (id, commit); COMPLETED counts distinct produced IDs. All source files remain unchanged.",
+                "--preview reports candidates without appending. Repeating a seed adds only missing rows."
+            ) | Write-Output
+        }
         "help" { Write-CliHelp -Topic "" }
         default { throw "Unknown help topic '$Topic'. Run 'factory help' for available commands." }
     }
 }
 
 $normalizedCommand = $Command.ToLowerInvariant()
+if ($normalizedCommand -eq 'status') {
+    $statusTokens = @($Target) + @($Remaining)
+    $statusPositionals = New-Object 'Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $statusTokens.Count; $index++) {
+        if ($statusTokens[$index] -eq '--limit') {
+            if ($index + 1 -ge $statusTokens.Count -or -not [int]::TryParse($statusTokens[$index + 1], [ref]$Limit) -or $Limit -lt 1 -or $Limit -gt 1000) {
+                throw 'status --limit requires an integer from 1 to 1000.'
+            }
+            $index++
+        } elseif ($statusTokens[$index]) { $statusPositionals.Add($statusTokens[$index]) }
+    }
+    if ($statusPositionals.Count -gt 1) { throw 'status accepts one state filter and --limit <rows>.' }
+    $Target = if ($statusPositionals.Count) { $statusPositionals[0] } else { '' }
+    $Remaining = @()
+}
 $waitCursor = -1L
 if ($normalizedCommand -eq "wait") {
     $waitTokens = New-Object Collections.Generic.List[string]
@@ -2027,6 +2064,27 @@ if ($normalizedCommand -eq "completion") {
 }
 
 $context = Get-CliContext
+if ($normalizedCommand -eq 'archive:seed') {
+    $seedOptions = @(@($Target) + @($remainingValues) | Where-Object { $_ })
+    if ($seedOptions.Count -gt 1 -or ($seedOptions.Count -eq 1 -and $seedOptions[0] -notin @('--preview', 'preview')) -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {
+        throw 'archive:seed accepts only optional --preview.'
+    }
+    $seedArguments = @('-Repository', [string]$context.repositoryRoot)
+    if ($seedOptions.Count) { $seedArguments += '-Preview' }
+    $result = Invoke-CliJsonScript -ScriptName 'seed-completed-archive.ps1' -Arguments $seedArguments
+    $verb = if ($result.preview) { 'Would append' } else { 'Appended' }
+    Write-Output "$verb $($result.added) rows; $($result.rows) archive rows; $($result.completedDistinctIds) distinct completed task IDs; $($result.rejectedDistinctIds) rejected IDs."
+    foreach ($source in $result.sources) {
+        Write-Output "$($source.source): scanned $($source.scanned), eligible $($source.eligible), added $($source.added), duplicates $($source.duplicates), skipped $($source.skipped)."
+    }
+    $gitSource = @($result.sources | Where-Object { $_.source -like 'git:*' })[0]
+    Write-Output "Git subjects contain $($gitSource.distinctSubjectIds) distinct IDs; the archive preserves the union of source IDs, including snapshot IDs absent from those subjects."
+    Write-Output $result.gitHistory
+    Write-Output $result.legacyFiles
+    foreach ($warning in $result.warnings) { Write-Warning $warning }
+    Write-Output "Archive: $($result.archivePath)"
+    exit 0
+}
 if ($normalizedCommand -eq "codex-server") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "codex-server accepts only status, start, stop, or restart." }
     Write-CliCodexServer -Context $context -Action $Target
