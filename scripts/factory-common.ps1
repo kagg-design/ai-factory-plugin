@@ -1,5 +1,10 @@
 Set-StrictMode -Version 2.0
 
+# Keep ownership across repeated dot-sourcing; nested acquisitions are counted.
+if (-not (Get-Variable -Name FactoryStateMutexOwnership -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:FactoryStateMutexOwnership = @{}
+}
+
 $script:FactoryUtf8NoBom = New-Object Text.UTF8Encoding($false)
 try {
     # Claude Code and Git emit UTF-8. Windows PowerShell 5.1 otherwise decodes
@@ -150,7 +155,8 @@ function Read-FactoryJson {
 function Write-FactoryJsonAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)]$Value
+        [Parameter(Mandatory = $true)]$Value,
+        [string[]]$RemovedTaskIds = @()
     )
 
     $directory = Split-Path -Parent $Path
@@ -159,14 +165,42 @@ function Write-FactoryJsonAtomic {
     }
 
     $fullPath = [IO.Path]::GetFullPath($Path)
+    $isState = [IO.Path]::GetFileName($fullPath) -ieq "state.json"
+    if ($isState) {
+        $ownershipKey = "$([Threading.Thread]::CurrentThread.ManagedThreadId):$fullPath"
+        if (-not $global:FactoryStateMutexOwnership.ContainsKey($ownershipKey)) {
+            Stop-FactoryStateWrite -Path $fullPath -Reason "The project mutex is not held by this thread."
+        }
+    }
     $temporaryPath = "$fullPath.$([Guid]::NewGuid().ToString('N')).tmp"
-    $backupPath = "$fullPath.$([Guid]::NewGuid().ToString('N')).bak"
+    $backupPath = if ($isState) { "$fullPath.previous.bak" } else { "$fullPath.$([Guid]::NewGuid().ToString('N')).bak" }
     $json = $Value | ConvertTo-Json -Depth 100
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, $utf8)
 
     try {
-        Read-FactoryJson -Path $temporaryPath | Out-Null
+        $validated = Read-FactoryJson -Path $temporaryPath
+        if ($isState) {
+            if ($null -eq $validated -or $null -eq $validated.PSObject.Properties["tasks"]) {
+                Stop-FactoryStateWrite -Path $fullPath -Reason "The replacement is not a task ledger."
+            }
+            if ([IO.File]::Exists($fullPath)) {
+                $previous = Read-FactoryJson -Path $fullPath
+                $newIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+                foreach ($task in @($validated.tasks)) { [void]$newIds.Add([string]$task.id) }
+                $declaredIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+                foreach ($id in $RemovedTaskIds) { [void]$declaredIds.Add($id) }
+                $missingIds = @($previous.tasks | ForEach-Object {
+                    $id = [string]$_.id
+                    if (-not $newIds.Contains($id) -and -not $declaredIds.Contains($id)) { $id }
+                })
+                if ($missingIds.Count -gt 0) {
+                    Stop-FactoryStateWrite -Path $fullPath -Reason "Undeclared removal of task IDs: $($missingIds -join ', ')."
+                }
+            } elseif ([IO.File]::Exists($backupPath)) {
+                Stop-FactoryStateWrite -Path $fullPath -Reason "The ledger is missing but a recovery copy exists at '$backupPath'; restore it before initializing."
+            }
+        }
         $replaced = $false
         for ($attempt = 1; $attempt -le 8 -and -not $replaced; $attempt++) {
             try {
@@ -174,6 +208,9 @@ function Write-FactoryJsonAtomic {
                     [IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
                 } else {
                     [IO.File]::Move($temporaryPath, $fullPath)
+                    # The initial version is its own recovery copy. Subsequent
+                    # replacements retain exactly the preceding on-disk version.
+                    if ($isState) { [IO.File]::Copy($fullPath, $backupPath, $false) }
                 }
                 $replaced = $true
             } catch [IO.IOException] {
@@ -189,10 +226,27 @@ function Write-FactoryJsonAtomic {
         if (Test-Path -LiteralPath $temporaryPath) {
             Remove-Item -LiteralPath $temporaryPath -Force
         }
-        if (Test-Path -LiteralPath $backupPath) {
+        if (-not $isState -and (Test-Path -LiteralPath $backupPath)) {
             Remove-Item -LiteralPath $backupPath -Force
         }
     }
+}
+
+function Stop-FactoryStateWrite {
+    param([string]$Path, [string]$Reason)
+
+    $message = "Refused factory state write to '$Path': $Reason"
+    $entry = [ordered]@{
+        timestamp = Get-FactoryUtcTimestamp; event = "state-write-refused"
+        pid = $PID; caller = Get-FactoryMutexCaller; error = $message
+    }
+    $logPath = Join-Path (Split-Path -Parent $Path) "scheduler.stderr.log"
+    try {
+        [IO.File]::AppendAllText($logPath, ($entry | ConvertTo-Json -Compress) + [Environment]::NewLine, $script:FactoryUtf8NoBom)
+    } catch {
+        [Console]::Error.WriteLine("Could not log state-write refusal: $($_.Exception.Message)")
+    }
+    throw $message
 }
 
 function Add-MissingFactoryProperties {
@@ -598,6 +652,12 @@ function Enter-FactoryMutex {
     $mutex | Add-Member -NotePropertyName FactoryWaitMilliseconds -NotePropertyValue $waitMilliseconds -Force
     $mutex | Add-Member -NotePropertyName FactoryCaller -NotePropertyValue $caller -Force
     if ($null -ne $paths) {
+        $statePath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent ([string]$paths.owner)) "state.json"))
+        $ownershipKey = "$([Threading.Thread]::CurrentThread.ManagedThreadId):$statePath"
+        $global:FactoryStateMutexOwnership[$ownershipKey] = 1 + [int]$global:FactoryStateMutexOwnership[$ownershipKey]
+        $mutex | Add-Member -NotePropertyName FactoryOwnershipKey -NotePropertyValue $ownershipKey -Force
+    }
+    if ($null -ne $paths) {
         try {
             Write-FactoryJsonAtomic -Path ([string]$paths.owner) -Value ([ordered]@{
                 token = $token; projectKey = $ProjectKey; pid = $PID
@@ -632,10 +692,18 @@ function Exit-FactoryMutex {
     } catch {
         # The caller may be unwinding before it acquired ownership.
     } finally {
+        $ownershipKey = [string](Get-FactoryNestedValue -Target $Mutex -Name "FactoryOwnershipKey" -Default "")
+        if ($ownershipKey -and $global:FactoryStateMutexOwnership.ContainsKey($ownershipKey)) {
+            $global:FactoryStateMutexOwnership[$ownershipKey]--
+            if ($global:FactoryStateMutexOwnership[$ownershipKey] -le 0) { $global:FactoryStateMutexOwnership.Remove($ownershipKey) }
+        }
         $Mutex.Dispose()
     }
     $slowThresholdMilliseconds = 1000
-    [void][int]::TryParse([string]$env:CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS, [ref]$slowThresholdMilliseconds)
+    $configuredThreshold = 0
+    if ([int]::TryParse([string]$env:CLAUDE_FACTORY_LOCK_SLOW_MILLISECONDS, [ref]$configuredThreshold)) {
+        $slowThresholdMilliseconds = $configuredThreshold
+    }
     $slowThresholdMilliseconds = [Math]::Max(1, $slowThresholdMilliseconds)
     if ($holdMilliseconds -ge $slowThresholdMilliseconds -or $waitMilliseconds -ge $slowThresholdMilliseconds) {
         Write-FactoryMutexDiagnosticEvent -Paths $paths -Event ([ordered]@{

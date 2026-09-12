@@ -1,6 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [switch]$KeepTemp
+    [switch]$KeepTemp,
+    [switch]$LedgerOnly,
+    [switch]$NativeLedgerRace
 )
 
 if ([string]$PSVersionTable.PSEdition -eq "Core") {
@@ -10,12 +12,16 @@ if ([string]$PSVersionTable.PSEdition -eq "Core") {
     }
     $desktopArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
     if ($KeepTemp) { $desktopArguments += "-KeepTemp" }
+    if ($LedgerOnly) { $desktopArguments += "-LedgerOnly" }
+    if ($NativeLedgerRace) { $desktopArguments += "-NativeLedgerRace" }
     & $windowsPowerShell @desktopArguments
     exit $LASTEXITCODE
 }
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
+if ($LedgerOnly) { return }
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
@@ -75,6 +81,19 @@ function Invoke-FactoryHookWithUtf8Input {
     } finally {
         $process.Dispose()
     }
+}
+
+# Fixture setup intentionally replaces synthetic task sets. Production writes
+# always go through the guarded API; fixture removals are declared explicitly.
+function Write-FactoryTestState {
+    param($Context, $Value)
+    $fixtureMutex = Enter-FactoryMutex -ProjectKey $Context.projectKey
+    try {
+        $previous = Read-FactoryJson -Path $Context.statePath
+        $newIds = @($Value.tasks | ForEach-Object { [string]$_.id })
+        $removedIds = @($previous.tasks | ForEach-Object { if ([string]$_.id -cnotin $newIds) { [string]$_.id } })
+        Write-FactoryJsonAtomic -Path $Context.statePath -Value $Value -RemovedTaskIds $removedIds
+    } finally { Exit-FactoryMutex -Mutex $fixtureMutex }
 }
 
 function New-FactoryTestTask {
@@ -784,7 +803,7 @@ try {
     $queuedHoldState.tasks = @(New-FactoryTestTask -Id "queued-hold-task" -Title "Hold queued work" -Now (Get-FactoryUtcTimestamp))
     $queuedHoldState.active = $true
     $queuedHoldState.paused = $true
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $queuedHoldState
+    Write-FactoryTestState -Context $context -Value $queuedHoldState
     $queuedHeld = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") `
         -Repository $repository -Action hold -TaskId "queued-hold-task") | ConvertFrom-Json
     Assert-Equal "held" ([string]$queuedHeld.status) "A queued task could not be held before launch."
@@ -816,7 +835,7 @@ try {
     $capacityState.tasks = @($waitingTask, $queuedTask)
     $capacityState.active = $true
     $capacityState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $capacityState
+    Write-FactoryTestState -Context $context -Value $capacityState
     $capacityTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\factory-scheduler.ps1") `
         -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-Equal 0 ([int]$capacityTick.launchedCount) "The scheduler exceeded codingConcurrency while a worker awaited input."
@@ -831,7 +850,7 @@ try {
     $orphanLaunchState.tasks = @($orphanLaunch)
     $orphanLaunchState.active = $true
     $orphanLaunchState.paused = $true
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $orphanLaunchState
+    Write-FactoryTestState -Context $context -Value $orphanLaunchState
     Assert-Equal 0 (Get-FactoryLaunchedWorkerCount -State $orphanLaunchState) "A sessionless starting task permanently consumed coding capacity."
     $orphanConfig = Read-FactoryJson -Path $context.configPath
     $orphanConfig.workerLaunchTimeoutSeconds = 1
@@ -857,7 +876,7 @@ try {
     $postLaneState.tasks = @()
     $postLaneState.active = $false
     $postLaneState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $postLaneState
+    Write-FactoryTestState -Context $context -Value $postLaneState
 
     $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $orchestratorArgv
@@ -1018,7 +1037,7 @@ try {
     $pausedRestartState.tasks = @($pausedRestartState.tasks) + @($pausedRestartTask)
     $pausedRestartState.active = $true
     $pausedRestartState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $pausedRestartState
+    Write-FactoryTestState -Context $context -Value $pausedRestartState
     $pausedFactoryResult = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action pause -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
     Assert-Equal $true ([bool]$pausedFactoryResult.scheduler.paused) "Explicit pause did not suspend the factory."
 
@@ -1049,7 +1068,7 @@ try {
     $pausedRestartCleanup.tasks = @($pausedRestartCleanup.tasks | Where-Object { [string]$_.id -ne "paused-restart-task" })
     $pausedRestartCleanup.active = $false
     $pausedRestartCleanup.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $pausedRestartCleanup
+    Write-FactoryTestState -Context $context -Value $pausedRestartCleanup
 
     $idleHeartbeatBefore = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "heartbeatAt" -Default "")
     Start-Sleep -Milliseconds 25
@@ -1067,7 +1086,7 @@ try {
     $schedulerFailureState.tasks = @($schedulerFailureState.tasks) + @($schedulerFailureTask)
     $schedulerFailureState.active = $true
     $schedulerFailureState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerFailureState
+    Write-FactoryTestState -Context $context -Value $schedulerFailureState
     $env:CLAUDE_FACTORY_TEST_SCHEDULER_THROW_ON_TICK = "1"
     try {
         $schedulerFailureStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
@@ -1096,7 +1115,7 @@ try {
     $schedulerFailureCleanup.tasks = @($schedulerFailureCleanup.tasks | Where-Object { [string]$_.id -ne "scheduler-failure-task" })
     $schedulerFailureCleanup.active = $false
     $schedulerFailureCleanup.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerFailureCleanup
+    Write-FactoryTestState -Context $context -Value $schedulerFailureCleanup
 
     $schedulerOneShotMarker = Join-Path $testRoot "scheduler-fail-once.marker"
     [IO.File]::WriteAllText($schedulerOneShotMarker, "fail once", (New-Object Text.UTF8Encoding($false)))
@@ -1181,12 +1200,16 @@ try {
             $bookkeepingLogSeen = $bookkeepingLog.Contains('"operation":"loop-state"') -and $bookkeepingLog.Contains("was skipped: Timed out waiting for the factory state lock")
         } while (-not $bookkeepingLogSeen -and [DateTime]::UtcNow -lt $bookkeepingDeadline)
         Assert-True $bookkeepingLogSeen "Scheduler did not log its skipped state bookkeeping during mutex contention. Log: $bookkeepingLog"
+        $heartbeatSidecarPath = Join-Path ([string]$context.projectData) "scheduler-heartbeat.json"
+        $heartbeatBeforeContention = if (Test-Path -LiteralPath $heartbeatSidecarPath) { [string](Read-FactoryJson $heartbeatSidecarPath).heartbeatAt } else { "" }
         $heartbeatContentionDeadline = [DateTime]::UtcNow.AddSeconds(8)
         do {
             Start-Sleep -Milliseconds 100
-            $bookkeepingLog = [IO.File]::ReadAllText([string]$schedulerLockStart.scheduler.stderrPath, [Text.Encoding]::UTF8)
-        } while (-not $bookkeepingLog.Contains('"operation":"heartbeat"') -and [DateTime]::UtcNow -lt $heartbeatContentionDeadline)
-        Assert-True ($bookkeepingLog.Contains('"operation":"heartbeat"')) "Scheduler did not treat a contended heartbeat as non-fatal bookkeeping."
+            $heartbeatDuringContention = if (Test-Path -LiteralPath $heartbeatSidecarPath) { [string](Read-FactoryJson $heartbeatSidecarPath).heartbeatAt } else { "" }
+        } while ($heartbeatDuringContention -eq $heartbeatBeforeContention -and [DateTime]::UtcNow -lt $heartbeatContentionDeadline)
+        Assert-True ($heartbeatDuringContention -ne $heartbeatBeforeContention) "Scheduler heartbeat did not advance independently of the held state mutex."
+        $bookkeepingLog = [IO.File]::ReadAllText([string]$schedulerLockStart.scheduler.stderrPath, [Text.Encoding]::UTF8)
+        Assert-True (-not $bookkeepingLog.Contains('"operation":"heartbeat"')) "Heartbeat still contends for the state mutex."
         $schedulerProcessDuringLock = Get-Process -Id ([int]$schedulerLockStart.scheduler.pid) -ErrorAction SilentlyContinue
         Assert-True ($null -ne $schedulerProcessDuringLock) "Scheduler died when its loop-state bookkeeping could not acquire the mutex."
         Assert-True ($schedulerLockHolder.WaitForExit(20000)) "State-lock holder did not release the mutex."
@@ -1218,7 +1241,7 @@ try {
     $schedulerBusyState.tasks = @($schedulerBusyState.tasks) + @($schedulerBusyTask)
     $schedulerBusyState.active = $true
     $schedulerBusyState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerBusyState
+    Write-FactoryTestState -Context $context -Value $schedulerBusyState
     $env:CLAUDE_FACTORY_TEST_SCHEDULER_BUSY_MILLISECONDS = "15000"
     try {
         $schedulerBusyStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 2) | ConvertFrom-Json
@@ -1249,7 +1272,7 @@ try {
     $schedulerBusyCleanup.tasks = @($schedulerBusyCleanup.tasks | Where-Object { [string]$_.id -ne "scheduler-busy-task" })
     $schedulerBusyCleanup.active = $false
     $schedulerBusyCleanup.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $schedulerBusyCleanup
+    Write-FactoryTestState -Context $context -Value $schedulerBusyCleanup
 
     $waitState = Read-FactoryJson -Path $context.statePath
     $waitTask = New-FactoryTestTask -Id "wait-for-worker-close" -Title "Result captured while worker closes" -Now (Get-FactoryUtcTimestamp)
@@ -1269,7 +1292,7 @@ try {
         lastError = $null; failureCount = 0; activity = "idle"; activityTaskId = $null
         activityTaskTitle = $null; activitySince = $null; activityHeartbeatAt = $null; lastExitReason = $null
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitState
+    Write-FactoryTestState -Context $context -Value $waitState
     Assert-Equal 1 (Get-FactoryLaunchedWorkerCount -State $waitState) "An awaiting-review task released its slot before its worker session closed."
     $waitWhileClosing = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
         -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
@@ -1278,7 +1301,7 @@ try {
     $waitReadyTask = Get-FactoryTask -State $waitReadyState -TaskId "wait-for-worker-close"
     $waitReadyTask.backgroundSession.state = "done"
     $waitReadyTask.updatedAt = Get-FactoryUtcTimestamp
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitReadyState
+    Write-FactoryTestState -Context $context -Value $waitReadyState
     $waitReady = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
         -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
     Assert-True ([bool]$waitReady.signaled -and -not [bool]$waitReady.timedOut) "Factory wait did not return when review became actionable."
@@ -1296,7 +1319,7 @@ try {
     $reviewedWaitTask.commit = "reviewed-wait-commit"
     $reviewedWaitTask.approval = $null
     $reviewedWaitTask.updatedAt = Get-FactoryUtcTimestamp
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $reviewedWaitState
+    Write-FactoryTestState -Context $context -Value $reviewedWaitState
     $reviewedEvents = @(Get-FactoryOperatorActionEvents -State $reviewedWaitState -Config (Read-FactoryJson -Path $context.configPath))
     $approvalEvent = @($reviewedEvents | Where-Object { [string]$_.taskId -eq "wait-for-worker-close" })[0]
     Assert-Equal "awaiting-approval" ([string]$approvalEvent.kind) "Factory did not distinguish completed review from review work."
@@ -1321,7 +1344,7 @@ try {
     $liveFailedSchedulerState.scheduler.status = "failed"
     $liveFailedSchedulerState.scheduler.lastError = "transient tick error"
     $liveFailedSchedulerState.scheduler.lastFailureAt = Get-FactoryUtcTimestamp
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $liveFailedSchedulerState
+    Write-FactoryTestState -Context $context -Value $liveFailedSchedulerState
     $liveFailedActions = @(Get-FactoryOperatorActionEvents -State $liveFailedSchedulerState -Config (Read-FactoryJson -Path $context.configPath))
     Assert-Equal 0 @($liveFailedActions | Where-Object { [string]$_.kind -eq "scheduler" }).Count "A live retrying scheduler was reported as dead."
     $waitCleanup = Read-FactoryJson -Path $context.statePath
@@ -1330,7 +1353,7 @@ try {
     $waitCleanup.scheduler.status = "stopped"
     $waitCleanup.scheduler.pid = $null
     $waitCleanup.scheduler.processStartTimeUtc = $null
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $waitCleanup
+    Write-FactoryTestState -Context $context -Value $waitCleanup
 
     $legacyConfig = Read-FactoryJson -Path $context.configPath
     $legacyConfig.version = 2
@@ -1638,7 +1661,7 @@ try {
     foreach ($propertyName in @("source", "startMode", "backgroundSession", "plan", "review", "approval", "syncPreparation", "cleanup", "reworkRequestedAt", "planRecordedAt", "resultRecordedAt", "pendingInstructions")) {
         $state.tasks[0].PSObject.Properties.Remove($propertyName)
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    Write-FactoryTestState -Context $context -Value $state
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 9 ([int]$migratedState.version) "Legacy state version was not migrated."
@@ -1714,7 +1737,7 @@ try {
     $approvalCliTask.approval = $null
     $rejectCliTask = New-FactoryTestTask -Id "reject-cli-task" -Title "Disposable CLI task without artifacts" -Now $now
     $cliState.tasks = @($cliState.tasks) + @($heldCliTask, $reviewCliTask, $closingReviewCliTask, $approvalCliTask, $doneCliTask, $rejectCliTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $cliState
+    Write-FactoryTestState -Context $context -Value $cliState
 
     $cliHelp = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath help | Out-String)
     Assert-True ($cliHelp.Contains("!factory status")) "Factory CLI help does not explain direct orchestrator shell mode."
@@ -1907,7 +1930,7 @@ try {
         $env:PATH = $previousPath
     }
 
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $migratedState
+    Write-FactoryTestState -Context $context -Value $migratedState
 
     $argvCapture = Join-Path $testRoot "launch-argv.txt"
     $promptCopy = Join-Path $testRoot "prompt-copy.txt"
@@ -1981,7 +2004,7 @@ try {
     $previewSwitchTask.worktree = $previewSwitchWorktree
     $previewSwitchTask.branch = $previewSwitchBranch
     $previewStateFixture.tasks = @($previewStateFixture.tasks) + @($previewSwitchTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $previewStateFixture
+    Write-FactoryTestState -Context $context -Value $previewStateFixture
 
     $previewEligibleStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status -NoReconcile -Repository $repository | Out-String)
     Assert-True ($previewEligibleStatus.Contains("View in browser: factory preview test-task")) "Factory status omitted the worktree browser-preview action."
@@ -2060,7 +2083,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not remove the preview switch branch fixture." }
     $previewStateFixture = Read-FactoryJson -Path $context.statePath
     $previewStateFixture.tasks = @($previewStateFixture.tasks | Where-Object { [string]$_.id -ne "preview-switch-task" })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $previewStateFixture
+    Write-FactoryTestState -Context $context -Value $previewStateFixture
 
     $guardScript = Join-Path $pluginRoot "scripts\worker-git-guard.ps1"
     $previousGuardErrorAction = $ErrorActionPreference
@@ -2123,7 +2146,7 @@ try {
     }
     $blockedFixtureState = Read-FactoryJson -Path $context.statePath
     $blockedFixtureState.tasks = @($blockedFixtureState.tasks) + @($blockedSessionTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedFixtureState
+    Write-FactoryTestState -Context $context -Value $blockedFixtureState
     [IO.File]::AppendAllText(
         $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
         "launch`tblocked123`t$blockedSessionWorktree`tfactory-blocked-session-task`tblocked" + [Environment]::NewLine,
@@ -2147,7 +2170,7 @@ try {
     $blockedTimeoutState = Read-FactoryJson -Path $context.statePath
     $blockedTimeoutTask = Get-FactoryTask -State $blockedTimeoutState -TaskId "blocked-session-task"
     $blockedTimeoutTask.backgroundSession.blockedAt = [DateTime]::UtcNow.AddMinutes(-2).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedTimeoutState
+    Write-FactoryTestState -Context $context -Value $blockedTimeoutState
     $blockedFixtureConfig.blockedSessionTimeoutMinutes = 1
     Write-FactoryJsonAtomic -Path $context.configPath -Value $blockedFixtureConfig
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
@@ -2160,7 +2183,7 @@ try {
     Assert-True ([string]$blockedTaskDoctorCheck.detail -match "blocked-session-task" -and [string]$blockedTaskDoctorCheck.detail -match "remained blocked") "Factory doctor omitted the blocked task ID or reason."
     $blockedCleanupState = Read-FactoryJson -Path $context.statePath
     $blockedCleanupState.tasks = @($blockedCleanupState.tasks | Where-Object { [string]$_.id -ne "blocked-session-task" })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $blockedCleanupState
+    Write-FactoryTestState -Context $context -Value $blockedCleanupState
     $blockedFixtureConfig.blockedSessionTimeoutMinutes = 30
     Write-FactoryJsonAtomic -Path $context.configPath -Value $blockedFixtureConfig
 
@@ -2234,7 +2257,7 @@ try {
     $planState.tasks[0].status = "planning"
     $planState.tasks[0].plan = $null
     $planState.tasks[0].planRecordedAt = $null
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $planState
+    Write-FactoryTestState -Context $context -Value $planState
 
     $env:CLAUDE_FACTORY_TEST_NO_AGENTS = "1"
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
@@ -2244,7 +2267,7 @@ try {
     Assert-Equal $planText ([string]$recordedPlanState.tasks[0].plan.understanding) "Non-ASCII plan text did not round-trip."
 
     $recordedPlanState.tasks[0].status = "planning"
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $recordedPlanState
+    Write-FactoryTestState -Context $context -Value $recordedPlanState
     $stalePlanReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     $stalePlanState = Read-FactoryJson -Path $context.statePath
     Assert-Equal 0 ([int]$stalePlanReconcile.changed) "An already-recorded plan caused another transition."
@@ -2283,7 +2306,7 @@ try {
     Assert-True ([string]$invalidMarkerState.tasks[0].error -match "Invalid FACTORY_RESULT payload:.*invalid JSON") "Malformed marker parse reason did not reach the task error."
     $invalidMarkerState.tasks[0].status = "running"
     $invalidMarkerState.tasks[0].error = $null
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $invalidMarkerState
+    Write-FactoryTestState -Context $context -Value $invalidMarkerState
 
     [IO.File]::AppendAllText(
         (Join-Path $launch.worktree "README.md"),
@@ -2388,7 +2411,7 @@ try {
             name = "factory-unvalidated-live-task"; state = "working"; lastSeenAt = (Get-FactoryUtcTimestamp)
         }
         $validatedReleasedState.tasks = @($validatedReleasedState.tasks) + @($unvalidatedTask)
-        Write-FactoryJsonAtomic -Path $context.statePath -Value $validatedReleasedState
+        Write-FactoryTestState -Context $context -Value $validatedReleasedState
 
         $unvalidatedReviewPath = Join-Path $context.sessionsPath "unvalidated-live-task.review.json"
         Write-FactoryJsonAtomic -Path $unvalidatedReviewPath -Value ([pscustomobject]@{
@@ -2414,7 +2437,7 @@ try {
 
         $postLiveGateState = Read-FactoryJson -Path $context.statePath
         $postLiveGateState.tasks = @($postLiveGateState.tasks | Where-Object { [string]$_.id -ne "unvalidated-live-task" })
-        Write-FactoryJsonAtomic -Path $context.statePath -Value $postLiveGateState
+        Write-FactoryTestState -Context $context -Value $postLiveGateState
         Remove-Item -LiteralPath $unvalidatedReviewPath -Force -ErrorAction SilentlyContinue
     } finally {
         Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_STATUS -ErrorAction SilentlyContinue
@@ -2447,7 +2470,7 @@ try {
     }
     $renameFixtureState = Read-FactoryJson -Path $context.statePath
     $renameFixtureState.tasks = @($renameFixtureState.tasks) + @($renameTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $renameFixtureState
+    Write-FactoryTestState -Context $context -Value $renameFixtureState
 
     $renameReportedResult = [ordered]@{
         status = "completed"
@@ -2491,7 +2514,7 @@ try {
     })
     $operatorStateTask.worktree = [string]$launch.worktree
     $operatorState.tasks = @($operatorState.tasks) + @($operatorStateTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorState
+    Write-FactoryTestState -Context $context -Value $operatorState
     $env:CLAUDE_FACTORY_TEST_AGENT_STATUS = "working"
     $env:CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS = "idle"
     try {
@@ -2505,7 +2528,7 @@ try {
         Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_LIVE_STATUS -ErrorAction SilentlyContinue
     }
     $operatorStateAfter.tasks = @($operatorStateAfter.tasks | Where-Object { [string]$_.id -ne "operator-state-task" })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $operatorStateAfter
+    Write-FactoryTestState -Context $context -Value $operatorStateAfter
 
     $beforeMissingState = Read-FactoryJson -Path $context.statePath
     $beforeMissingTask = Get-FactoryTask -State $beforeMissingState -TaskId "test-task"
@@ -2524,14 +2547,14 @@ try {
         runtime = "claude"; id = "missing-release"; sessionId = "missing-release-session"
         name = "factory-test-task-missing-release"; state = "working"; lastSeenAt = $lastSeenBeforeMissing
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $missingState
+    Write-FactoryTestState -Context $context -Value $missingState
     $released = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action release -TaskId "test-task" -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "awaiting-review" ([string]$released.status) "Explicit stale-session release did not restore the artifact-derived review state."
     $releasedState = Read-FactoryJson -Path $context.statePath
     Assert-True ($null -eq $releasedState.tasks[0].backgroundSession) "Explicit stale-session release retained the missing session identity."
 
     $syncState = Read-FactoryJson -Path $context.statePath
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $syncState
+    Write-FactoryTestState -Context $context -Value $syncState
     [IO.File]::WriteAllText(
         (Join-Path $repository "BASE.md"),
         "new development base`n",
@@ -2694,7 +2717,7 @@ try {
         name = "factory-rework-task-old"; state = "stopped"; lastSeenAt = Get-FactoryUtcTimestamp
     }
     $reworkState.tasks = @($reworkState.tasks) + @($reworkTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $reworkState
+    Write-FactoryTestState -Context $context -Value $reworkState
     [IO.File]::AppendAllText(
         [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
         "launch`trework-old`t$reworkWorktree`tfactory-rework-task-old`tstopped`n",
@@ -2736,7 +2759,7 @@ try {
     $genericValidatedFailure.launchFailedAt = Get-FactoryUtcTimestamp
     $genericValidatedState = Read-FactoryJson -Path $context.statePath
     $genericValidatedState.tasks = @($genericValidatedState.tasks) + @($genericValidatedFailure)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $genericValidatedState
+    Write-FactoryTestState -Context $context -Value $genericValidatedState
     $genericRetry = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $pluginRoot "scripts\task-action.ps1"),
         "-Repository", $repository, "-Action", "retry", "-TaskId", "generic-validated-failure", "-ClaudeCommand", $fakeClaude
@@ -2744,7 +2767,7 @@ try {
     Assert-True ([int]$genericRetry.exitCode -ne 0 -and [string]$genericRetry.output -match "validated result or commit") "Generic validated failure bypassed the retry invariant."
     $genericValidatedState = Read-FactoryJson -Path $context.statePath
     $genericValidatedState.tasks = @($genericValidatedState.tasks | Where-Object { [string]$_.id -ne "generic-validated-failure" })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $genericValidatedState
+    Write-FactoryTestState -Context $context -Value $genericValidatedState
 
     $postCommitAnswer = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\answer-task.ps1") -Repository $repository -TaskId "rework-task" -Text "Apply the review findings to the retained commit." -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal "queued" ([string]$postCommitAnswer.status) "An explicit rework task rejected a post-commit answer."
@@ -2784,17 +2807,17 @@ try {
         changedFiles = @()
     }
     $publicationReadyState.tasks = @($publicationReadyState.tasks) + @($readyDirectCliTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $publicationReadyState
+    Write-FactoryTestState -Context $context -Value $publicationReadyState
     $publicationReadyStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status held -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($publicationReadyStatus.Contains("!factory go ready-direct-cli-task --direct")) "Factory CLI status omitted direct approval after publication became ready."
     $publicationReadyState = Read-FactoryJson -Path $context.statePath
     $publicationReadyState.tasks = @($publicationReadyState.tasks | Where-Object { [string]$_.id -ne "ready-direct-cli-task" })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $publicationReadyState
+    Write-FactoryTestState -Context $context -Value $publicationReadyState
 
     $tamperedState = Read-FactoryJson -Path $context.statePath
     $savedReview = $tamperedState.tasks[0].review | ConvertTo-Json -Depth 30 | ConvertFrom-Json
     $tamperedState.tasks[0].review.integrationPlan.integrationTestCommands = @("git diff --check", "git status --short")
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $tamperedState
+    Write-FactoryTestState -Context $context -Value $tamperedState
     $previousTamperErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -2806,7 +2829,7 @@ try {
     Assert-True ($tamperedGoExit -ne 0) "Native go accepted a tampered integration plan."
     $restoredReviewState = Read-FactoryJson -Path $context.statePath
     $restoredReviewState.tasks[0].review = $savedReview
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $restoredReviewState
+    Write-FactoryTestState -Context $context -Value $restoredReviewState
 
     $approvalPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
     Assert-True ($approvalPreviewOutput.Contains([string]$launch.worktree)) "Approval preview fixture did not start from the task worktree."
@@ -2841,7 +2864,7 @@ try {
     $cleanupSessionState = Read-FactoryJson -Path $context.statePath
     $cleanupSessionState.tasks[0].backgroundSession = $launch.backgroundSession
     $cleanupSessionState.tasks[0].backgroundSession.state = "done"
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupSessionState
+    Write-FactoryTestState -Context $context -Value $cleanupSessionState
     [IO.File]::AppendAllText(
         [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
         "launch`ttest1234`t$($launch.worktree)`t$([string]$launch.backgroundSession.name)`tworking`n",
@@ -2986,7 +3009,7 @@ try {
         changedFiles = @("INTERRUPTED-CLEANUP.md"); tests = @(); notes = "Published fixture."; blockingReason = ""
     }
     $interruptedCleanupState.tasks = @($interruptedCleanupState.tasks) + @($interruptedCleanupTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $interruptedCleanupState
+    Write-FactoryTestState -Context $context -Value $interruptedCleanupState
 
     $cleanupFinalizeReady = Join-Path $testRoot "cleanup-before-final-state.ready"
     $cleanupInterruptedStdout = Join-Path $testRoot "cleanup-interrupted.stdout"
@@ -3055,7 +3078,7 @@ try {
         notes = "Ready before development changed."; blockingReason = ""
     }
     $conflictState.tasks = @($conflictState.tasks) + @($conflictTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $conflictState
+    Write-FactoryTestState -Context $context -Value $conflictState
 
     [IO.File]::WriteAllText((Join-Path $repository "SYNC-CONFLICT.md"), "development version`n", (New-Object Text.UTF8Encoding($false)))
     & git -C $repository add SYNC-CONFLICT.md
@@ -3130,14 +3153,14 @@ try {
     }
     $pipelineTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-pipeline-task" }
     $pipelineState.tasks = @($pipelineState.tasks) + @($pipelineTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $pipelineState
+    Write-FactoryTestState -Context $context -Value $pipelineState
     $knownIssueState = Read-FactoryJson -Path $context.statePath
     $knownIssueTask = @($knownIssueState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     $knownIssueTask.review = [pscustomobject]@{
         verdict = "changes-required"; commit = $pipelineCommit; summary = "Known issue."; riskNotes = @("Must be fixed.")
         reviewedAt = Get-FactoryUtcTimestamp; mode = "ai"; integrationPlan = $null
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $knownIssueState
+    Write-FactoryTestState -Context $context -Value $knownIssueState
     $previousDirectErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -3151,7 +3174,7 @@ try {
     $directReadyTask = @($directReadyState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-Equal "changes-required" ([string]$directReadyTask.review.verdict) "Rejected direct approval mutated the known review."
     $directReadyTask.review = $null
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $directReadyState
+    Write-FactoryTestState -Context $context -Value $directReadyState
 
     $pipelineGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId "pipeline-task") | ConvertFrom-Json
     Assert-Equal "approved" ([string]$pipelineGo.status) "Direct approval did not approve the native pipeline fixture."
@@ -3173,7 +3196,7 @@ try {
         error = $directApprovedTask.error
         failedAt = Get-FactoryUtcTimestamp
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $directApprovedState
+    Write-FactoryTestState -Context $context -Value $directApprovedState
 
     $failedPipelineStatus = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath status awaiting-review -Repository $repository -ClaudeCommand $fakeClaude -NoReconcile | Out-String)
     Assert-True ($failedPipelineStatus.Contains("Next in orchestrator: /factory review pipeline-task")) "Status offered stale go after a failed publication attempt."
@@ -3269,7 +3292,7 @@ $result = [ordered]@{
     )
     $cleanupQueueState.active = $true
     $cleanupQueueState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $cleanupQueueState
+    Write-FactoryTestState -Context $context -Value $cleanupQueueState
     $env:CLAUDE_FACTORY_TEST_FAIL_WORKTREE_REMOVAL = "pipeline-task"
     try {
         $pipelineTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
@@ -3404,7 +3427,7 @@ $result = [ordered]@{
     }
     $localMergeTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-local-merge-message-task" }
     $localMergeState.tasks = @($localMergeState.tasks) + @($localMergeTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $localMergeState
+    Write-FactoryTestState -Context $context -Value $localMergeState
     $localMergeApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId $localMergeTaskId) | ConvertFrom-Json
     Assert-Equal "approved" ([string]$localMergeApproval.status) "Local task-only merge-message fixture could not be approved."
     $localMergeTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
@@ -3478,7 +3501,7 @@ $result = [ordered]@{
     }
     $developmentOnlyTask.backgroundSession = [pscustomobject]@{ id = ""; state = "done"; name = "factory-development-only-task" }
     $developmentOnlyState.tasks = @($developmentOnlyState.tasks) + @($developmentOnlyTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $developmentOnlyState
+    Write-FactoryTestState -Context $context -Value $developmentOnlyState
 
     $developmentOnlyApproval = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId $developmentOnlyTaskId) | ConvertFrom-Json
     Assert-Equal "approved" ([string]$developmentOnlyApproval.status) "Development-only task could not be approved."
@@ -3589,7 +3612,7 @@ $result = [ordered]@{
             updatedAt = $now
         }
     )
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $rejectState
+    Write-FactoryTestState -Context $context -Value $rejectState
 
     $kept = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "keep-task" -Reason "Needs an audit trail" -Keep -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
@@ -3680,7 +3703,7 @@ $result = [ordered]@{
     $fallbackState.tasks = @($fallbackState.tasks) + @(
         New-FactoryTestTask -Id "fallback-task" -Title "System prompt fallback" -Now $now
     )
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $fallbackState
+    Write-FactoryTestState -Context $context -Value $fallbackState
     $fallbackCount = Join-Path $testRoot "fallback-launch-count.txt"
     $fallbackArgv = Join-Path $testRoot "fallback-argv.txt"
     $fallbackStops = Join-Path $testRoot "fallback-stops.txt"
@@ -3729,7 +3752,7 @@ $result = [ordered]@{
 
     $cachedState = Read-FactoryJson -Path $context.statePath
     $cachedState.tasks = @($cachedState.tasks) + @(New-FactoryTestTask -Id "cached-fallback-task" -Title "Cached system fallback" -Now $now)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $cachedState
+    Write-FactoryTestState -Context $context -Value $cachedState
     $cachedCount = Join-Path $testRoot "cached-launch-count.txt"
     $cachedArgv = Join-Path $testRoot "cached-argv.txt"
     $cachedStops = Join-Path $testRoot "cached-stops.txt"
@@ -3745,7 +3768,7 @@ $result = [ordered]@{
     $legacyState = Read-FactoryJson -Path $context.statePath
     $legacyState.agentResolutionCache = [pscustomobject]@{ claudeVersion = "2.1.218"; preferredResolution = "inline-fallback"; checkedAt = $now }
     $legacyState.tasks = @($legacyState.tasks) + @(New-FactoryTestTask -Id "legacy-fallback-task" -Title "Legacy fallback migration" -Now $now)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $legacyState
+    Write-FactoryTestState -Context $context -Value $legacyState
     $legacyCount = Join-Path $testRoot "legacy-launch-count.txt"
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $legacyCount
     $legacyLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "legacy-fallback-task" -Mode auto -ClaudeCommand $fakeClaude) | ConvertFrom-Json
@@ -3779,7 +3802,7 @@ $result = [ordered]@{
     $failureState = Read-FactoryJson -Path $context.statePath
     $failureState.agentResolutionCache = $null
     $failureState.tasks = @($failureState.tasks) + @(New-FactoryTestTask -Id "all-fallbacks-fail" -Title "All fallbacks fail" -Now $now)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $failureState
+    Write-FactoryTestState -Context $context -Value $failureState
     $failureCount = Join-Path $testRoot "failure-launch-count.txt"
     $failureStops = Join-Path $testRoot "failure-stops.txt"
     $failureRemovals = Join-Path $testRoot "failure-removals.txt"
@@ -3822,7 +3845,7 @@ $result = [ordered]@{
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_BEHAVIOR -ErrorAction SilentlyContinue
     $fixedState = Read-FactoryJson -Path $context.statePath
     $fixedState.tasks = @($fixedState.tasks) + @(New-FactoryTestTask -Id "fixed-version-task" -Title "Fixed native version" -Now $now)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $fixedState
+    Write-FactoryTestState -Context $context -Value $fixedState
     $fixedCount = Join-Path $testRoot "fixed-launch-count.txt"
     $env:CLAUDE_FACTORY_TEST_VERSION = "2.1.219"
     $env:CLAUDE_FACTORY_TEST_LAUNCH_COUNT_FILE = $fixedCount
@@ -3904,7 +3927,7 @@ $result = [ordered]@{
     $attentionState = Read-FactoryJson -Path $context.statePath
     $attentionState.tasks = @($attentionTask)
     $attentionState.active = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionState
+    Write-FactoryTestState -Context $context -Value $attentionState
     $turnStartsBeforeAttention = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"turn/start\"' }).Count
     $firstAttentionDispatch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
         -Repository $repository -Action dispatch -CodexCommand $fakeCodex) | ConvertFrom-Json
@@ -3920,7 +3943,7 @@ $result = [ordered]@{
     $attentionHumanState = Read-FactoryJson -Path $context.statePath
     $attentionHumanTask = Get-FactoryTask -State $attentionHumanState -TaskId "attention-failure"
     $attentionHumanTask.status = "held"
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionHumanState
+    Write-FactoryTestState -Context $context -Value $attentionHumanState
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
         -Repository $repository -Action scan -CodexCommand $fakeCodex) | ConvertFrom-Json
     $attentionHumanTask.status = "awaiting-review"
@@ -3930,13 +3953,13 @@ $result = [ordered]@{
         verdict = "approved"; commit = $attentionHumanTask.commit; summary = "Ready for operator go."
         integrationPlan = [pscustomobject]@{ planHash = "attention-human-plan" }
     }
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionHumanState
+    Write-FactoryTestState -Context $context -Value $attentionHumanState
     $humanAttentionDispatch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\orchestrator-attention.ps1") `
         -Repository $repository -Action dispatch -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-True (-not [bool]$humanAttentionDispatch.dispatched) "Manual GO decision woke the Codex orchestrator without persisted auto-go."
     $turnStartsAfterHumanDecision = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"turn/start\"' }).Count
     Assert-Equal $turnStartsAfterAttention $turnStartsAfterHumanDecision "Human-only attention created a Codex continuation turn."
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $attentionFixtureState
+    Write-FactoryTestState -Context $context -Value $attentionFixtureState
     Remove-Item -LiteralPath $attentionPath -Force -ErrorAction SilentlyContinue
 
     $codexRotate = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") rotate -Repository $repository | Out-String)
@@ -3978,7 +4001,7 @@ $result = [ordered]@{
     }
     $slotFillState.active = $true
     $slotFillState.paused = $false
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $slotFillState
+    Write-FactoryTestState -Context $context -Value $slotFillState
     $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS = "30000"
     try {
         $slotFillStopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -4007,7 +4030,7 @@ $result = [ordered]@{
     $codexTask = New-FactoryTestTask -Id "codex-task" -Title "Codex interactive worker" -Now $now
     $codexTask.startMode = "interactive"
     $codexState.tasks = @($codexState.tasks) + @($codexTask)
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $codexState
+    Write-FactoryTestState -Context $context -Value $codexState
     $codexLaunch = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\start-worker-session.ps1") -Repository $repository -TaskId "codex-task" -Mode interactive -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-Equal "codex" ([string]$codexLaunch.runtime) "Codex worker launch did not report its runtime."
     Assert-Equal "codex" ([string]$codexLaunch.backgroundSession.runtime) "Codex worker session lost its runtime identity."
@@ -4089,7 +4112,7 @@ $result = [ordered]@{
         createdAt = $now
         updatedAt = $now
     })
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $missingAgentState
+    Write-FactoryTestState -Context $context -Value $missingAgentState
     $env:CLAUDE_FACTORY_TEST_MISSING_AGENT = "1"
     $previousTestErrorAction = $ErrorActionPreference
     try {

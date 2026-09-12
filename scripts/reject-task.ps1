@@ -313,7 +313,7 @@ try {
     $remainingTasks = @($state.tasks | Where-Object { [string]$_.id -ne $TaskId })
     Set-FactoryProperty -Target $state -Name "tasks" -Value $remainingTasks
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value $now
-    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    Write-FactoryJsonAtomic -Path $context.statePath -Value $state -RemovedTaskIds @([string]$task.id)
 
     [ordered]@{
         taskId = $TaskId

@@ -38,6 +38,9 @@ $stopPath = Join-Path ([string]$context.projectData) "scheduler.stop"
 $wakePath = Join-Path ([string]$context.projectData) "scheduler.wake"
 $stdoutPath = Join-Path ([string]$context.projectData) "scheduler.stdout.log"
 $stderrPath = Join-Path ([string]$context.projectData) "scheduler.stderr.log"
+$heartbeatPath = Join-Path ([string]$context.projectData) "scheduler-heartbeat.json"
+$script:lastHeartbeatWriteUtc = [DateTime]::MinValue
+$script:heartbeatIdentity = $null
 $safeProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
 $schedulerMutexName = "Local\ClaudeFactoryNativeScheduler-$safeProjectKey"
 
@@ -85,7 +88,30 @@ function Write-SchedulerLog {
 function Get-SchedulerState {
     $state = Read-FactoryJson -Path ([string]$context.statePath)
     if ($null -eq $state.PSObject.Properties["scheduler"]) { return $null }
-    return $state.scheduler
+    return Merge-SchedulerHeartbeat -Scheduler $state.scheduler
+}
+
+function Merge-SchedulerHeartbeat {
+    param($Scheduler)
+
+    # Lifecycle state remains authoritative. Ignore telemetry from an older
+    # process or activity, including a heartbeat racing with stop/start.
+    if ($null -ne $Scheduler -and [IO.File]::Exists($heartbeatPath)) {
+        try {
+            $heartbeat = Read-FactoryJson -Path $heartbeatPath
+            $matches = $true
+            foreach ($name in @("pid", "processStartTimeUtc", "activity", "activitySince")) {
+                if ([string](Get-CliSafeProperty $Scheduler $name) -cne [string](Get-CliSafeProperty $heartbeat $name)) { $matches = $false }
+            }
+            if ($matches -and [string]$heartbeat.heartbeatAt -gt [string]$Scheduler.heartbeatAt) {
+                $Scheduler.heartbeatAt = $heartbeat.heartbeatAt
+                if ([string]$Scheduler.activity -ne "idle") { $Scheduler.activityHeartbeatAt = $heartbeat.heartbeatAt }
+            }
+        } catch {
+            # Telemetry is optional; the durable scheduler identity is intact.
+        }
+    }
+    return $Scheduler
 }
 
 function Test-SchedulerProcess {
@@ -157,6 +183,7 @@ function Update-SchedulerState {
         if ($null -ne $Paused) { Set-FactoryProperty -Target $state -Name "paused" -Value ([bool]$Paused) }
         Set-FactoryProperty -Target $state -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
         Write-FactoryJsonAtomic -Path ([string]$context.statePath) -Value $state
+        $script:heartbeatIdentity = $state.scheduler
     } finally {
         Exit-FactoryMutex -Mutex $mutex
     }
@@ -186,8 +213,14 @@ function Set-SchedulerActivity {
 function Touch-SchedulerHeartbeat {
     param([int]$TimeoutMilliseconds = 30000)
 
-    $now = Get-FactoryUtcTimestamp
-    Update-SchedulerState -Values @{ heartbeatAt = $now; activityHeartbeatAt = $now } -TimeoutMilliseconds $TimeoutMilliseconds
+    if (([DateTime]::UtcNow - $script:lastHeartbeatWriteUtc).TotalSeconds -lt 1) { return }
+    if ($null -eq $script:heartbeatIdentity) { $script:heartbeatIdentity = Get-SchedulerState }
+    $values = [ordered]@{ heartbeatAt = Get-FactoryUtcTimestamp }
+    foreach ($name in @("pid", "processStartTimeUtc", "activity", "activitySince")) {
+        $values[$name] = Get-CliSafeProperty -InputObject $script:heartbeatIdentity -Name $name
+    }
+    Write-FactoryJsonAtomic -Path $heartbeatPath -Value $values
+    $script:lastHeartbeatWriteUtc = [DateTime]::UtcNow
 }
 
 function Write-SchedulerLoopErrorSafe {
@@ -251,7 +284,7 @@ function Touch-SchedulerLoopHeartbeatSafe {
 
 function Get-SchedulerStatusResult {
     $state = Read-FactoryJson -Path ([string]$context.statePath)
-    $scheduler = if ($null -ne $state.PSObject.Properties["scheduler"]) { $state.scheduler } else { $null }
+    $scheduler = if ($null -ne $state.PSObject.Properties["scheduler"]) { Merge-SchedulerHeartbeat -Scheduler $state.scheduler } else { $null }
     $processRunning = Test-SchedulerProcess -Scheduler $scheduler
     $ownershipHeld = Test-SchedulerOwnershipHeld
     $running = $processRunning -or $ownershipHeld

@@ -1136,6 +1136,12 @@ exact-SHA approval, linked-worktree project identity, dynamic concurrency,
 scheduler failure/busy recovery, early dead-lease reclaim, runtime migration,
 mutex diagnostics, and bounded pipeline-output persistence.
 
+The ledger regression and scheduler lock measurements run as part of the suite.
+Use `-LedgerOnly` for those checks, or `-LedgerOnly -NativeLedgerRace` for the
+unmodified concurrent writer/initializer stress run. See
+[state ledger safety](docs/state-ledger-safety.md) for the reproduced failure,
+write safeguards, retained backup, and measured lock rates.
+
 ## Safe cleanup
 
 Stop and review the factory first:

@@ -74,6 +74,9 @@
     "tests/FakeClaude.cs",
     "tests/FakePsql.cs",
     "tests/FakePreviewServer.ps1",
-    "tests/run-tests.ps1"
+    "tests/run-tests.ps1",
+    "tests/state-ledger.tests.ps1",
+    "tests/scheduler-ledger.tests.ps1",
+    "docs/state-ledger-safety.md"
   ]
 }

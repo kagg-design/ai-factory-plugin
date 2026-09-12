@@ -74,67 +74,76 @@ if ($Initialize) {
     New-Item -ItemType Directory -Path $eventsPath -Force | Out-Null
     New-Item -ItemType Directory -Path $worktreeRoot -Force | Out-Null
 
-    if (-not (Test-Path -LiteralPath $configPath)) {
-        Copy-Item (Join-Path $pluginRoot "config.default.json") $configPath
-    } else {
-        $config = Read-FactoryJson -Path $configPath
-        $configDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "config.default.json")
-        if (
-            $null -eq $config.PSObject.Properties["codingConcurrency"] -and
-            $null -ne $config.PSObject.Properties["concurrency"]
-        ) {
-            # Version 8 keeps the old value as a one-version compatibility
-            # alias instead of silently replacing it with the new default.
-            Set-FactoryProperty -Target $config -Name "codingConcurrency" -Value ([int]$config.concurrency)
+    $initializeMutex = Enter-FactoryMutex -ProjectKey $projectKey
+    try {
+        if (-not (Test-Path -LiteralPath $configPath)) {
+            Copy-Item (Join-Path $pluginRoot "config.default.json") $configPath
+        } else {
+            $config = Read-FactoryJson -Path $configPath
+            $configDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "config.default.json")
+            if (
+                $null -eq $config.PSObject.Properties["codingConcurrency"] -and
+                $null -ne $config.PSObject.Properties["concurrency"]
+            ) {
+                # Version 8 keeps the old value as a one-version compatibility
+                # alias instead of silently replacing it with the new default.
+                Set-FactoryProperty -Target $config -Name "codingConcurrency" -Value ([int]$config.concurrency)
+            }
+            Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
+            Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
+            Write-FactoryJsonAtomic -Path $configPath -Value $config
         }
-        Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
-        Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
-        Write-FactoryJsonAtomic -Path $configPath -Value $config
-    }
 
-    if (-not (Test-Path -LiteralPath $statePath)) {
-        Copy-Item (Join-Path $pluginRoot "resources\state.template.json") $statePath
-    } else {
-        $state = Read-FactoryJson -Path $statePath
-        $stateDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "resources\state.template.json")
-        Add-MissingFactoryProperties -Target $state -Defaults $stateDefaults
-        Set-FactoryProperty -Target $state -Name "version" -Value $stateDefaults.version
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            $state = Read-FactoryJson -Path (Join-Path $pluginRoot "resources\state.template.json")
+            Write-FactoryJsonAtomic -Path $statePath -Value $state
+        } else {
+            $state = Read-FactoryJson -Path $statePath
+            $stateBefore = $state | ConvertTo-Json -Depth 100 -Compress
+            $stateDefaults = Read-FactoryJson -Path (Join-Path $pluginRoot "resources\state.template.json")
+            Add-MissingFactoryProperties -Target $state -Defaults $stateDefaults
+            Set-FactoryProperty -Target $state -Name "version" -Value $stateDefaults.version
 
-        foreach ($task in @($state.tasks)) {
-            foreach ($property in @{
-                source = $null
-                startMode = "auto"
-                backgroundSession = $null
-                rejectionReason = $null
-                rejectedAt = $null
-                plan = $null
-                review = $null
-                approval = $null
-                integration = $null
-                production = $null
-                cleanup = $null
-                reworkRequestedAt = $null
-                planRecordedAt = $null
-                resultRecordedAt = $null
-                pendingInstructions = $null
-                holdReason = $null
-                heldFromStatus = $null
-                attemptPrepared = $false
-                answerHash = $null
-                testDatabase = $null
-                syncPreparation = $null
-                launchStartedAt = $null
-                launchCompletedAt = $null
-                launchFailedAt = $null
-                launchProcessId = $null
-                launchProcessStartTimeUtc = $null
-            }.GetEnumerator()) {
-                if ($null -eq $task.PSObject.Properties[$property.Key]) {
-                    $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
+            foreach ($task in @($state.tasks)) {
+                foreach ($property in @{
+                    source = $null
+                    startMode = "auto"
+                    backgroundSession = $null
+                    rejectionReason = $null
+                    rejectedAt = $null
+                    plan = $null
+                    review = $null
+                    approval = $null
+                    integration = $null
+                    production = $null
+                    cleanup = $null
+                    reworkRequestedAt = $null
+                    planRecordedAt = $null
+                    resultRecordedAt = $null
+                    pendingInstructions = $null
+                    holdReason = $null
+                    heldFromStatus = $null
+                    attemptPrepared = $false
+                    answerHash = $null
+                    testDatabase = $null
+                    syncPreparation = $null
+                    launchStartedAt = $null
+                    launchCompletedAt = $null
+                    launchFailedAt = $null
+                    launchProcessId = $null
+                    launchProcessStartTimeUtc = $null
+                }.GetEnumerator()) {
+                    if ($null -eq $task.PSObject.Properties[$property.Key]) {
+                        $task | Add-Member -NotePropertyName $property.Key -NotePropertyValue $property.Value
+                    }
                 }
             }
+            if (($state | ConvertTo-Json -Depth 100 -Compress) -cne $stateBefore) {
+                Write-FactoryJsonAtomic -Path $statePath -Value $state
+            }
         }
-        Write-FactoryJsonAtomic -Path $statePath -Value $state
+    } finally {
+        Exit-FactoryMutex -Mutex $initializeMutex
     }
 }
 
