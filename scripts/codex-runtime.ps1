@@ -220,7 +220,14 @@ function Get-FactoryCodexSessionSnapshot {
             }
             if ($type -eq "turn.completed") { $terminal = $true }
             if ($type -in @("error", "turn.failed")) {
-                $eventError = if ([string]$event.message) { [string]$event.message } else { $line }
+                # Codex uses message on error events, but error.message on
+                # turn.failed. Missing optional fields must not abort the queue.
+                $errorMessage = [string](Get-FactoryNestedValue -Target $event -Name "message" -Default "")
+                if (-not $errorMessage) {
+                    $errorDetail = Get-FactoryNestedValue -Target $event -Name "error"
+                    $errorMessage = [string](Get-FactoryNestedValue -Target $errorDetail -Name "message" -Default "")
+                }
+                $eventError = if ($errorMessage) { $errorMessage } else { $line }
             }
         }
     }

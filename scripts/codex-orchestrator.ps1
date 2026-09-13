@@ -427,6 +427,10 @@ function Get-FactoryCodexSharedServerStatus {
     $record = if (Test-Path -LiteralPath $paths.record -PathType Leaf) {
         try { Read-FactoryJson -Path $paths.record } catch { $null }
     } else { $null }
+    # PowerShell 7 can deserialize ISO timestamps as DateTime. Casting that
+    # value to string loses its UTC marker and uses culture-dependent formatting.
+    $recordedStart = Get-FactoryNestedValue -Target $record -Name "processStartTimeUtc" -Default ""
+    $parsedStart = ConvertFrom-FactoryRoundtripTimestamp -Value $recordedStart
     $alive = Test-FactoryRecordedProcess -ProcessRecord $record
     $endpoint = if ($null -ne $record) { [string](Get-FactoryNestedValue -Target $record -Name "endpoint" -Default "") } else { "" }
     $healthy = if ($Probe -and $alive -and $endpoint) {
@@ -438,7 +442,7 @@ function Get-FactoryCodexSharedServerStatus {
         healthy = $healthy
         endpoint = $endpoint
         pid = if ($null -ne $record) { [int](Get-FactoryNestedValue -Target $record -Name "pid" -Default 0) } else { 0 }
-        processStartTimeUtc = if ($null -ne $record) { [string](Get-FactoryNestedValue -Target $record -Name "processStartTimeUtc" -Default "") } else { "" }
+        processStartTimeUtc = if ($parsedStart.success) { ConvertTo-FactoryRoundtripTimestamp -Value $parsedStart.value } else { [string]$recordedStart }
         codexCommand = if ($null -ne $record) { [string](Get-FactoryNestedValue -Target $record -Name "codexCommand" -Default "") } else { "" }
         recordPath = $paths.record
         stdoutPath = $paths.stdout
@@ -547,8 +551,8 @@ function Stop-FactoryCodexSharedServer {
         }
         $process = Get-Process -Id ([int]$status.pid) -ErrorAction Stop
         $actualStart = $process.StartTime.ToUniversalTime()
-        $expectedStart = [DateTime]::Parse([string]$status.processStartTimeUtc).ToUniversalTime()
-        if ([Math]::Abs(($actualStart - $expectedStart).TotalSeconds) -ge 1) {
+        $expectedStart = ConvertFrom-FactoryRoundtripTimestamp -Value $status.processStartTimeUtc
+        if (-not $expectedStart.success -or [Math]::Abs(($actualStart - [DateTime]$expectedStart.value).TotalSeconds) -ge 1) {
             throw "Refusing to stop PID $($status.pid) because its process identity no longer matches the shared Codex app-server."
         }
         $process.Kill()
@@ -812,16 +816,14 @@ You are the Factory Orchestrator for '$repositoryRoot'. On every operator reques
 function Get-FactoryCodexOrchestratorArguments {
     param(
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][string]$RuntimeHome,
-        [Parameter(Mandatory = $true)][string]$WorktreeRoot,
         [string]$Model = ""
     )
 
+    # Remote resume inherits permissions from the persisted app-server thread.
+    # CLI permission overrides (including --add-dir) are rejected in this mode;
+    # New-FactoryCodexAppThread sets the policy and workspace roots at creation.
     $arguments = @(
-        "-C", [IO.Path]::GetFullPath($RepositoryRoot),
-        "--approve-for-me",
-        "--add-dir", [IO.Path]::GetFullPath($RuntimeHome),
-        "--add-dir", [IO.Path]::GetFullPath($WorktreeRoot)
+        "-C", [IO.Path]::GetFullPath($RepositoryRoot)
     )
     if ($Model) { $arguments += @("--model", $Model) }
     return $arguments
@@ -882,8 +884,6 @@ function Start-FactoryCodexOrchestrator {
     }
     $sharedArguments = @(Get-FactoryCodexOrchestratorArguments `
         -RepositoryRoot ([string]$Context.repositoryRoot) `
-        -RuntimeHome ([string]$Context.runtimeHome) `
-        -WorktreeRoot ([string]$Context.worktreeRoot) `
         -Model $Model)
 
     $sharedServer = Start-FactoryCodexSharedServer `

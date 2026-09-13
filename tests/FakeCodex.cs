@@ -212,6 +212,13 @@ public static class FakeCodex
         }
         if (args.Length > 0 && args[0] == "app-server")
             return RunAppServer(args);
+        if (args.Contains("--remote") && args.Contains("resume") &&
+            args.Any(arg => new[] { "--approve-for-me", "--add-dir", "--sandbox", "-s",
+                "--ask-for-approval", "-a", "--dangerously-bypass-approvals-and-sandbox" }.Contains(arg)))
+        {
+            Console.Error.WriteLine("Permission overrides are not supported when resuming a remote task.");
+            return 1;
+        }
         if (args.Length > 0 && (args[0] == "archive" || args[0] == "delete"))
             return 0;
         if (args.Length == 0 || args[0] != "exec")
