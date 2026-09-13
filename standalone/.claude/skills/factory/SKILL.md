@@ -17,6 +17,14 @@ Manage Claude Factory for the current Git repository. Keep operational
 messages compact. Never put plugin files in the
 target repository.
 
+Reuse protocol instructions already available in the conversation. Do not reread
+this file merely because another request arrived. Reload when an update is known
+or needed instructions are missing from context; read only the relevant sections
+when enough context remains. Do not announce routine skill or protocol reads.
+Report useful progress, results, blockers, and operator decisions. This applies
+only to instructions: still reconcile sessions and read fresh native state when
+the command requires it.
+
 ## Load and migrate private context
 
 Run:

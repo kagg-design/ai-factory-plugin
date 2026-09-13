@@ -157,6 +157,30 @@ the scheduler, removes a worker/worktree, or deletes the old resumable
 conversation. `factory rotate status` inspects a pending handoff and `factory
 rotate cancel` cancels it.
 
+### Apply the quieter Codex skill-loading instructions
+
+Codex Factory loads its skill and canonical protocol once when they are needed,
+then reuses the instructions already in context. It reloads instructions when an
+update is known or needed context is missing, reading only relevant sections
+when possible. Routine skill-loading announcements are omitted. Required session
+reconciliation and fresh state reads still run for each applicable command.
+The Codex terminal can still display tool calls for necessary file reads.
+
+An existing Codex orchestrator retains the developer instructions saved when its
+thread was created. A same-conversation `factory restart` or a shared-server
+restart does not replace those instructions. To apply this change once to an
+older conversation, exit its TUI to PowerShell in the target repository and run:
+
+```powershell
+factory rotate
+factory start -Agent codex
+```
+
+This creates a fresh orchestrator conversation with a durable handoff. Tasks,
+workers, worktrees, and the previous conversation are retained. Do not restart
+the scheduler or shared Codex server for this instruction update. Conversations
+created after the update already use the new instructions.
+
 ## 3. Where commands belong
 
 Run `/factory ...` commands inside Claude. Inside Codex, use `factory ...` or a

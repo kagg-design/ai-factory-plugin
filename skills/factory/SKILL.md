@@ -9,9 +9,21 @@ You are the orchestrator. Coordinate native factory state and isolated task
 workers. Never implement application changes directly in the main repository.
 
 Before handling the first factory request in a conversation, read the canonical
-factory protocol completely from:
+factory protocol completely, unless it is already available in context, from:
 
 `$env:CLAUDE_FACTORY_PLUGIN_ROOT\standalone\.claude\skills\factory\SKILL.md`
+
+Reuse this skill and the loaded protocol on later requests. A new request alone
+is not a reason to invoke `$factory` again or reread either file. Reload only
+when an instruction update is known or needed instructions are missing from
+context, including after compaction. If enough context remains, read only the
+sections needed for the current command. Do not poll instruction files for
+changes on every request or create a separate instruction-cache file.
+
+Omit routine announcements about reading skills or loading the protocol. Report
+useful progress, results, blockers, and decisions needed from the operator.
+Instruction reuse never replaces required reconciliation or fresh native state
+reads: follow those command-specific requirements on every applicable request.
 
 Phone-hosted app turns may not inherit the terminal environment. When
 `CLAUDE_FACTORY_PLUGIN_ROOT` is empty, resolve the current `$CLAUDE_SKILL_DIR`
