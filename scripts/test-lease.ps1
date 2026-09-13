@@ -10,14 +10,22 @@ param(
     [int]$PollMilliseconds = 0,
     [int]$TtlSeconds = 0,
     [string]$HeartbeatLogPath = "",
-    [switch]$NoHeartbeat
+    [switch]$NoHeartbeat,
+    [Parameter(DontShow = $true)]$ProjectContext = $null
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 
-$context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
-    ConvertFrom-Json
+if ($null -ne $ProjectContext) {
+    if ($Action -ne "status" -or -not (Test-FactorySamePath -Left ([string]$ProjectContext.repositoryRoot) -Right $Repository)) {
+        throw "A supplied project context is supported only for status of the matching repository."
+    }
+    $context = $ProjectContext
+} else {
+    $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
+        ConvertFrom-Json
+}
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 $leasePath = Join-Path ([string]$context.projectData) "test-lease.json"
 $reclaimLogPath = Join-Path ([string]$context.projectData) "test-lease.reclaims.jsonl"
@@ -298,7 +306,7 @@ if ($Action -eq "status") {
         reclaimLogPath = $reclaimLogPath
         heartbeatLogPath = $HeartbeatLogPath
     } | ConvertTo-Json -Depth 20
-    exit 0
+    return
 }
 
 if ($Action -eq "reclaim") {

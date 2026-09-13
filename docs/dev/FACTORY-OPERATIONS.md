@@ -294,6 +294,17 @@ Help is read-only and never executes the command it describes.
 
 ## 4. Reading `/factory status`
 
+Native `factory status` performs live worker reconciliation (unless
+`-NoReconcile` is supplied), scheduler checks, and test-lease checks on every
+request. These share one PowerShell child process
+and one resolved project context; no status snapshot or cross-request cache is
+used. Claude's session list is queried only when a recorded Claude worker needs
+it, including legacy sessions without an explicit runtime. Existing projects
+skip initialization writes. Settled tasks whose worker is already terminal do
+not reopen retained Codex transcripts or refresh unchanged session metadata,
+so an unchanged status read does not rewrite the task ledger. This optimization
+applies on the next command invocation without restarting the scheduler or TUI.
+
 The default report is organized around operator actions, not internal state
 counts. Every unfinished task is shown as a narrow card:
 

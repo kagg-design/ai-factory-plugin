@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "",
-    [string]$CodexCommand = ""
+    [string]$CodexCommand = "",
+    [Parameter(DontShow = $true)]$ProjectContext = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,10 +18,16 @@ if (-not $ClaudeCommand) {
     }
 }
 
-$context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
-    ConvertFrom-Json
+if ($null -ne $ProjectContext) {
+    if (-not (Test-FactorySamePath -Left ([string]$ProjectContext.repositoryRoot) -Right $Repository)) {
+        throw "Project context does not match the reconciliation repository."
+    }
+    $context = $ProjectContext
+} else {
+    $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
+        ConvertFrom-Json
+}
 $config = Read-FactoryJson -Path $context.configPath
-$CodexCommand = Resolve-FactoryCodexCommand -Config $config -ExplicitCommand $CodexCommand
 $blockedSessionTimeoutMinutes = [Math]::Max(
     1,
     [int](Get-FactoryNestedValue -Target $config -Name "blockedSessionTimeoutMinutes" -Default 30)
@@ -45,19 +52,34 @@ function Get-FactoryBlockedSessionReason {
     return "The runtime reports a blocked worker session; attach to inspect the pending tool call."
 }
 
+function Get-ReconcileClaudeListing {
+    try {
+        return [pscustomobject]@{ rows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand); available = $true }
+    } catch {
+        return [pscustomobject]@{ rows = @(); available = $false }
+    }
+}
+
 $agentRows = @()
-$claudeListingAvailable = $true
-try {
-    $agentRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)
-} catch {
-    $agentRows = @()
-    $claudeListingAvailable = $false
+$claudeListing = $null
+# Avoid querying an unrelated runtime for a Codex-only queue. Prefetch outside
+# the state lock when Claude sessions are present; recheck the fresh locked
+# state below so a concurrently added Claude session is still reconciled.
+$initialState = Read-FactoryJson -Path $context.statePath
+$hasClaudeSessions = @($initialState.tasks | Where-Object {
+    (Test-FactoryTaskHasRecordedSession -Task $_) -and
+    [string](Get-FactoryNestedValue -Target $_.backgroundSession -Name "runtime" -Default "claude") -ne "codex"
+}).Count -gt 0
+if ($hasClaudeSessions) {
+    $claudeListing = Get-ReconcileClaudeListing
+    $agentRows = @($claudeListing.rows)
 }
 
 $mutex = $null
 $changes = New-Object System.Collections.Generic.List[object]
 $metadataChanged = $false
 $codexSessionsSeen = 0
+$settledTaskStates = @("awaiting-review", "approved", "integrating", "production", "cleaning", "held", "rejected", "blocked", "failed", "done")
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
@@ -65,6 +87,12 @@ try {
     foreach ($task in @($state.tasks)) {
         $before = [string]$task.status
         $taskId = [string]$task.id
+        $recordedSessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
+        # Once a terminal worker has already moved its task into a settled
+        # state, its final event has been consumed. Retained session metadata is
+        # useful for inspection, but reopening its transcript cannot produce a
+        # valid transition and used to force a state rewrite on every status.
+        if ($recordedSessionState -in @("stopped", "done", "failed") -and $before -in $settledTaskStates) { continue }
         if (-not (Test-FactoryTaskHasRecordedSession -Task $task)) {
             if ($before -in @("starting", "planning")) {
                 $launchStartedAt = Get-FactoryNestedValue -Target $task -Name "launchStartedAt"
@@ -128,7 +156,11 @@ try {
             $sessionRow = Get-FactoryCodexSessionSnapshot -Session $task.backgroundSession
             $codexSessionsSeen++
         } else {
-            $sessionLookupAvailable = $claudeListingAvailable
+            if ($null -eq $claudeListing) {
+                $claudeListing = Get-ReconcileClaudeListing
+                $agentRows = @($claudeListing.rows)
+            }
+            $sessionLookupAvailable = [bool]$claudeListing.available
             foreach ($pass in @("backgroundId", "sessionId", "shape")) {
                 foreach ($candidateSessionRow in @($agentRows)) {
                 $rowId = if ($null -ne $candidateSessionRow.PSObject.Properties["id"]) { [string]$candidateSessionRow.id } else { "" }
@@ -157,7 +189,6 @@ try {
             }
         }
         if ($null -eq $sessionRow -and $sessionLookupAvailable) {
-            $recordedSessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
             if ($recordedSessionState -notin @("stopped", "done", "failed")) {
                 $missingAt = Get-FactoryUtcTimestamp
                 Set-FactoryProperty -Target $task.backgroundSession -Name "state" -Value "stopped"

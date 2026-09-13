@@ -521,7 +521,7 @@ function Add-CliDoneTree {
 }
 
 function Write-CliStatus {
-    param($Context, $Config, $State, [string]$Filter, [string]$ReconcileWarning)
+    param($Context, $Config, $State, [string]$Filter, [string]$ReconcileWarning, $TestLease, [string]$TestLeaseError)
 
     if ($Filter -and $Filter -ne "all" -and $Filter -notin $script:FactoryStates) {
         throw "Unknown status filter '$Filter'. Use one of: $($script:FactoryStates -join ', '), all."
@@ -597,9 +597,8 @@ function Write-CliStatus {
     $lines.Add("$($script:Tree.Vertical)  $activity $($script:Tree.Horizontal) runtime $workerRuntime $($script:Tree.Horizontal) coding slots $activeWorkers/$concurrency $($script:Tree.Horizontal) scheduler $scheduler")
     $lines.Add("$($script:Tree.Vertical)  attention $($script:Tree.Horizontal) AI actions $($aiActions.Count) $($script:Tree.Horizontal) human decisions $($humanDecisions.Count) $($script:Tree.Horizontal) blocked tasks $blockedTaskCount")
     try {
-        $testLease = Invoke-CliJsonScript -ScriptName "test-lease.ps1" -Arguments @(
-            "-Action", "status", "-Repository", [string]$Context.repositoryRoot
-        )
+        if ($TestLeaseError) { throw $TestLeaseError }
+        if ($null -eq $TestLease) { throw "Test lease status returned no data." }
         $leaseHolder = Get-CliProperty -InputObject $testLease -Name "holder"
         $leaseQueue = @(Get-CliProperty -InputObject $testLease -Name "queue" -Default @())
         if ($null -eq $leaseHolder) {
@@ -2063,6 +2062,18 @@ if ($normalizedCommand -eq "completion") {
     exit 0
 }
 
+if ($normalizedCommand -eq "status") {
+    if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "status accepts at most one state filter." }
+    $statusArguments = @("-Repository", $Repository, "-ClaudeCommand", $ClaudeCommand)
+    if ($CodexCommand) { $statusArguments += @("-CodexCommand", $CodexCommand) }
+    if ($NoReconcile) { $statusArguments += "-NoReconcile" }
+    $liveStatus = Invoke-CliJsonScript -ScriptName "get-factory-status.ps1" -Arguments $statusArguments
+    Write-CliStatus -Context $liveStatus.context -Config $liveStatus.config -State $liveStatus.state `
+        -Filter $Target.ToLowerInvariant() -ReconcileWarning $liveStatus.reconcileWarning `
+        -TestLease $liveStatus.testLease -TestLeaseError $liveStatus.testLeaseError
+    exit 0
+}
+
 $context = Get-CliContext
 if ($normalizedCommand -eq 'archive:seed') {
     $seedOptions = @(@($Target) + @($remainingValues) | Where-Object { $_ })
@@ -2207,20 +2218,10 @@ if ($normalizedCommand -eq "purge") {
 }
 
 $reconcileWarning = Invoke-CliReconcile -Context $context
-if ($normalizedCommand -eq "status") {
-    $null = Invoke-CliJsonScript -ScriptName "factory-scheduler.ps1" -Arguments @(
-        "-Action", "status", "-Repository", [string]$context.repositoryRoot,
-        "-ClaudeCommand", $ClaudeCommand, "-RuntimeHome", [string]$context.runtimeHome
-    )
-}
 $state = Read-FactoryJson -Path ([string]$context.statePath)
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 
 switch ($normalizedCommand) {
-    "status" {
-        if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "status accepts at most one state filter." }
-        Write-CliStatus -Context $context -Config $config -State $state -Filter $Target.ToLowerInvariant() -ReconcileWarning $reconcileWarning
-    }
     "inspect" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "inspect accepts exactly one task ID." }
         Write-CliInspect -Context $context -Config $config -State $state -TaskId $Target -ReconcileWarning $reconcileWarning

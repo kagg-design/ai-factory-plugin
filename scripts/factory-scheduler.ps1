@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [string]$ClaudeCommand = "claude",
     [string]$RuntimeHome = "",
-    [int]$IntervalSeconds = 0
+    [int]$IntervalSeconds = 0,
+    [Parameter(DontShow = $true)]$ProjectContext = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,9 +19,16 @@ if ($RuntimeHome) {
     $env:CLAUDE_FACTORY_HOME = [IO.Path]::GetFullPath($RuntimeHome)
 }
 
-$contextText = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize | Out-String).Trim()
-if (-not $contextText) { throw "Factory project context returned no data." }
-$context = $contextText | ConvertFrom-Json
+if ($null -ne $ProjectContext) {
+    if ($Action -ne "status" -or -not (Test-FactorySamePath -Left ([string]$ProjectContext.repositoryRoot) -Right $Repository)) {
+        throw "A supplied project context is supported only for status of the matching repository."
+    }
+    $context = $ProjectContext
+} else {
+    $contextText = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize | Out-String).Trim()
+    if (-not $contextText) { throw "Factory project context returned no data." }
+    $context = $contextText | ConvertFrom-Json
+}
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 $schedulerConfig = if ($null -ne $config.PSObject.Properties["nativeScheduler"]) {
     $config.nativeScheduler
