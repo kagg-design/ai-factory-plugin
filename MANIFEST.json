@@ -79,6 +79,7 @@
     "tests/FakePreviewServer.ps1",
     "tests/run-tests.ps1",
     "tests/factory-status.tests.ps1",
+    "tests/claude-orchestrator-lifecycle.tests.ps1",
     "tests/codex-session-snapshot.tests.ps1",
     "tests/codex-server-identity.tests.ps1",
     "tests/codex-orchestrator-start.tests.ps1",

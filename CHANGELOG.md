@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Treat Claude sessions with a reported PID as resident even when their turn
+  state is `done`. `factory start` attaches the existing orchestrator, while
+  `factory restart` stops it before resuming the saved conversation with the
+  updated executable; a failed stop prevents the resume.
 - Made a matching task commit and validated worker result authoritative over a
   resident Claude worker row. Such tasks now release their coding slot, appear
   as ready for review, and permit review or explicit session release, while

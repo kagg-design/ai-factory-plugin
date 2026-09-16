@@ -34,6 +34,7 @@ if ($LedgerOnly) { return }
 & (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
 & (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
 & (Join-Path $PSScriptRoot 'factory-status.tests.ps1') -PluginRoot $pluginRoot
+& (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\completed-archive.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")

@@ -1814,6 +1814,12 @@ function Test-FactoryPathWithin {
 function Test-FactoryTerminalAgentRow {
     param([Parameter(Mandatory = $true)]$Row)
 
+    # Claude can report a completed turn (done/idle) while its background
+    # process still owns the conversation. A reported PID must be stopped or
+    # attached through Claude before attempting to resume that conversation.
+    if ($null -ne $Row.PSObject.Properties["pid"] -and [long]$Row.pid -gt 0) {
+        return $false
+    }
     $terminal = @("done", "stopped", "failed")
     $state = if ($null -ne $Row.PSObject.Properties["state"]) { [string]$Row.state } else { "" }
     $status = if ($null -ne $Row.PSObject.Properties["status"]) { [string]$Row.status } else { "" }
