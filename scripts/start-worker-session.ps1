@@ -37,7 +37,6 @@ $metadataPath = Join-Path $context.sessionsPath "$safeTaskId.json"
 $promptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-prompt.txt"
 $systemPromptPath = Join-Path $context.sessionsPath "$safeTaskId-a$attempt-worker-system-prompt.txt"
 $eventDirectory = Join-Path $context.eventsPath $safeTaskId
-$previousFactoryPromptPath = $env:CLAUDE_FACTORY_PROMPT_PATH
 $claudeVersion = $null
 $agentResolutionPreference = "plugin"
 $testDatabaseName = $null
@@ -227,10 +226,8 @@ try {
         if ([string]$testDatabase.name -ne [string]$testDatabaseName) {
             throw "Initialized test database '$($testDatabase.name)' does not match recorded database '$testDatabaseName'."
         }
-        $workerEnvironment = Get-FactoryTestDatabaseProcessEnvironment `
-            -Settings $testDatabaseSettings `
-            -DatabaseName ([string]$testDatabase.name)
     }
+    $workerEnvironment = New-FactoryWorkerEnvironment -Context $context -Task $task -Worktree $worktree -PromptPath $promptPath -DatabaseSettings $testDatabaseSettings -DatabaseName ([string]$testDatabase.name)
 
     New-Item -ItemType Directory -Path $eventDirectory -Force | Out-Null
 
@@ -444,7 +441,6 @@ $reworkInstruction
     }
     $shortPrompt = "FACTORY_PROMPT_FILE=$promptPath"
     if ($shortPrompt -match '[\r\n"'']') { throw "Factory prompt pointer contains unsafe command-line characters." }
-    $env:CLAUDE_FACTORY_PROMPT_PATH = $promptPath
     $launch = Invoke-FactoryWorkerLaunch `
         -ClaudeCommand $ClaudeCommand `
         -PluginRoot ([string]$context.pluginRoot) `
@@ -637,10 +633,4 @@ $reworkInstruction
         Exit-FactoryMutex -Mutex $mutex
     }
     throw
-} finally {
-    if ($null -eq $previousFactoryPromptPath) {
-        Remove-Item Env:\CLAUDE_FACTORY_PROMPT_PATH -ErrorAction SilentlyContinue
-    } else {
-        $env:CLAUDE_FACTORY_PROMPT_PATH = $previousFactoryPromptPath
-    }
 }

@@ -59,8 +59,10 @@ blocked result instead of guessing.
 - Add or update a regression test whenever practical.
 - Run targeted tests freely while coding; they do not need the test lease.
 - Before emitting a completed result, create/amend the single task commit and
-  acquire `testLeaseScript -Action acquire -Phase verify` for this task. Wait
-  for ownership; never infer availability from status alone.
+  acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Wait
+  for ownership; never infer availability from status alone. Keep acquire, sync,
+  checks and release in ONE long-lived PowerShell call, passing that call's
+  `$PID`. Never use a one-shot shell as the owner or omit the PID.
 - While holding the lease, call
   `syncScript -Action prepare -LeaseToken <token>`, re-read HEAD, then run every
   trusted command in `FACTORY_TASK.fullTestCommands` plus the nearest required
@@ -69,7 +71,9 @@ blocked result instead of guessing.
   `finally`, including after sync or test failure. Targeted iteration remains
   unrestricted.
 - When `FACTORY_TASK.testDatabase` is non-empty, retain the isolated database
-  already supplied in the worker environment.
+  already supplied in the worker environment. Verify it before testing; if it
+  differs or the prompt pointer belongs to another task, stop and request a
+  worker relaunch instead of trusting inherited PHPUnit/database defaults.
 - Review the diff, create exactly one final task commit, and require a clean
   `git status --porcelain` afterward.
 - Record the branch, full SHA, absolute worktree, and exact test outcomes.

@@ -26,18 +26,11 @@ if (-not $shimDirectory -or -not (Test-Path -LiteralPath (Join-Path $shimDirecto
 }
 
 $realGit = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
-$resumeEnvironment = @{
-    CLAUDE_FACTORY_PLUGIN_ROOT = [string]$context.pluginRoot
-    CLAUDE_FACTORY_REAL_GIT = [string]$realGit.Source
-    CLAUDE_FACTORY_WORKTREE = [IO.Path]::GetFullPath($worktree)
-    PATH = "$shimDirectory;$env:PATH"
-}
 $databaseSettings = Get-FactoryTestDatabaseSettings -Config $config -RepositoryRoot ([string]$context.repositoryRoot)
-if ($null -ne $databaseSettings -and [string]$task.testDatabase) {
-    foreach ($entry in (Get-FactoryTestDatabaseProcessEnvironment -Settings $databaseSettings -DatabaseName ([string]$task.testDatabase)).GetEnumerator()) {
-        $resumeEnvironment[[string]$entry.Key] = [string]$entry.Value
-    }
-}
+$metadata = Read-FactoryJson (Join-Path $context.sessionsPath ((ConvertTo-FactoryTaskArtifactName $TaskId) + '.json'))
+$resumeEnvironment = New-FactoryWorkerEnvironment -Context $context -Task $task -Worktree $worktree -PromptPath $metadata.promptPath -DatabaseSettings $databaseSettings -DatabaseName ([string]$task.testDatabase)
+$resumeEnvironment.CLAUDE_FACTORY_REAL_GIT = [string]$realGit.Source
+$resumeEnvironment.PATH = "$shimDirectory;$env:PATH"
 $previousEnvironment = @{}
 $capture = $null
 try {

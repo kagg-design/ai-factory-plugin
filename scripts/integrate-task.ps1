@@ -559,7 +559,8 @@ try {
                 # itself. Keep that audit instead of replacing it with the
                 # pipeline wrapper error; fall back to this generic audit only
                 # if cleanup died before it could write one.
-                Update-PipelineTask -Status "blocked" -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $failureAudit -ClearApproval $true -PreserveRecordedCleanupFailure
+                $failure = "Publication is verified; artifact cleanup needs retry: factory cleanup $TaskId. $failure"
+                Update-PipelineTask -Status "cleaning" -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $productionAudit -CleanupValue $failureAudit -ClearApproval $true -PreserveRecordedCleanupFailure
             } elseif ($currentStage -eq "production") {
                 Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $failureAudit -ClearApproval $true
             } else {

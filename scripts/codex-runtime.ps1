@@ -157,40 +157,52 @@ function Start-FactoryCodexWorkerProcess {
     $argumentLine = @($arguments | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }) -join " "
 
     $factoryEnvironment = @{}
-    foreach ($entry in $Environment.GetEnumerator()) { $factoryEnvironment[[string]$entry.Key] = [string]$entry.Value }
+    foreach ($entry in $Environment.GetEnumerator()) { $factoryEnvironment[[string]$entry.Key] = $entry.Value }
     $factoryEnvironment["CLAUDE_FACTORY_PLUGIN_ROOT"] = [IO.Path]::GetFullPath($PluginRoot)
     $factoryEnvironment["CLAUDE_FACTORY_REAL_GIT"] = [string]$realGit.Source
     $factoryEnvironment["CLAUDE_FACTORY_WORKTREE"] = [IO.Path]::GetFullPath($Worktree)
     $factoryEnvironment["PATH"] = "$shimDirectory;$env:PATH"
-    $previous = @{}
+    $launchRequest = "$ArtifactPrefix-codex-launch.json"
+    $launchResult = "$ArtifactPrefix-codex-launch-result.json"
+    Remove-Item -LiteralPath $launchResult -ErrorAction SilentlyContinue
+    # Only non-secret paths/argv go to disk. Environment values cross the OS
+    # process boundary directly, never through global SetEnvironmentVariable.
+    Write-FactoryJsonAtomic $launchRequest ([ordered]@{
+        executable = $executable; arguments = $argumentLine; worktree = [IO.Path]::GetFullPath($Worktree)
+        promptPath = $PromptPath; stdoutPath = $jsonlPath; stderrPath = $stderrPath; resultPath = $launchResult
+    })
     try {
-        foreach ($entry in $factoryEnvironment.GetEnumerator()) {
-            $name = [string]$entry.Key
-            $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-            [Environment]::SetEnvironmentVariable($name, [string]$entry.Value, "Process")
+        if (-not ('ClaudeFactory.DetachedWorkerProcess' -as [type])) {
+            Add-Type -Path (Join-Path $PSScriptRoot 'DetachedWorkerProcess.cs')
         }
-        $process = Start-Process `
-            -FilePath $executable `
-            -ArgumentList $argumentLine `
-            -WorkingDirectory ([IO.Path]::GetFullPath($Worktree)) `
-            -RedirectStandardInput $PromptPath `
-            -RedirectStandardOutput $jsonlPath `
-            -RedirectStandardError $stderrPath `
-            -WindowStyle Hidden `
-            -PassThru
+        $launcherExe = (Get-Command powershell -ErrorAction Stop).Source
+        $launcherArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'start-codex-process.ps1'), '-RequestPath', $launchRequest)
+        $launcherLine = ($launcherArgs | ForEach-Object { ConvertTo-FactoryWindowsArgument $_ }) -join ' '
+        $launcherPid = [ClaudeFactory.DetachedWorkerProcess]::Start($launcherExe, $launcherLine, $Worktree, $factoryEnvironment)
+        # Keep the launch reservation while its helper is alive. A timeout
+        # could otherwise report failure just before a delayed worker starts.
+        while (-not (Test-Path -LiteralPath $launchResult)) {
+            if (-not (Get-Process -Id $launcherPid -ErrorAction SilentlyContinue)) {
+                # The launcher publishes atomically before exit; its last write
+                # can race the first existence check in this polling iteration.
+                if (Test-Path -LiteralPath $launchResult) { break }
+                throw "Codex worker launcher did not publish its result; inspect '$launchRequest'."
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $process = Read-FactoryJson $launchResult
+        if ([string]$process.error) { throw "Codex worker launch failed: $($process.error)" }
     } finally {
-        foreach ($entry in $previous.GetEnumerator()) {
-            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
-        }
+        if (Test-Path -LiteralPath $launchResult) { Remove-Item -LiteralPath $launchRequest, $launchResult -Force }
     }
     return [pscustomobject]@{
         runtime = "codex"
-        id = "codex-$($process.Id)"
+        id = "codex-$($process.processId)"
         sessionId = $null
         name = $SessionName
         state = "working"
-        processId = $process.Id
-        processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString("o")
+        processId = [int]$process.processId
+        processStartTimeUtc = [string]$process.processStartTimeUtc
         transcriptPath = $jsonlPath
         stderrPath = $stderrPath
         lastMessagePath = $lastMessagePath

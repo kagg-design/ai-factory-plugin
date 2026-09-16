@@ -833,8 +833,11 @@ Manual holds remain distinct and are not automatically retryable.
 
 Worker result markers are parsed from the first standalone `FACTORY_RESULT` or
 `FACTORY_PLAN` line, with a first-occurrence compatibility fallback. A marker
-with malformed JSON is recorded as `invalid-marker` and surfaced as the task
-error. For completed work, Factory derives the authoritative `changedFiles`
+with malformed JSON is recorded as `invalid-marker`, with an escaped preview
+of the next 200 characters, and requests report correction in `awaiting-input`.
+Worktrees and commits remain intact; the task cannot be reviewed or published
+until a corrected result passes validation. Whitespace and optional JSON fences
+are accepted. For completed work, Factory derives the authoritative `changedFiles`
 list from the validated commit; a worker-supplied list is optional diagnostics
 and a mismatch cannot reject an otherwise valid clean commit.
 
@@ -929,7 +932,7 @@ factory:
 
 Cleanup is audited as a separate stage after every configured remote push is
 verified. If it fails, completed publications remain recorded as `published`,
-the task becomes `blocked` with `cleanup: failed`, and `factory cleanup
+the task remains `cleaning` with `cleanup: failed`, and `factory cleanup
 <task-id>` retries only artifact cleanup without republishing anything. A
 cleanup error does not abort the scheduler's worker-launch pass for other
 queued tasks.

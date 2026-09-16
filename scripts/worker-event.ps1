@@ -75,13 +75,17 @@ function ConvertFrom-FactoryWorkerMarkerMessage {
     }
 
     $chosen = @($located | Sort-Object Index | Select-Object -First 1)[0]
-    $firstBrace = $Message.IndexOf('{', [int]$chosen.JsonSearchIndex)
-    if ($firstBrace -lt 0) {
+    $following = $Message.Substring([int]$chosen.JsonSearchIndex)
+    $preview = $following.Substring(0, [Math]::Min(200, $following.Length))
+    $previewText = ConvertTo-Json -InputObject $preview -Compress
+    $prefix = [regex]::Match($following, '^\s*(?::\s*)?(?:```(?:json)?[ \t]*\r?\n\s*)?', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $firstBrace = [int]$chosen.JsonSearchIndex + $prefix.Length
+    if ($firstBrace -ge $Message.Length -or $Message[$firstBrace] -ne '{') {
         $reason = "Marker $([string]$chosen.Marker) was found, but no JSON object starts after it."
         return [pscustomobject]@{
             kind = "invalid-marker"
             marker = [string]$chosen.Marker
-            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = $reason }
+            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = "$reason Following marker: $previewText"; followingMarker = $preview }
         }
     }
     $lastBrace = Get-FactoryJsonObjectEndIndex -Text $Message -StartIndex $firstBrace
@@ -90,7 +94,7 @@ function ConvertFrom-FactoryWorkerMarkerMessage {
         return [pscustomobject]@{
             kind = "invalid-marker"
             marker = [string]$chosen.Marker
-            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = $reason }
+            payload = [pscustomobject]@{ marker = [string]$chosen.Marker; error = "$reason Following marker: $previewText"; followingMarker = $preview }
         }
     }
     try {
@@ -106,7 +110,8 @@ function ConvertFrom-FactoryWorkerMarkerMessage {
             marker = [string]$chosen.Marker
             payload = [pscustomobject]@{
                 marker = [string]$chosen.Marker
-                error = "Marker $([string]$chosen.Marker) contains invalid JSON: $($_.Exception.Message)"
+                error = "Marker $([string]$chosen.Marker) contains invalid JSON: $($_.Exception.Message). Following marker: $previewText"
+                followingMarker = $preview
             }
         }
     }

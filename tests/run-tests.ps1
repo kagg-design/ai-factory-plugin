@@ -4,7 +4,8 @@ param(
     [switch]$LedgerOnly,
     [switch]$NativeLedgerRace,
     [switch]$ArchiveOnly,
-    [switch]$ArchiveBaseline
+    [switch]$ArchiveBaseline,
+    [switch]$RuntimeOnly
 )
 
 if ([string]$PSVersionTable.PSEdition -eq "Core") {
@@ -18,24 +19,28 @@ if ([string]$PSVersionTable.PSEdition -eq "Core") {
     if ($NativeLedgerRace) { $desktopArguments += "-NativeLedgerRace" }
     if ($ArchiveOnly) { $desktopArguments += "-ArchiveOnly" }
     if ($ArchiveBaseline) { $desktopArguments += "-ArchiveBaseline" }
+    if ($RuntimeOnly) { $desktopArguments += "-RuntimeOnly" }
     & $windowsPowerShell @desktopArguments
     exit $LASTEXITCODE
 }
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
-if (-not $LedgerOnly) {
-    & (Join-Path $PSScriptRoot "completed-archive.tests.ps1") -PluginRoot $pluginRoot -ObserveBaseline:$ArchiveBaseline
-    if ($ArchiveOnly) { return }
+if (-not $RuntimeOnly) {
+    if (-not $LedgerOnly) {
+        & (Join-Path $PSScriptRoot "completed-archive.tests.ps1") -PluginRoot $pluginRoot -ObserveBaseline:$ArchiveBaseline
+        if ($ArchiveOnly) { return }
+    }
+    & (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
+    if ($LedgerOnly) { return }
+    & (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'factory-status.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
 }
-& (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
-if ($LedgerOnly) { return }
-& (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
-& (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
-& (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
-& (Join-Path $PSScriptRoot 'factory-status.tests.ps1') -PluginRoot $pluginRoot
-& (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
-& (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\completed-archive.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
@@ -681,8 +686,8 @@ try {
         queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
     })
     $freshDeadReclaim = (& $testLeaseScript -Action reclaim -Repository $repository -TtlSeconds 1800) | ConvertFrom-Json
-    Assert-True ([bool]$freshDeadReclaim.reclaimed) "A provably dead test-lane holder waited for the full heartbeat TTL."
-    Assert-True ([string]$freshDeadReclaim.abandonedHolder.reason -match "before TTL") "Early dead-holder reclaim did not explain why TTL was bypassed."
+    Assert-True (-not [bool]$freshDeadReclaim.reclaimed) "Fresh dead launcher PIDs bypassed the heartbeat TTL."
+    Assert-Equal "fresh-dead-token" ([string]$freshDeadReclaim.holder.token) "A fresh lease changed ownership without expiry."
 
     Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
         version = 1; holder = $null
@@ -2111,6 +2116,8 @@ try {
     }
     Assert-Equal 2 $malformedGuardExit "Malformed Git guard input did not fail closed."
     Assert-True (($malformedGuardOutput -join "`n") -match 'safety check failed') "Malformed Git guard failure was not explicit."
+    $savedGuardDatabase = $env:DB_DATABASE
+    $env:DB_DATABASE = [string]$launch.testDatabase
     foreach ($allowedGuardCommand in @(
         "git status --short",
         "git merge-base A B",
@@ -2142,6 +2149,7 @@ try {
         Assert-True ([string]$blockedGuardResult.hookSpecificOutput.permissionDecisionReason -match [regex]::Escape([string]$blockedGuardFixture.name)) "Git guard denial did not name '$($blockedGuardFixture.name)'."
     }
 
+    $env:DB_DATABASE = $savedGuardDatabase
     $env:CLAUDE_FACTORY_TEST_AGENT_CWD = [string]$launch.worktree
     $sessionReconcile = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) |
         ConvertFrom-Json
@@ -2317,7 +2325,8 @@ try {
         -InputText $invalidHookInput
     $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reconcile-worker-sessions.ps1") -Repository $repository -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     $invalidMarkerState = Read-FactoryJson -Path $context.statePath
-    Assert-Equal "failed" ([string]$invalidMarkerState.tasks[0].status) "Malformed marker JSON did not fail the active task explicitly."
+    Assert-Equal "awaiting-input" ([string]$invalidMarkerState.tasks[0].status) "Malformed marker JSON did not request report correction."
+    Assert-True (-not (Test-FactoryTaskHasValidatedResult $invalidMarkerState.tasks[0])) "Malformed marker made a task eligible for publication."
     Assert-True ([string]$invalidMarkerState.tasks[0].error -match "Invalid FACTORY_RESULT payload:.*invalid JSON") "Malformed marker parse reason did not reach the task error."
     $invalidMarkerState.tasks[0].status = "running"
     $invalidMarkerState.tasks[0].error = $null
@@ -2878,7 +2887,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Failed to publish cleanup fixture commit." }
     $cleanupSessionState = Read-FactoryJson -Path $context.statePath
     $cleanupSessionState.tasks[0].backgroundSession = $launch.backgroundSession
-    $cleanupSessionState.tasks[0].backgroundSession.state = "done"
+    $cleanupSessionState.tasks[0].backgroundSession.state = "working"
+    Set-FactoryProperty $cleanupSessionState.tasks[0] 'integration' ([pscustomobject]@{ status = 'published' })
+    Set-FactoryProperty $cleanupSessionState.tasks[0] 'production' ([pscustomobject]@{ status = 'published' })
     Write-FactoryTestState -Context $context -Value $cleanupSessionState
     [IO.File]::AppendAllText(
         [string]$env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
@@ -2898,6 +2909,9 @@ try {
     New-Item -ItemType Junction -Path $junctionPath -Target $externalSentinel | Out-Null
     Assert-True ((Get-Item -LiteralPath $junctionPath).Attributes -band [IO.FileAttributes]::ReparsePoint) "Junction fixture was not created."
 
+    $cleanupPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
+    Assert-True ($cleanupPreviewOutput.Contains([string]$launch.worktree)) "Cleanup preview fixture did not start from the task worktree."
+    $cleanupPreview = Read-FactoryJson -Path ([string]$context.previewPath)
     $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = "test1234"
     $env:CLAUDE_FACTORY_TEST_STOP_FAIL_ID = "test1234"
     $previousCleanupErrorAction = $ErrorActionPreference
@@ -2910,6 +2924,10 @@ try {
         Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FAIL_ID -ErrorAction SilentlyContinue
     }
     Assert-True ($blockedCleanupExitCode -ne 0) "Cleanup continued after a task session failed to stop."
+    $failedSessionCleanup = Get-FactoryTask -State (Read-FactoryJson $context.statePath) -TaskId 'test-task'
+    Assert-Equal 'cleaning' ([string]$failedSessionCleanup.status) 'A published task became blocked after its session failed to stop.'
+    Assert-True ([bool]$failedSessionCleanup.cleanup.artifacts.stoppedPreview) 'Cleanup did not stop the existing preview before trying to stop the worker.'
+    Assert-True ([string]$failedSessionCleanup.error -match 'factory cleanup test-task') 'Failed published cleanup omitted its exact recovery command.'
     Assert-True (Test-Path -LiteralPath $launch.worktree) "Cleanup touched the worktree after a session stop failure."
     Assert-True (@(& git -C $repository branch --list ([string]$launch.branch)).Count -gt 0) "Cleanup deleted the branch after a session stop failure."
     Assert-Equal 0 (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE | Where-Object {
@@ -2922,9 +2940,6 @@ try {
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $cleanupStopCapture
     $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = "test1234"
     $env:CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM = [string]$launch.worktree
-    $cleanupPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
-    Assert-True ($cleanupPreviewOutput.Contains([string]$launch.worktree)) "Cleanup preview fixture did not start from the task worktree."
-    $cleanupPreview = Read-FactoryJson -Path ([string]$context.previewPath)
     $cleanupRemovalReady = Join-Path $testRoot "cleanup-removal-unlocked.ready"
     $cleanupStdout = Join-Path $testRoot "cleanup-unlocked.stdout"
     $cleanupStderr = Join-Path $testRoot "cleanup-unlocked.stderr"
@@ -2979,7 +2994,7 @@ try {
     Assert-Equal "test1234" ((Get-Content -LiteralPath $cleanupStopCapture -Raw).Trim()) "Cleanup did not stop a terminal-looking live process before removal."
     Assert-True (Test-Path -LiteralPath $answerTranscript) "Cleanup deleted the transcript retained by answer."
     Assert-True ([bool]$cleanup.removedTestDatabase) "Cleanup did not remove the worker test database."
-    Assert-True ([bool]$cleanup.stoppedPreview) "Task cleanup did not stop its active browser preview."
+    Assert-True (-not [bool]$cleanup.stoppedPreview) "Cleanup retry reported an already-stopped preview as live."
     Assert-True (-not (Test-Path -LiteralPath ([string]$context.previewPath))) "Task cleanup retained active preview metadata."
     foreach ($cleanupPreviewPid in @([int]$cleanupPreview.app.pid, [int]$cleanupPreview.assets.pid)) {
         $cleanupPreviewAlive = $true
@@ -3324,13 +3339,13 @@ $result = [ordered]@{
     }
     $pipelineTickErrors = @($pipelineTick.errors | ForEach-Object { [string]$_ })
     Assert-Equal 1 $pipelineTickErrors.Count "Synthetic cleanup failure was not reported exactly once."
-    Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after publication was verified") "Pipeline hid the cleanup stage failure."
+    Assert-True (($pipelineTickErrors -join "`n") -match "Cleanup failed after publication\s+was verified") "Pipeline hid the cleanup stage failure."
     Assert-Equal 0 ([int]$pipelineTick.integratedCount) "Scheduler reported a cleanup-failed task as fully integrated."
     Assert-Equal 1 ([int]$pipelineTick.launchedCount) "A worktree-removal failure prevented the same scheduler tick from launching queued work."
     $cleanupFailedState = Read-FactoryJson -Path $context.statePath
     $cleanupFailedTask = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     $launchedAfterCleanupFailure = @($cleanupFailedState.tasks | Where-Object { [string]$_.id -eq $cleanupQueueTaskId })[0]
-    Assert-Equal "blocked" ([string]$cleanupFailedTask.status) "Cleanup failure did not leave the published task recoverable."
+    Assert-Equal "cleaning" ([string]$cleanupFailedTask.status) "Cleanup failure did not leave the published task awaiting artifact cleanup."
     Assert-Equal "published" ([string]$cleanupFailedTask.integration.status) "Cleanup failure rewrote development publication as failed."
     Assert-Equal "published" ([string]$cleanupFailedTask.production.status) "Cleanup failure rewrote production publication as failed."
     Assert-Equal "failed" ([string]$cleanupFailedTask.cleanup.status) "Cleanup failure was not audited as its own stage."

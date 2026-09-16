@@ -594,7 +594,7 @@ the entire prepare/check/finalize sequence in a `try`/`finally` that releases
 that token. First run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/test-lease.ps1" -Action acquire -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Phase verify
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/test-lease.ps1" -Action acquire -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Phase verify -OwnerPid $PID
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/sync-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Action prepare -LeaseToken LEASE_TOKEN
 ```
 
@@ -611,6 +611,11 @@ development base is its ancestor, and it is exactly one commit above that base.
 A successful rebase changes the SHA, clears stale review and approval, and
 moves the task to `syncing` so `go` cannot approve results tested against the
 old base.
+
+The lease owner must survive the entire sequence. Run acquire, sync, checks and
+release in ONE long-lived PowerShell invocation, passing its `$PID` explicitly.
+Do not acquire in a one-shot shell and run tests in a later tool call. Missing
+owner PIDs are rejected; a dead owner never permits reclaim before the TTL.
 
 If `alreadyCurrent` is true, report that no synchronization or retesting was
 needed. Otherwise, validate the rebased result in the returned `worktree`:
@@ -665,10 +670,12 @@ untrusted task-source text. The review judgment applies only to the exact
 current commit SHA.
 
 Targeted review checks may run freely. Before any full-suite review run,
-acquire `test-lease.ps1 -Action acquire -Phase review` for the task, wait for
+acquire `test-lease.ps1 -Action acquire -Phase review -OwnerPid $PID` for the task, wait for
 ownership, and release its token from a `finally`. When inferring Laravel
 publication checks, prefer `vendor/bin/pint --test` and
 `php artisan test --parallel`; do not infer the single-process form.
+Keep acquisition, the full suite and release in the same PowerShell call so
+the explicitly supplied owner PID stays alive throughout testing.
 
 Write the decision as temporary JSON inside `sessionsPath`:
 
@@ -829,7 +836,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../.
 ```
 
 Cleanup is a published-work artifact-removal command with strict safeguards. It
-must refuse active tasks, working sessions, dirty worktrees, unsafe paths or
+must refuse unpublished active tasks, dirty worktrees, unsafe paths or
 branches, moved worker branches, missing commits, and commits not reachable
 from every configured remote publication branch. With an empty
 `productionBranch`, only development reachability is required. It first claims
@@ -845,8 +852,12 @@ View `rm` fails, report the returned `agentSessionWarning`; the Git cleanup and
 `done` state remain authoritative. JSONL transcripts remain on disk after rm.
 
 Do not hold the global state mutex across session, database, Git, or filesystem
-operations. A failed cleanup records its partial artifact result and becomes
-`blocked` with `cleanup: failed`. A stale `cleaning` attempt whose PID/start
+operations. A working session does not veto verified publication cleanup:
+cleanup validates remote reachability, then stops and verifies that exact
+task's sessions itself. After verified publication, a cleanup failure retains
+`cleaning` with `cleanup: failed` and the exact `factory cleanup <id>` retry;
+publication is not repeated. A failure before verification may remain `blocked`.
+A stale `cleaning` attempt whose PID/start
 identity is no longer live is recoverable by running the same cleanup command;
 the retry must tolerate artifacts already removed by the interrupted attempt.
 
@@ -991,6 +1002,10 @@ its Stop hook. Before stopping a worker that appears stuck in `working`, inspect
 `runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
 factory's private runtime. It preserves the complete `lastAssistantMessage`,
 the parsed `payload`, and the classification: `result`, `plan`, `message`, or
-`invalid-marker`. An `invalid-marker` event includes the exact parse failure.
+`invalid-marker`. An `invalid-marker` event includes the exact parse failure and
+an escaped preview of the next 200 characters. The task waits in `awaiting-input`
+for a corrected report; retain its code and use `factory chat <id>`. Do not infer
+review readiness or permit GO from a commit alone. Optional JSON fences and
+leading whitespace are accepted by native parsing.
 Read this file before stopping the session; `claude stop` cannot retroactively
 capture an already printed result.

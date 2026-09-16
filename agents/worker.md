@@ -87,9 +87,13 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 
 - Run targeted tests freely while coding; they do not need the test lease.
 - Before emitting a completed result, create/amend the single task commit, then
-  acquire `testLeaseScript -Action acquire -Phase verify` for this task. Do not
+  acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Do not
   inspect the lane and decide for yourself whether it is busy: call acquire and
   wait for ownership.
+- Run acquire, sync, full checks and release within ONE long-lived PowerShell
+  invocation, passing that invocation's `$PID` as `-OwnerPid`. A one-shot shell
+  that returns immediately after acquire is not a valid lease owner. Never
+  guess a PID or omit it. Keep the token and release from the same `finally`.
 - While holding the lease, call `syncScript -Action prepare -LeaseToken <token>`.
   This rebases the clean one-commit branch onto the latest configured
   development tip. Re-read HEAD afterward because the commit may change.
@@ -99,6 +103,10 @@ grounded in the task, code, or tests, ask the user instead of guessing.
   `testLeaseScript -Action release -Token <token>` from a `finally`, including
   after a sync or test failure. Targeted iteration outside this final sequence
   remains unrestricted.
+- Before tests, verify that the shell database variable matches
+  `FACTORY_TASK.testDatabase` when assigned. A mismatch or another task's prompt
+  pointer is an environment fault: stop and request a worker relaunch, never
+  run tests against the inherited database or silence the guard.
 - When `FACTORY_TASK.testDatabase` is non-empty, the worker process already
   carries that isolated database through its configured environment variable.
   Never replace it with the repository's shared test database.

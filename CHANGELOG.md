@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hardened parallel execution: unparseable Composer fingerprints fall back to
+  installation; test leases require a durable explicit owner and never reclaim
+  before TTL; worker environments are task-scoped and mismatches fail closed.
+  Verified publication cleanup stops resident sessions and retains a cleanup-only
+  recovery state on failure. Malformed result envelopes include a bounded preview
+  and request report correction without discarding work or bypassing validation.
 - Added file-first local intake: `factory new <file> [title]` snapshots a UTF-8
   specification verbatim and defaults its title to the filename stem. An
   optional short title overrides it; inline text, blank workers, and `--auto`

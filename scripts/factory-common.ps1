@@ -83,7 +83,11 @@ function Invoke-FactoryNativeProcess {
         $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
     }
     foreach ($entry in $Environment.GetEnumerator()) {
-        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        if ($null -eq $entry.Value) {
+            $startInfo.EnvironmentVariables.Remove([string]$entry.Key)
+        } else {
+            $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        }
     }
 
     $process = New-Object Diagnostics.Process
@@ -879,11 +883,17 @@ function Sync-FactoryWorktreeDependencies {
         } else { "" }
         $current = $stamp -eq $lockHash -and (Test-Path -LiteralPath $installedJson -PathType Leaf)
         if (-not $current -and (Test-Path -LiteralPath $installedJson -PathType Leaf)) {
-            $lockedPackages = Get-FactoryComposerPackageFingerprint -Path $composerLock
-            $installedPackages = Get-FactoryComposerPackageFingerprint -Path $installedJson -Installed
-            $current = $lockedPackages -and $lockedPackages -eq $installedPackages
-            if ($current) {
-                [IO.File]::WriteAllText($stampPath, $lockHash + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+            try {
+                $lockedPackages = Get-FactoryComposerPackageFingerprint -Path $composerLock
+                $installedPackages = Get-FactoryComposerPackageFingerprint -Path $installedJson -Installed
+                $current = $lockedPackages -and $lockedPackages -eq $installedPackages
+                if ($current) {
+                    [IO.File]::WriteAllText($stampPath, $lockHash + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+                }
+            } catch {
+                # Fingerprinting is only an install-skipping optimisation.
+                # Composer accepts case-sensitive aliases that PS 5.1 cannot parse.
+                $current = $false
             }
         }
         if (-not $current) {
@@ -1686,6 +1696,57 @@ function Invoke-FactoryPostgresMaintenance {
         throw "PostgreSQL test database command failed: $($result.output)"
     }
     return $result
+}
+
+function New-FactoryWorkerEnvironment {
+    param($Context, $Task, [string]$Worktree, [string]$PromptPath, $DatabaseSettings = $null, [string]$DatabaseName = "")
+
+    # Null entries remove inherited values from the child's private environment.
+    # Never mutate the launcher environment while preparing another worker.
+    $environment = @{}
+    foreach ($name in [Environment]::GetEnvironmentVariables("Process").Keys) {
+        if ([string]$name -match '^(DB_|PG)|^DATABASE_URL$|^CLAUDE_FACTORY_(PROMPT_PATH|TASK_ID|WORKTREE|ORCHESTRATOR|REAL_GIT|EXPECTED_)') {
+            $environment[[string]$name] = $null
+        }
+    }
+    if ($null -ne $DatabaseSettings) {
+        foreach ($property in @("databaseEnvironmentVariable", "hostEnvironmentVariable", "portEnvironmentVariable", "usernameEnvironmentVariable", "passwordEnvironmentVariable")) {
+            $name = [string]$DatabaseSettings.$property
+            if ($name) { $environment[$name] = $null }
+        }
+        if (-not $DatabaseName) { throw "Worker '$($Task.id)' has no assigned isolated test database." }
+        $expected = Get-FactoryTestDatabaseName -Settings $DatabaseSettings -Scope worker -TaskId ([string]$Task.id)
+        if ($DatabaseName -cne $expected) { throw "Worker '$($Task.id)' has a mismatched isolated test database." }
+        foreach ($entry in (Get-FactoryTestDatabaseProcessEnvironment -Settings $DatabaseSettings -DatabaseName $DatabaseName).GetEnumerator()) {
+            $environment[[string]$entry.Key] = [string]$entry.Value
+        }
+    }
+    $environment.CLAUDE_FACTORY_TASK_ID = [string]$Task.id
+    $environment.CLAUDE_FACTORY_WORKTREE = [IO.Path]::GetFullPath($Worktree)
+    $environment.CLAUDE_FACTORY_PROMPT_PATH = [IO.Path]::GetFullPath($PromptPath)
+    $environment.CLAUDE_FACTORY_REPOSITORY = [string]$Context.repositoryRoot
+    $environment.CLAUDE_FACTORY_PLUGIN_ROOT = [string]$Context.pluginRoot
+    $environment.CLAUDE_FACTORY_HOME = [string]$Context.runtimeHome
+    return $environment
+}
+
+function Assert-FactoryWorkerEnvironment {
+    param($Task, $DatabaseSettings, [string]$PromptPath)
+
+    if ($null -ne $DatabaseSettings) {
+        $expected = Get-FactoryTestDatabaseName -Settings $DatabaseSettings -Scope worker -TaskId ([string]$Task.id)
+        $variable = [string]$DatabaseSettings.databaseEnvironmentVariable
+        $actual = [Environment]::GetEnvironmentVariable($variable, "Process")
+        if ([string]$Task.testDatabase -cne $expected -or $actual -cne $expected) {
+            throw "Factory worker environment mismatch for task '$($Task.id)': $variable must be its assigned isolated database '$expected'. Relaunch this worker before running tests."
+        }
+    }
+    if ($env:CLAUDE_FACTORY_TASK_ID -and $env:CLAUDE_FACTORY_TASK_ID -ne [string]$Task.id) {
+        throw "Factory worker environment belongs to another task. Relaunch worker '$($Task.id)'."
+    }
+    if ($env:CLAUDE_FACTORY_PROMPT_PATH -and $PromptPath -and -not (Test-FactorySamePath $env:CLAUDE_FACTORY_PROMPT_PATH $PromptPath)) {
+        throw "Factory worker prompt environment belongs to another task. Relaunch worker '$($Task.id)'."
+    }
 }
 
 function Get-FactoryTestDatabaseProcessEnvironment {

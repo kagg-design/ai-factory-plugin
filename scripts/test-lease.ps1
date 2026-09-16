@@ -6,6 +6,7 @@ param(
     [ValidateSet("", "verify", "review", "integration", "release")][string]$Phase = "",
     [string]$Token = "",
     [int]$OwnerPid = 0,
+    [string]$OwnerStartTimeUtc = "",
     [int]$WaitTimeoutSeconds = 0,
     [int]$PollMilliseconds = 0,
     [int]$TtlSeconds = 0,
@@ -105,10 +106,14 @@ function Get-TestLeaseHeartbeatInfo {
 }
 
 function Test-TestLeaseProcess {
-    param([int]$ProcessId)
+    param([int]$ProcessId, $StartTimeUtc = $null)
     if ($ProcessId -le 0) { return $false }
     try {
-        $null = Get-Process -Id $ProcessId -ErrorAction Stop
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        if ($StartTimeUtc) {
+            $expectedStart = ConvertFrom-FactoryRoundtripTimestamp $StartTimeUtc
+            return [bool]$expectedStart.success -and $process.StartTime.ToUniversalTime().Ticks -eq ([DateTime]$expectedStart.value).Ticks
+        }
         return $true
     } catch {
         return $false
@@ -136,21 +141,16 @@ function Reclaim-StaleTestLease {
     $holder = Get-FactoryNestedValue -Target $Lease -Name "holder"
     if ($null -eq $holder) { return $null }
     $ownerPid = [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0)
-    if (Test-TestLeaseProcess -ProcessId $ownerPid) { return $null }
+    if (Test-TestLeaseProcess -ProcessId $ownerPid -StartTimeUtc (Get-FactoryNestedValue $holder "ownerStartTimeUtc" "")) { return $null }
     $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
     if (-not [bool]$heartbeat.readable) { return $null }
     $heartbeatPid = [int](Get-FactoryNestedValue -Target $holder -Name "heartbeatPid" -Default 0)
     if ($heartbeatPid -gt 0 -and (Test-TestLeaseProcess -ProcessId $heartbeatPid)) { return $null }
     $ageSeconds = [int]$heartbeat.ageSeconds
-    $heartbeatPidWasRecorded = $heartbeatPid -gt 0
-    if ($ageSeconds -le $effectiveTtlSeconds -and (-not $heartbeatPidWasRecorded -or $ownerPid -le 0)) {
-        return $null
-    }
-    $reason = if ($ageSeconds -gt $effectiveTtlSeconds) {
-        "Test lease holder process $ownerPid is not running and its heartbeat is $ageSeconds second(s) old; TTL is $effectiveTtlSeconds second(s)."
-    } else {
-        "Test lease holder process $ownerPid and heartbeat process $heartbeatPid are not running; reclaiming before TTL."
-    }
+    # Dead short-lived launcher PIDs do not prove that their tests stopped.
+    # Never transfer ownership until the full heartbeat TTL has elapsed.
+    if ($ageSeconds -le $effectiveTtlSeconds) { return $null }
+    $reason = "Test lease holder process $ownerPid is not running and its heartbeat is $ageSeconds second(s) old; TTL is $effectiveTtlSeconds second(s)."
     $record = Write-TestLeaseReclaimRecord -Holder $holder -Reason $reason
     Set-FactoryProperty -Target $Lease -Name "holder" -Value $null
     Set-FactoryProperty -Target $Lease -Name "lastReclaim" -Value $record
@@ -178,17 +178,6 @@ function Get-SortedTestLeaseQueue {
     )
 }
 
-function Get-ParentProcessId {
-    try {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
-        if ([int]$process.ParentProcessId -gt 0) { return [int]$process.ParentProcessId }
-    } catch {
-        # The caller may run on a host without CIM. The acquire process remains
-        # a conservative owner until it returns.
-    }
-    return $PID
-}
-
 function Start-TestLeaseHeartbeat {
     param([string]$LeaseToken, [int]$LeaseOwnerPid)
 
@@ -198,6 +187,7 @@ function Start-TestLeaseHeartbeat {
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
         "-Action", "heartbeat", "-Repository", [string]$context.repositoryRoot,
         "-Token", $LeaseToken, "-OwnerPid", [string]$LeaseOwnerPid,
+        "-OwnerStartTimeUtc", $OwnerStartTimeUtc,
         "-TtlSeconds", [string]$effectiveTtlSeconds,
         "-HeartbeatLogPath", $HeartbeatLogPath
     )
@@ -230,9 +220,9 @@ function Start-TestLeaseHeartbeat {
 if ($Action -eq "heartbeat") {
     if (-not $Token -or $OwnerPid -le 0) { throw "Heartbeat requires Token and OwnerPid." }
     try {
-        while (Test-TestLeaseProcess -ProcessId $OwnerPid) {
+        while (Test-TestLeaseProcess -ProcessId $OwnerPid -StartTimeUtc $OwnerStartTimeUtc) {
             Start-Sleep -Seconds $heartbeatSeconds
-            if (-not (Test-TestLeaseProcess -ProcessId $OwnerPid)) { break }
+            if (-not (Test-TestLeaseProcess -ProcessId $OwnerPid -StartTimeUtc $OwnerStartTimeUtc)) { break }
             $mutex = $null
             try {
                 $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
@@ -269,7 +259,7 @@ if ($Action -eq "status") {
     $heartbeat = Get-TestLeaseHeartbeatInfo -Holder $holder
     $ownerPid = if ($null -ne $holder) { [int](Get-FactoryNestedValue -Target $holder -Name "pid" -Default 0) } else { 0 }
     $heartbeatPid = if ($null -ne $holder) { [int](Get-FactoryNestedValue -Target $holder -Name "heartbeatPid" -Default 0) } else { 0 }
-    $ownerAlive = Test-TestLeaseProcess -ProcessId $ownerPid
+    $ownerAlive = Test-TestLeaseProcess -ProcessId $ownerPid -StartTimeUtc (Get-FactoryNestedValue $holder "ownerStartTimeUtc" "")
     $heartbeatPidAlive = Test-TestLeaseProcess -ProcessId $heartbeatPid
     $acquired = if ($null -ne $holder) {
         ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $holder -Name "acquiredAt" -Default $null)
@@ -297,7 +287,7 @@ if ($Action -eq "status") {
         stale = (
             $null -ne $holder -and -not $ownerAlive -and [bool]$heartbeat.readable -and
             ($heartbeatPid -le 0 -or -not $heartbeatPidAlive) -and
-            ([int]$heartbeat.ageSeconds -gt $effectiveTtlSeconds -or ($ownerPid -gt 0 -and $heartbeatPid -gt 0))
+            [int]$heartbeat.ageSeconds -gt $effectiveTtlSeconds
         )
         ttlSeconds = $effectiveTtlSeconds
         removedWaiters = $removedWaiters
@@ -352,13 +342,19 @@ if ($Action -eq "release") {
 
 if (-not $TaskId -or -not $Phase) { throw "Acquire requires TaskId and Phase." }
 $requestToken = if ($Token) { $Token } else { [Guid]::NewGuid().ToString("N") }
-$effectiveOwnerPid = if ($OwnerPid -gt 0) { $OwnerPid } else { Get-ParentProcessId }
+if ($OwnerPid -le 0) {
+    throw 'Acquire requires -OwnerPid for the process that stays alive throughout sync/tests/release. Run the entire sequence in one PowerShell call and pass its $PID; do not use a one-shot shell owner.'
+}
+if (-not (Test-TestLeaseProcess -ProcessId $OwnerPid -StartTimeUtc $OwnerStartTimeUtc)) { throw "Test lease owner PID $OwnerPid is not running with the supplied identity." }
+$effectiveOwnerPid = $OwnerPid
+$OwnerStartTimeUtc = (Get-Process -Id $OwnerPid -ErrorAction Stop).StartTime.ToUniversalTime().ToString("o", [Globalization.CultureInfo]::InvariantCulture)
 $requestedAt = Get-FactoryUtcTimestamp
 $priority = Get-TestLeasePriority -LeasePhase $Phase
 $deadline = if ($WaitTimeoutSeconds -gt 0) { [DateTime]::UtcNow.AddSeconds($WaitTimeoutSeconds) } else { [DateTime]::MaxValue }
 $acquired = $null
 
 while ($null -eq $acquired) {
+    if (-not (Test-TestLeaseProcess -ProcessId $effectiveOwnerPid -StartTimeUtc $OwnerStartTimeUtc)) { throw "Test lease owner PID $effectiveOwnerPid exited while waiting." }
     $mutex = $null
     try {
         $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
@@ -385,6 +381,7 @@ while ($null -eq $acquired) {
                 taskId = $TaskId
                 phase = $Phase
                 pid = $effectiveOwnerPid
+                ownerStartTimeUtc = $OwnerStartTimeUtc
                 acquiredAt = $now
                 heartbeatAt = $now
                 priority = $priority

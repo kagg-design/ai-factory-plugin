@@ -905,7 +905,7 @@ preview confirmation unless `--yes` is supplied.
 
 Native publication treats cleanup as a separate stage. Once both remote
 branches are verified, a cleanup failure cannot rewrite either publication
-audit as failed. The task remains `blocked` with `cleanup: failed`; rerun
+audit as failed. The task remains `cleaning` with `cleanup: failed`; rerun
 `/factory cleanup <task-id>` to remove only the retained artifacts. If the
 cleanup process is killed after artifact work but before its final state write,
 status shows `CLEANUP INTERRUPTED`; the same command adopts the dead attempt and
@@ -969,6 +969,12 @@ Before stopping a Claude worker that appears stuck in `working`, inspect
 `runtime/projects/<project>/events/<task-artifact-name>/latest.json` in the
 private runtime. It stores the complete `lastAssistantMessage`, parsed payload,
 and the `result`, `plan`, `message`, or `invalid-marker` classification.
+Malformed marker errors include an escaped 200-character preview of what
+followed the marker. Whitespace and an optional JSON fence are accepted. A bad
+envelope leaves the task `awaiting-input` for report correction, not code
+reimplementation: open `factory chat <id>` and ask for a valid report. Its
+worktree and commits remain intact; no review or GO is permitted until the
+normal result validation succeeds.
 `claude stop <background-id>` bypasses the Stop hook, so stopping first can
 prevent an already printed result from being captured.
 
@@ -1133,10 +1139,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
   -Action reclaim -Repository D:\Projects\MotiveHR
 ```
 
-Every holder heartbeats, and status reports both the holder and heartbeat PIDs.
-A holder is reclaimed immediately when both its owner and recorded heartbeat
-processes are proven dead, even if its last heartbeat is younger than the
-configured 30-minute TTL. A live owner always wins, and a live heartbeat keeps
+Every acquisition requires an explicit `-OwnerPid`. Run acquire, sync, the full
+test suite and release in one long-lived PowerShell invocation and pass its
+`$PID`. A shell that returns immediately after acquire cannot own a long-running
+test sequence. The native publication pipeline already passes its durable PID.
+The owner PID/start-time identity is recorded to avoid confusing reused PIDs.
+
+Every normal holder heartbeats, and status reports both holder and heartbeat PIDs.
+A dead owner and dead heartbeat are not enough for immediate reclaim: the
+configured heartbeat TTL (30 minutes by default) must also expire. A live owner
+always wins, and a live heartbeat keeps
 the lane conservative. Timestamp parsing is invariant and culture-independent;
 an unreadable timestamp remains fail-closed and is reported by `factory doctor`
 instead of being reclaimed. `status` also removes dead waiter PIDs from both its
@@ -1144,6 +1156,21 @@ output and the persisted queue. A heartbeat process that dies or never advances
 is a doctor warning, with failures in the private
 `test-lease.heartbeat.log`. Reclaim writes the abandoned task and phase to
 `test-lease.reclaims.jsonl`. Normal code releases from `finally`.
+
+Worker launch builds a separate per-task environment, removing inherited
+database settings and another task's prompt/identity before supplying the
+assigned database and prompt. Codex starts through a hidden isolated launcher
+without temporarily changing the scheduler's environment. Claude's shell hook
+checks task ownership from Git/runtime before commands: a mismatched database
+or prompt is a hard stop, even if a shared background host reused old variables.
+Relaunch the affected worker; do not bypass the guard or rely on PHPUnit defaults.
+The plugin does not change the application's PHPUnit configuration.
+
+After native publication, cleanup verifies remote reachability, stops all exact
+task sessions (including those still marked `working`), then rechecks the clean
+HEAD before removing artifacts. A failure after publication stays in `cleaning`
+with a failed cleanup audit and the exact `factory cleanup <id>` recovery
+command. Do not repeat GO or republish to repair cleanup.
 
 Configured integration, release, and worker commands run byte-for-byte as
 written. An explicit `php artisan test` stays single-process. When trusted

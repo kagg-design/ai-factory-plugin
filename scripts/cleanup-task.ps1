@@ -137,6 +137,7 @@ $removedReparsePoints = @()
 $unregisteredWorktree = $false
 $removedWorktree = $false
 $deletedBranch = $false
+$publicationVerified = $false
 
 try {
     # Phase 1: claim cleanup under the state mutex, then release it before any
@@ -171,6 +172,7 @@ try {
         $integrationStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "integration") -Name "status" -Default "")
         $productionStatus = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name "production") -Name "status" -Default "")
         $developmentOnly = -not [bool](([string]$config.productionBranch).Trim())
+        $publicationRecorded = $integrationStatus -eq "published" -and ($developmentOnly -or $productionStatus -eq "published")
         $finalizablePublication = (
             $FinalizePublication -and
             $integrationStatus -eq "published" -and
@@ -184,7 +186,8 @@ try {
         }
         if (
             $null -ne $task.backgroundSession -and
-            [string]$task.backgroundSession.state -eq "working"
+            [string]$task.backgroundSession.state -eq "working" -and
+            -not $publicationRecorded
         ) {
             throw "Task '$TaskId' still has a working background session."
         }
@@ -284,6 +287,7 @@ try {
             throw "Commit '$commit' is not reachable from '$remoteRef'. Cleanup refuses to discard it."
         }
     }
+    $publicationVerified = $true
 
     if ($branch) {
         $branchRef = "refs/heads/$branch"
@@ -350,6 +354,15 @@ try {
             "session $($_.id): $($_.warning)"
         }) -join "; "
         throw "Task cleanup stopped before removing artifacts because $blocked"
+    }
+
+    # A resident worker could have written a final change between validation
+    # and its stop. Recheck after quiescence before dropping any artifacts.
+    if ($isRegistered -and $worktree -and (Test-Path -LiteralPath $worktree)) {
+        $headAfterStop = (& git -C $worktree rev-parse HEAD 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $headAfterStop -ne $commit) { throw "Worker HEAD changed while stopping its session; cleanup refused." }
+        $dirtyAfterStop = @(& git -C $worktree status --porcelain 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $dirtyAfterStop.Count -gt 0) { throw "Worker worktree changed while stopping its session; cleanup refused." }
     }
 
     # Once no task process can reconnect, drop its isolated database before
@@ -503,6 +516,9 @@ try {
     } | ConvertTo-Json -Depth 10
 } catch {
     $failure = $_.Exception.Message
+    if ($publicationVerified) {
+        $failure = "Publication is verified; artifact cleanup needs retry: factory cleanup $TaskId. $failure"
+    }
     if ($cleanupStarted) {
         $failureAt = Get-FactoryUtcTimestamp
         try {
@@ -511,7 +527,7 @@ try {
             $failureTask = Get-FactoryTask -State $failureState -TaskId $TaskId
             $failureCleanup = Get-FactoryNestedValue -Target $failureTask -Name "cleanup"
             if ([string](Get-FactoryNestedValue -Target $failureCleanup -Name "attemptId" -Default "") -eq $attemptId) {
-                Set-FactoryProperty -Target $failureTask -Name "status" -Value "blocked"
+                Set-FactoryProperty -Target $failureTask -Name "status" -Value $(if ($publicationVerified) { "cleaning" } else { "blocked" })
                 Set-FactoryProperty -Target $failureTask -Name "error" -Value $failure
                 Set-FactoryProperty -Target $failureTask -Name "cleanup" -Value ([pscustomobject][ordered]@{
                     status = "failed"

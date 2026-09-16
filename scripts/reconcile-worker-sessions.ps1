@@ -471,8 +471,11 @@ try {
         ) {
             $marker = [string](Get-FactoryNestedValue -Target $latestEvent.payload -Name "marker" -Default "FACTORY marker")
             $markerError = [string](Get-FactoryNestedValue -Target $latestEvent.payload -Name "error" -Default "The marker JSON could not be parsed.")
-            Set-FactoryProperty -Target $task -Name "status" -Value "failed"
-            Set-FactoryProperty -Target $task -Name "error" -Value "Invalid $marker payload: $markerError"
+            # A malformed envelope is a reporting problem, not a failed code
+            # change. Keep artifacts and require correction; do not synthesize
+            # a validated result or make the task eligible for review/GO.
+            Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
+            Set-FactoryProperty -Target $task -Name "error" -Value "Invalid $marker payload: $markerError Worktree and commits are retained. Ask the worker via factory chat $taskId to emit a corrected $marker report; publication remains gated."
             Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value ([string]$latestEvent.capturedAt)
         } elseif ($null -ne $sessionRow -or $sessionMarkedMissing) {
             $sessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")

@@ -236,6 +236,14 @@ public static class FakeCodex
             ? "Factory Orchestrator is ready."
             : "FACTORY_PLAN\n{\"taskId\":\"" + Escape(taskId) + "\",\"understanding\":\"Inspect the requested change\",\"plan\":[\"Inspect code\",\"Implement after approval\"],\"questions\":[\"Proceed?\"],\"readyToImplement\":true}";
         var workerDelayText = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS");
+        var environmentCapture = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_WORKER_ENV_CAPTURE");
+        if (!String.IsNullOrEmpty(environmentCapture))
+            File.WriteAllLines(environmentCapture, new[] {
+                Environment.GetEnvironmentVariable("DB_DATABASE") ?? "",
+                Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TASK_ID") ?? "",
+                Environment.GetEnvironmentVariable("CLAUDE_FACTORY_PROMPT_PATH") ?? "",
+                Environment.GetEnvironmentVariable("DATABASE_URL") ?? ""
+            }, new UTF8Encoding(false));
         int workerDelay;
         if (!orchestrator && Int32.TryParse(workerDelayText, out workerDelay) && workerDelay > 0)
             System.Threading.Thread.Sleep(workerDelay);
