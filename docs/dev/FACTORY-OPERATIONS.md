@@ -195,6 +195,7 @@ Deterministic operations also have a native fast path:
 !factory inspect <task-id>
 !factory chat <task-id>
 !factory new [--auto] [text]
+!factory new [--auto] <file> [title]
 !factory add --file <task.json>
 !factory go <task-id> [--direct]
 !factory hold <task-id>
@@ -523,6 +524,39 @@ worktree and tasks already approved, integrating, in production, or done are
 not previewable through this command.
 
 ## 8. Interactive task flow
+
+### Create a task from a specification file
+
+Put the file first and an optional short task title second:
+
+```powershell
+factory new "C:\Users\igerg\Downloads\TASK-REPORTS-UI-011.md"
+factory new "C:\Users\igerg\Downloads\TASK-REPORTS-UI-011.md" "Reports UI"
+```
+
+The first command uses `TASK-REPORTS-UI-011` as the title; the second uses
+`Reports UI`. Native code takes the default title from the filename without its
+extension, never from a potentially long heading inside the file. The worker
+session name keeps the format `factory-local-<short-id>-<title-slug>`, with
+the title portion capped at 28 characters. Use a short explicit title if the
+filename is unwieldy.
+
+The UTF-8 file contents become the task brief verbatim, including line breaks
+and surrounding whitespace, with the existing 20,000-character intake limit.
+The file is neither changed nor deleted. This is a snapshot: later edits to
+the source file do not update the queued task. Relative paths resolve from the
+current directory. Missing, empty or oversized files fail without adding a task.
+The previous title-then-file order is rejected with a hint to put the file first.
+
+By default the worker plans and waits for approval. Add `--auto` to start
+implementation immediately; this does not skip review or integration gates:
+
+```powershell
+factory new --auto "C:\Users\igerg\Downloads\TASK-REPORTS-UI-011.md"
+```
+
+In the orchestrator, `new "<file>" ["title"]` uses the same order. Prefix the
+native command with `!factory` to avoid AI command interpretation.
 
 ### Create a task from your own text
 

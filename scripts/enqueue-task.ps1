@@ -4,7 +4,10 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Request")][string]$RequestPath,
     [Parameter(Mandatory = $true, ParameterSetName = "File")][string]$IntakePath,
     [Parameter(Mandatory = $true, ParameterSetName = "Local")][AllowEmptyString()][string]$LocalText,
-    [Parameter(ParameterSetName = "Local")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
+    [Parameter(Mandatory = $true, ParameterSetName = "LocalFile")][string]$LocalFile,
+    [Parameter(ParameterSetName = "LocalFile")][string]$FileTitle = "",
+    [Parameter(ParameterSetName = "Local")]
+    [Parameter(ParameterSetName = "LocalFile")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
     [string]$ClaudeCommand = ""
 )
 
@@ -129,8 +132,19 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $request = $null
 $consumePaths = @()
-if ($PSCmdlet.ParameterSetName -eq "Local") {
-    $localTextValue = $LocalText.Trim()
+$isLocalIntake = $PSCmdlet.ParameterSetName -in @("Local", "LocalFile")
+$isLocalFile = $PSCmdlet.ParameterSetName -eq "LocalFile"
+if ($isLocalIntake) {
+    if ($isLocalFile) {
+        $resolvedLocalFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LocalFile)
+        if (-not (Test-Path -LiteralPath $resolvedLocalFile -PathType Leaf)) {
+            throw "Local task file does not exist or is not a file: $LocalFile"
+        }
+        $localTextValue = [IO.File]::ReadAllText($resolvedLocalFile, (New-Object Text.UTF8Encoding($false, $true)))
+        if (-not $localTextValue.Trim()) { throw "Local task file is empty: $LocalFile" }
+    } else {
+        $localTextValue = $LocalText.Trim()
+    }
     if ($StartMode -eq "auto" -and -not $localTextValue) {
         throw "An automatic local task requires non-empty text."
     }
@@ -144,6 +158,10 @@ if ($PSCmdlet.ParameterSetName -eq "Local") {
         if ($localTitle.Length -gt 120) { $localTitle = $localTitle.Substring(0, 117).TrimEnd() + "..." }
         $localBrief = $localTextValue
         $localNotes = @("Created from operator-provided local text.")
+    }
+    if ($isLocalFile) {
+        $localTitle = if ($FileTitle.Trim()) { $FileTitle.Trim() } else { [IO.Path]::GetFileNameWithoutExtension($resolvedLocalFile) }
+        $localNotes = @("Created from local task file: $resolvedLocalFile")
     }
     $localUrl = "factory://local/$localId"
     $normalized = [pscustomobject][ordered]@{
@@ -190,7 +208,7 @@ if ($PSCmdlet.ParameterSetName -eq "Local") {
 } else {
     $resolvedIntakePath = [IO.Path]::GetFullPath($IntakePath)
 }
-if ($PSCmdlet.ParameterSetName -ne "Local") {
+if (-not $isLocalIntake) {
     if (-not (Test-Path -LiteralPath $resolvedIntakePath -PathType Leaf)) {
         throw "Normalized intake does not exist: $resolvedIntakePath"
     }
@@ -210,7 +228,7 @@ foreach ($requiredProperty in $allowedProperties) {
 if ([int]$normalized.version -ne 1) { throw "Unsupported normalized intake version '$($normalized.version)'." }
 if ([string]$normalized.startMode -notin @("interactive", "auto")) { throw "Invalid intake start mode." }
 $identity = Resolve-NormalizedSource -Source $normalized.source
-if ([string]$identity.adapter -eq "local" -and $PSCmdlet.ParameterSetName -ne "Local") {
+if ([string]$identity.adapter -eq "local" -and -not $isLocalIntake) {
     throw "The local source adapter is reserved for native 'factory new' tasks."
 }
 if ($null -ne $request) {
@@ -225,7 +243,8 @@ if ($null -ne $request) {
 }
 
 $title = ([string]$normalized.title).Trim()
-$brief = ([string]$normalized.brief).Trim()
+# File intake is a snapshot of the supplied specification, including whitespace.
+$brief = if ($isLocalFile) { [string]$normalized.brief } else { ([string]$normalized.brief).Trim() }
 $sourceError = ([string]$normalized.sourceError).Trim()
 if ($title.Length -gt 500) { throw "Normalized intake title may contain at most 500 characters." }
 if ($brief.Length -gt 20000) { throw "Normalized intake brief may contain at most 20000 characters." }

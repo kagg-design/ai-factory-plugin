@@ -1015,26 +1015,47 @@ function Write-CliAdd {
     Write-Output "$($script:Tree.Bottom)$($script:Tree.Horizontal) $footer"
 }
 
-function Write-CliNew {
-    param($Context, [string]$Text, [bool]$Automatic)
+function Test-CliLocalFileArgument {
+    param([string]$Value)
 
-    if ($Automatic -and -not $Text.Trim()) {
-        throw "An automatic local task requires text: factory new --auto <text>"
+    if (-not $Value) { return $false }
+    if (Test-Path -LiteralPath $Value -ErrorAction SilentlyContinue) { return $true }
+    # Recognize explicit paths and plain spec filenames even when missing;
+    # keep ordinary prose such as "Update README.md" as inline task text.
+    return $Value -match '^(?:[A-Za-z]:|[\\/]|\.{1,2}[\\/])|^\S+\.(?:md|markdown|txt)$'
+}
+
+function Write-CliNew {
+    param($Context, [string]$Text, [bool]$Automatic, [string]$TaskFile = "", [string]$TaskTitle = "")
+
+    if ($Automatic -and -not $TaskFile -and -not $Text.Trim()) {
+        throw "An automatic local task requires text or a file: factory new --auto <file> [title] | factory new --auto <text>"
     }
     $mode = if ($Automatic) { "auto" } else { "interactive" }
-    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments @(
+    $arguments = @(
         "-Repository", [string]$Context.repositoryRoot,
-        "-LocalText", $Text,
         "-StartMode", $mode,
         "-ClaudeCommand", $ClaudeCommand
     )
+    if ($TaskFile) {
+        # Resolve against the caller's location before starting a child process.
+        $resolvedFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TaskFile)
+        $arguments += @("-LocalFile", $resolvedFile)
+        if ($TaskTitle) { $arguments += @("-FileTitle", $TaskTitle) }
+    } else {
+        $arguments += @("-LocalText", $Text)
+    }
+    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments $arguments
     $taskId = [string]$result.taskId
     Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) Local task added $($script:Tree.Horizontal) $taskId $($script:Tree.Horizontal) $([string]$result.title)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) State: $([string]$result.status); mode: $([string]$result.mode)"
     if ([string]$result.schedulerError) {
         Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Scheduler warning: $(ConvertTo-CliLine -Value $result.schedulerError)"
     }
-    if (-not $Text.Trim()) {
+    if ($TaskFile) {
+        Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) File: $resolvedFile (contents preserved)"
+    }
+    if (-not $TaskFile -and -not $Text.Trim()) {
         Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) The worker will ask what you want implemented."
     } elseif ($Automatic) {
         Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) The worker was told to begin implementation immediately."
@@ -1737,7 +1758,7 @@ function Write-CliHelp {
             "  factory inspect <task-id>",
             "  factory preview [<task-id>|stop] [-NoOpen]",
             "  factory chat <task-id>",
-            "  factory new [--auto] [text]",
+            "  factory new [--auto] <file> [title] | factory new [--auto] [text]",
             "  factory add --file <task.json>",
             "  factory go <task-id> [--direct]",
             "  factory hold <task-id>",
@@ -1836,9 +1857,12 @@ function Write-CliHelp {
         }
         "new" {
             @(
+                "factory new [--auto] <file> [title]",
                 "factory new [--auto] [text]",
                 "Creates a native local task without AI, Asana, or an intermediate JSON file.",
-                "The default is interactive planning. With no text, the worker asks what to implement; --auto requires non-empty text.",
+                "File first, optional quoted title second. By default the title is the filename without its extension.",
+                "Reads the UTF-8 file verbatim (up to 20000 characters), without modifying or deleting it.",
+                "The default is interactive planning. With no input, the worker asks what to implement; --auto requires text or a non-empty file.",
                 "The native scheduler starts or wakes automatically. Open the worker with 'factory chat <task-id>'."
             ) | Write-Output
         }
@@ -2041,7 +2065,7 @@ $directOptionUsed = [bool]$Direct
 $noOpenOptionUsed = [bool]$NoOpen
 
 if ($autoOptionUsed -and $normalizedCommand -ne "new") {
-    throw "--auto is accepted only by: factory new [--auto] [text]"
+    throw "--auto is accepted only by: factory new [--auto] <file> [title] | factory new [--auto] [text]"
 }
 if ($directOptionUsed -and $normalizedCommand -ne "go") {
     throw "--direct is accepted only by: factory go <task-id> [--direct]"
@@ -2157,11 +2181,20 @@ if ($normalizedCommand -eq "add") {
     exit 0
 }
 if ($normalizedCommand -eq "new") {
-    if ($anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "new accepts only optional --auto and task text." }
+    if ($anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "new accepts optional --auto and <file> [title] or task text." }
     $textParts = New-Object Collections.Generic.List[string]
     if ($Target) { $textParts.Add($Target) }
     foreach ($value in $remainingValues) { $textParts.Add([string]$value) }
-    Write-CliNew -Context $context -Text (($textParts.ToArray() -join " ").Trim()) -Automatic $autoOptionUsed
+    if ($textParts.Count -gt 0 -and (Test-CliLocalFileArgument -Value $textParts[0])) {
+        if ($textParts.Count -gt 2) { throw 'Use: factory new <file> ["title"]. Quote the title if it contains spaces.' }
+        $taskTitle = if ($textParts.Count -eq 2) { [string]$textParts[1] } else { "" }
+        Write-CliNew -Context $context -TaskFile $textParts[0] -TaskTitle $taskTitle -Automatic $autoOptionUsed
+    } else {
+        if ($textParts.Count -eq 2 -and (Test-CliLocalFileArgument -Value $textParts[1])) {
+            throw 'The file goes first: factory new <file> ["title"].'
+        }
+        Write-CliNew -Context $context -Text (($textParts.ToArray() -join " ").Trim()) -Automatic $autoOptionUsed
+    }
     exit 0
 }
 if ($fileOptionUsed) { throw "--file is accepted only by: factory add --file <task.json>" }

@@ -80,7 +80,10 @@ integration, and output. Apply these Codex adaptations:
 - `factory new` and local task text require no Asana connector. If the user asks
   to import an Asana URL and no Asana connector is available, explain that one
   connector-dependent operation is unavailable; do not block local tasks.
-- When `factory new` includes text, preserve it verbatim as one quoted native
+- For `factory new <file> [title]`, pass the file first and optional short title
+  second, as separate quoted arguments. Native code preserves file contents and
+  defaults the title to the filename without its extension, not its contents.
+- When `factory new` includes inline text, preserve it verbatim as one quoted native
   argument. Never execute a blank `factory new` for a named request, and treat
   an unexpected `Untitled local task` result as a failed handoff.
 - Claude Agent View does not contain Codex workers. For task conversations, use

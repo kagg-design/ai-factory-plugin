@@ -65,6 +65,7 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory preview <id>    open the worker application in a browser
   !factory chat <id>       resolve exact worker session
   !factory new [text]      create a local task without AI or Asana
+  !factory new FILE [title] create a local task from a specification file
   !factory add --file PATH import normalized task without AI
   !factory go <id> [--direct] approve, optionally skipping AI review
   !factory hold <id>       retain task on hold
@@ -88,6 +89,7 @@ PowerShell entry point (outside Claude)
   factory scheduler        native process status/control
 
 Add work
+  new [--auto] FILE [title] file first; default title is its filename stem
   new [--auto] [text]      create a local task; empty opens a requirements chat
   start|add <URL>          plan first, then wait
   start|add --auto <URL>   implement immediately
@@ -209,6 +211,28 @@ orchestrator must treat the handoff as a navigation aid, load this canonical
 skill, and read native status before its first mutation. Use
 `!factory rotate status` to inspect a pending request and
 `!factory rotate cancel` to cancel it.
+
+### `new [--auto] <file> [title]`
+
+Put the specification file first, followed by an optional short task title:
+
+```text
+!factory new "C:\Tasks\TASK-REPORTS-UI-011.md"
+!factory new "C:\Tasks\TASK-REPORTS-UI-011.md" "Reports UI"
+!factory new --auto "C:\Tasks\TASK-REPORTS-UI-011.md"
+```
+
+Pass the file path and optional title to the native command as separate quoted
+arguments. Native intake reads UTF-8 contents verbatim into the brief (up to
+20,000 characters), without modifying or deleting the source file. Do not read
+and summarize the file into command-line text or use `add --file` (JSON intake).
+The default title is the filename without its extension, not a heading inside
+the file. Preserve an explicitly supplied title. Prefer short names suitable
+for the worker list; the title portion of worker session names is capped at
+28 characters.
+Relative paths resolve from the command's working directory; use an absolute
+path when the operator supplies one. Missing or empty files fail without
+adding a task. The old title-then-file order is rejected with a usage hint.
 
 ### `new [--auto] [text]`
 

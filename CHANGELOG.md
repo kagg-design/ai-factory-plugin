@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added file-first local intake: `factory new <file> [title]` snapshots a UTF-8
+  specification verbatim and defaults its title to the filename stem. An
+  optional short title overrides it; inline text, blank workers, and `--auto`
+  remain supported. Invalid file input leaves the task queue unchanged.
 - Treat Claude sessions with a reported PID as resident even when their turn
   state is `done`. `factory start` attaches the existing orchestrator, while
   `factory restart` stops it before resuming the saved conversation with the

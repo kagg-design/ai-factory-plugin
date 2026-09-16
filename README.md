@@ -412,7 +412,21 @@ factory add --file D:\Tasks\normalized-task.json
 Non-Asana state IDs use `adapter:id`; Asana keeps its numeric ID for backward
 compatibility. The input file is validated but not modified or deleted.
 
-Create a task directly from operator text without a connector or JSON envelope:
+Create a task from a UTF-8 specification file without a connector or JSON envelope:
+
+```powershell
+factory new "C:\Tasks\TASK-REPORTS-UI-011.md"
+factory new "C:\Tasks\TASK-REPORTS-UI-011.md" "Reports UI"
+factory new --auto "C:\Tasks\TASK-REPORTS-UI-011.md"
+```
+
+The file comes first; the optional short title comes second. With no override,
+the title is the filename without its extension (`TASK-REPORTS-UI-011`), not
+the file's heading. Contents are copied verbatim into the task brief (up to
+20,000 characters); the source file is left untouched. Relative paths resolve
+from the current directory. Quote paths and titles containing spaces.
+
+Inline task text and intentionally blank workers remain supported:
 
 ```powershell
 factory new "Fix the profile export"
@@ -420,7 +434,7 @@ factory new --auto "Remove the obsolete navigation item"
 ```
 
 The default is interactive and waits for plan approval. `--auto` requires
-non-empty text and begins implementation immediately. Running `factory new`
+non-empty text or a non-empty file and begins implementation immediately. Running `factory new`
 without text creates an intentionally empty interactive worker; open it with
 the printed `factory chat <local-task-id>` command and tell it what to do. Local
 tasks receive collision-safe `local:...` IDs. The `local` adapter is reserved
