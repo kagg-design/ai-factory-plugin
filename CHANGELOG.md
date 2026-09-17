@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Restart registered Claude background orchestrators with native `respawn`
+  instead of `--bg --resume`, which can fork their conversations. Require saved
+  history before respawning, wait through transient startup UUIDs, and recover
+  uncertain respawns without launching another process.
+- Start normal Claude orchestrators in the background and attach in the same
+  terminal, so Agent View navigation does not migrate a foreground session or
+  stop its monitors. Verify the native conversation UUID before attachment;
+  retain a launch receipt for uncertain outcomes instead of creating duplicates.
+- Recognize numbered Claude orchestrators and their saved UUID when attaching
+  or restarting. Recover newer copies instead of resuming obsolete history,
+  and remove superseded completed Agent View rows without deleting transcripts.
 - Hardened parallel execution: unparseable Composer fingerprints fall back to
   installation; test leases require a durable explicit owner and never reclaim
   before TTL; worker environments are task-scoped and mismatches fail closed.

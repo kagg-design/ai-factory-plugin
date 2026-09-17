@@ -55,6 +55,7 @@ public static class FakeClaude
         public string Status;
         public bool HasPid;
         public string TranscriptPath;
+        public long StartedAt;
     }
 
     private static void AppendEvent(string operation, params string[] values)
@@ -97,12 +98,13 @@ public static class FakeClaude
             {
                 rows[id] = new SessionRow {
                     Id = id,
-                    SessionId = id == "test1234" ? SessionId : id + "-session",
+                    SessionId = fields.Length > 5 && !String.IsNullOrEmpty(fields[5]) ? fields[5] : (id == "test1234" ? SessionId : id + "-session"),
                     Cwd = fields[2], Name = fields[3], State = fields[4],
                     TranscriptPath = id == "test1234" && !String.IsNullOrEmpty(Env("CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH"))
                         ? Env("CLAUDE_FACTORY_TEST_TRANSCRIPT_PATH")
                         : (id == "test1234" ? "live-transcript" : id + "-transcript")
                 };
+                if (fields.Length > 6) Int64.TryParse(fields[6], out rows[id].StartedAt);
             }
             else if (operation == "stop" && rows.ContainsKey(id))
             {
@@ -113,12 +115,21 @@ public static class FakeClaude
             {
                 rows.Remove(id);
             }
+            else if (operation == "respawn" && rows.ContainsKey(id))
+            {
+                rows[id].State = "working";
+                rows[id].Status = "idle";
+                rows[id].HasPid = true;
+            }
         }
         return rows;
     }
 
     private static string SessionJson(SessionRow row)
     {
+        string transcripts = Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS");
+        if (!String.IsNullOrEmpty(transcripts) && row.Name.StartsWith("Claude Factory Orchestrator"))
+            row.TranscriptPath = Path.Combine(transcripts, row.SessionId + ".jsonl");
         string status = String.IsNullOrEmpty(row.Status) ? row.State : row.Status;
         string pid = row.HasPid ? "\"pid\":4242," : "";
         string transcript = String.IsNullOrEmpty(row.TranscriptPath) ? "" :
@@ -126,7 +137,7 @@ public static class FakeClaude
         return "{" + pid + "\"id\":\"" + Json(row.Id) + "\",\"sessionId\":\"" +
             Json(row.SessionId) + "\",\"state\":\"" + Json(row.State) +
             "\",\"status\":\"" + Json(status) + "\",\"kind\":\"background\",\"name\":\"" +
-            Json(row.Name) + "\",\"cwd\":\"" + Json(row.Cwd) + "\"" + transcript + "}";
+            Json(row.Name) + "\",\"cwd\":\"" + Json(row.Cwd) + "\",\"startedAt\":" + row.StartedAt + transcript + "}";
     }
 
     public static int Main(string[] args)
@@ -178,6 +189,12 @@ public static class FakeClaude
             }
             foreach (SessionRow row in sessions.Values)
             {
+                string transientFile = Env("CLAUDE_FACTORY_TEST_RESPAWN_TRANSIENT_FILE");
+                if (!String.IsNullOrEmpty(transientFile) && File.Exists(transientFile) && File.ReadAllText(transientFile) == row.Id)
+                {
+                    row.SessionId = "eeeeeeee-1111-4222-8333-bbbbbbbbbbbb";
+                    File.Delete(transientFile);
+                }
                 if (!String.IsNullOrEmpty(status) && row.Id == "test1234") row.State = status;
                 if (!String.IsNullOrEmpty(liveStatus) && row.Id == "test1234") row.Status = liveStatus;
                 if (row.Id == liveTerminalId && row.State != "stopped") { row.State = "done"; row.HasPid = true; }
@@ -225,6 +242,50 @@ public static class FakeClaude
         if (!String.IsNullOrEmpty(argvFile))
         {
             File.WriteAllLines(argvFile, args, new UTF8Encoding(false));
+        }
+        if (args.Length > 0 && args[0] == "attach")
+        {
+            return Env("CLAUDE_FACTORY_TEST_ATTACH_FAIL") == "1" ? 1 : 0;
+        }
+        if (args.Length > 1 && args[0] == "respawn")
+        {
+            string capture = Env("CLAUDE_FACTORY_TEST_RESPAWN_FILE");
+            if (!String.IsNullOrEmpty(capture)) File.AppendAllText(capture, args[1] + Environment.NewLine);
+            if (Env("CLAUDE_FACTORY_TEST_RESPAWN_FAIL") == "1") return 1;
+            AppendEvent("respawn", args[1]);
+            string transientFile = Env("CLAUDE_FACTORY_TEST_RESPAWN_TRANSIENT_FILE");
+            if (!String.IsNullOrEmpty(transientFile)) File.WriteAllText(transientFile, args[1]);
+            Console.WriteLine("respawned " + args[1]);
+            return 0;
+        }
+        if (Has(args, "--bg") && Env("CLAUDE_FACTORY_ORCHESTRATOR") == "1" && !Has(args, "--agent"))
+        {
+            string backgroundArgv = Env("CLAUDE_FACTORY_TEST_BACKGROUND_ARGV_FILE");
+            if (!String.IsNullOrEmpty(backgroundArgv)) File.WriteAllLines(backgroundArgv, args, new UTF8Encoding(false));
+            Increment(Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_LAUNCH_COUNT_FILE"));
+            string mode = Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_LAUNCH_MODE");
+            if (mode == "failure") { Console.Error.WriteLine("Synthetic launch failure"); return 1; }
+            if (mode == "no-id") { Console.WriteLine("Synthetic launch response without identity"); return 0; }
+            string uuid = After(args, "--resume");
+            string rowId = "";
+            if (!String.IsNullOrEmpty(uuid) && mode != "fork")
+            {
+                foreach (SessionRow existing in ReadSessions(Environment.CurrentDirectory).Values)
+                    // Real Claude forks --bg --resume for an already registered
+                    // background conversation. Reuse must go through respawn.
+                    if (existing.SessionId == uuid) { mode = "fork"; break; }
+            }
+            if (String.IsNullOrEmpty(uuid) || mode == "fork") uuid = Guid.NewGuid().ToString();
+            if (String.IsNullOrEmpty(rowId)) rowId = uuid.Substring(0, 8);
+            if (mode != "invisible")
+            {
+                string cwd = Environment.CurrentDirectory + (mode == "wrong-repository" ? "-other" : "");
+                string state = mode == "stopped" ? "stopped" : "blocked";
+                AppendEvent("launch", rowId, cwd, After(args, "--name"), state, uuid, "9000");
+            }
+            Console.WriteLine("backgrounded - " + rowId + " - " + After(args, "--name"));
+            Console.WriteLine("claude attach " + rowId);
+            return 0;
         }
         string databaseCapture = Env("CLAUDE_FACTORY_TEST_DB_ENV_FILE");
         if (!String.IsNullOrEmpty(databaseCapture))

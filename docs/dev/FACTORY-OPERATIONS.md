@@ -56,6 +56,22 @@ Omitting `-Agent` always selects Claude. The selection is stored in private
 project `config.json` and affects only new attempts. Existing Claude and Codex
 workers keep their original runtime and can coexist while they finish.
 
+Normal Claude startup creates a fresh orchestrator with `claude --bg`, or
+restarts a registered stopped orchestrator with `claude respawn`. It verifies
+the native background row and conversation UUID, then runs `claude attach` in
+the same terminal. An existing live background orchestrator is attached directly.
+The initial bootstrap only opens the interface and waits
+for the operator; it does not replay the previous command. Plugin loading,
+Remote Control, permission mode, optional model, and rotation handoff are kept.
+
+The last verified conversation identity is not replaced if Claude unexpectedly
+forks or reports an invalid row. An uncertain launch leaves a private
+`orchestrator-launch.json` receipt. A repeated normal start resolves its recorded
+row without launching again; unknown or mismatched identities fail closed with
+the receipt path for diagnosis. Do not delete the receipt or use `-New` to
+bypass an unresolved launch. Failed terminal attachment is retried by attaching
+the already-verified session, not by creating another conversation.
+
 The Codex form creates or reuses `Factory Orchestrator - <repository>` as an
 app-backed Codex task, starts or reuses the Factory-managed app-server, enables
 Remote, and attaches the terminal with `codex --remote`. Desktop, phone, the
@@ -105,7 +121,18 @@ the current directory." That conversation may belong to a scheduled task,
 ordinary development work, or another session rather than the factory.
 
 Start the factory without flags for normal use; it resumes the stored
-orchestrator exactly. For manual recovery of a legacy conversation that predates
+orchestrator. Claude-generated numbered names such as `Claude Factory
+Orchestrator (2)` belong to the same orchestrator family only in the exact
+repository. A live matching conversation takes precedence over a stale saved
+UUID. A stopped numbered copy created after the saved identity is also
+recovered; older history cannot override a deliberately refreshed identity.
+Startup removes obsolete completed orchestrator rows from Agent View, keeping
+their conversation transcripts and all unrelated sessions. An existing
+background conversation keeps its native name; rename it in Agent View with
+`Ctrl+R` if an older numbered name remains. Factory does not fork a conversation
+just to change its label.
+
+For manual recovery of a legacy conversation that predates
 the stored identity, use:
 
 ```powershell
@@ -115,6 +142,10 @@ factory start -Resume
 In the resume picker, inspect the conversation preview instead of relying only
 on its name. An unrelated resumed session may previously have been renamed
 `Claude Factory Orchestrator`.
+
+The explicit legacy `-Resume` picker and `-Continue` still open an interactive
+Claude session. Use ordinary `factory start`/`factory restart` for the
+background-first interface described here.
 
 Use `factory start -New` only to deliberately replace the stored
 conversation. The launcher still refuses to create a new one while a matching
@@ -130,11 +161,20 @@ factory restart
 ```
 
 No Agent View ID is needed. For Claude, the command finds only live
-`Claude Factory Orchestrator` rows whose canonical working directory matches
-this repository, stops them, and resumes the exact stored conversation with
+`Claude Factory Orchestrator` rows (including numbered copies) whose canonical
+working directory matches this repository, stops them, and resumes the selected
+conversation with
 the currently resolved Claude executable. For Codex, run it after exiting the
 foreground Codex TUI and it resumes the stored thread. It does not stop or
 restart the native scheduler, workers, task worktrees, or browser preview.
+
+A registered Claude background session is restarted with native `claude
+respawn`, not `--bg --resume` (which can fork that conversation). Factory first
+checks that its saved transcript exists, because native respawn can replay the
+original prompt when history is missing. It then waits for the original UUID:
+Claude may temporarily advertise a different UUID while loading the transcript.
+An unconfirmed restart retains a launch receipt; the next `factory start`
+checks that same process instead of creating a replacement.
 
 Do not run `!factory restart` inside the orchestrator being replaced: an
 interactive child process cannot safely replace its own parent TUI. If the
@@ -252,6 +292,15 @@ dispatcher, not the orchestrator prompt.
 - `Enter` on a selected row opens that session.
 - `Esc` returns to the original conversation.
 - Typing a new prompt directly in Agent View creates a new background agent.
+
+With normal Factory startup, the orchestrator is already hosted in the
+background: `←` only detaches the terminal, and monitors remain running.
+An older foreground-launched orchestrator may instead show
+`Background this session?` and warn that its monitor would stop. Apply the new
+launch path later, when the orchestrator has finished its current operation:
+exit its TUI to PowerShell and run `factory restart`. Do not run `factory stop`
+for this change; scheduler, task workers, worktrees, and preview stay intact.
+No monitor-tool restriction or global Claude setting is required.
 
 If `/factory status` is entered directly in Agent View, Claude may dispatch a
 new agent for it. Return to the orchestrator and run the command there.

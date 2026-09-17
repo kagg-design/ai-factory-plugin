@@ -105,7 +105,7 @@ try {
     Write-Host "Worktrees: $($context.worktreeRoot)" -ForegroundColor Cyan
     Write-Host "Orchestrator runtime: $selectedAgent" -ForegroundColor Cyan
     if ($selectedAgent -eq "claude") {
-        Write-Host "Session view: claude agents" -ForegroundColor Cyan
+        Write-Host "Session view: background orchestrator attached in this terminal; left arrow opens Agent View" -ForegroundColor Cyan
     } else {
         Write-Host "Session view: shared Codex app-server (terminal, agents dashboard, and Remote phone)" -ForegroundColor Cyan
         Write-Host "Codex CLI: $resolvedCodexCommand" -ForegroundColor Cyan
@@ -150,7 +150,7 @@ try {
     $matchingRows = @(Get-FactoryMatchingOrchestratorRows `
         -Rows $agentRows `
         -RepositoryRoot ([string]$context.repositoryRoot) `
-        -Name $Name)
+        -Name $Name -SessionId $storedSessionId)
     $interactiveRows = @($matchingRows | Where-Object {
         [string]$_.kind -eq "interactive" -and -not (Test-FactoryTerminalAgentRow -Row $_)
     })
@@ -161,15 +161,50 @@ try {
         throw "An interactive factory orchestrator is already running for '$($context.repositoryRoot)' (session: $interactiveIds)."
     }
 
-    $background = Select-FactoryBackgroundOrchestrator `
-        -Rows $matchingRows `
-        -PreferredSessionId $storedSessionId
+    $pendingLaunchPath = Join-Path ([string]$context.projectData) 'orchestrator-launch.json'
+    $recoveredLaunch = $false
+    if (Test-Path -LiteralPath $pendingLaunchPath) {
+        if ($New -or $Resume -or $Continue) {
+            throw "An orchestrator launch is pending. Run 'factory start' without selection flags to recover it first."
+        }
+        $background = Start-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Name $Name -Rotation $pendingRotation
+        $storedSessionId = [string]$background.sessionId
+        $startNewConversation = $false
+        $recoveredLaunch = $true
+    } else {
+        $background = Select-FactoryBackgroundOrchestrator `
+            -Rows $matchingRows `
+            -PreferredSessionId $storedSessionId
+    }
     if ($null -ne $background -and $startNewConversation) {
         $backgroundId = [string]$background.id
         throw "Cannot create a new factory orchestrator while background session '$backgroundId' still exists. Exit or stop/remove it first, then run factory start again."
     }
 
+    if (-not $startNewConversation -and -not $Resume -and -not $Continue -and -not $recoveredLaunch) {
+        $conversation = Select-FactoryOrchestratorConversation -Rows $matchingRows -PreferredSessionId $storedSessionId -IdentityUpdatedAt (Get-FactoryNestedValue $identity 'updatedAt' $null)
+        if ($null -ne $conversation) {
+            $storedSessionId = [string]$conversation.sessionId
+            Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $context.repositoryRoot -Name $Name -SessionId $storedSessionId
+        }
+        if ($storedSessionId) {
+            Remove-FactoryObsoleteOrchestratorRows -Rows $matchingRows -RetainedSessionId $storedSessionId -ClaudeCommand $ClaudeCommand
+        }
+    }
+
     Start-FactoryLauncherScheduler -Context $context -PluginRoot $pluginRoot -ClaudeCommand $ClaudeCommand
+
+    if ($null -eq $background -and $storedSessionId -and -not $startNewConversation -and -not $Resume -and -not $Continue) {
+        $savedRows = @($matchingRows | Where-Object {
+            [string](Get-FactoryNestedValue $_ 'kind' '') -eq 'background' -and
+            [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq $storedSessionId -and
+            [string](Get-FactoryNestedValue $_ 'id' '')
+        } | Sort-Object { [long](Get-FactoryNestedValue $_ 'startedAt' 0) } -Descending)
+        if ($savedRows.Count -gt 0) {
+            Write-Host "Restarting saved background orchestrator: $($savedRows[0].id)" -ForegroundColor Green
+            $background = Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Row $savedRows[0] -Name $Name
+        }
+    }
 
     if ($null -ne $background) {
         $backgroundId = [string]$background.id
@@ -219,23 +254,20 @@ try {
         )
     }
     if ($Resume) {
+        # Preserve the explicit legacy picker. Normal start/restart never uses
+        # it: --bg with a bare --resume may fork an unrelated conversation.
         $claudeArguments += "--resume"
     } elseif ($Continue) {
         $claudeArguments += "--continue"
-    } elseif ($storedSessionId) {
-        Write-Host "Resuming factory conversation: $storedSessionId" -ForegroundColor Green
-        $claudeArguments += @("--resume", $storedSessionId)
     } else {
-        $newSessionId = [Guid]::NewGuid().ToString()
-        Write-FactoryOrchestratorIdentity `
-            -Path $identityPath `
-            -RepositoryRoot ([string]$context.repositoryRoot) `
-            -Name $Name `
-            -SessionId $newSessionId
-        if ($null -ne $pendingRotation) {
-            $null = Complete-FactoryOrchestratorRotation -Context $context -Rotation $pendingRotation -NewSessionId $newSessionId
-        }
-        $claudeArguments += @("--session-id", $newSessionId)
+        Set-Location $context.repositoryRoot
+        $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
+        Write-Host "$(if ($storedSessionId) { "Resuming factory conversation in background: $storedSessionId" } else { 'Creating background factory conversation...' })" -ForegroundColor Green
+        $launched = Start-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context `
+            -Name $Name -Arguments $claudeArguments -SessionId $storedSessionId -Rotation $pendingRotation
+        Write-Host "Attaching factory orchestrator: $($launched.id)" -ForegroundColor Green
+        & $ClaudeCommand attach ([string]$launched.id)
+        exit $LASTEXITCODE
     }
 
     Set-Location $context.repositoryRoot

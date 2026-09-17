@@ -154,13 +154,37 @@ the TUI without rotating its context. The operator must first exit the current
 orchestrator TUI to PowerShell. Do not execute `!factory restart` as a child of
 the orchestrator that it is meant to replace.
 
-For Claude, native code queries Agent View, matches only the exact orchestrator
-name and canonical repository path, stops every live matching background row,
-and resumes the stored conversation UUID with the currently resolved `claude`
+For Claude, native code queries Agent View and matches the saved UUID or the
+canonical orchestrator name (including numbered copies such as `(2)`) within
+the exact repository path. It selects the live conversation before stopping
+matching background rows, repairs stale saved identity, and resumes the selected
+conversation UUID with the currently resolved `claude`
 executable. The operator never needs to find or copy a background ID. For
 Codex, after its foreground TUI has exited, the command resumes the stored
 orchestrator thread. Scheduler, worker sessions, tasks, worktrees, previews,
 and a pending workload remain untouched.
+
+Normal startup also recognizes numbered copies. A newer stopped copy may
+replace an older saved identity; older history must not override a deliberately
+refreshed identity. Superseded completed orchestrator rows are removed from
+Agent View while conversation transcripts and unrelated sessions are retained.
+
+Normal Claude start/restart creates or resumes a native background conversation
+and attaches it in the same terminal. Left-arrow navigation then detaches the
+view, not the orchestrator process; running monitors stay with that process.
+Factory verifies the returned background row and conversation UUID before
+attaching. Registered background sessions use native `claude respawn`, never
+`--bg --resume`, which can fork them. Before respawning, Factory requires the
+saved transcript so missing history cannot replay the original prompt. It waits
+through Claude's temporary startup UUID until the saved UUID is confirmed.
+Existing native display names are retained; use Agent View `Ctrl+R` to rename
+an older numbered label without replacing its conversation.
+It never silently accepts a fork of the saved conversation. An
+uncertain launch retains `orchestrator-launch.json` separately from the verified
+identity; a repeated normal start resolves the recorded row rather than launching
+another session. Never delete that receipt to bypass an unresolved launch.
+Explicit `start -Resume`/`-Continue` retain Claude's interactive legacy selection;
+they are not the normal background-first startup path.
 
 This differs from `rotate`: `restart` preserves the current conversation and
 only replaces its process, while `rotate` deliberately creates a fresh

@@ -237,8 +237,6 @@ try {
     Assert-True ($launcherSource.Contains('[string]$Name = "Claude Factory Orchestrator"')) "Launcher does not use the orchestrator display name by default."
     Assert-True ($launcherSource.Contains('"--name", $Name')) "Launcher does not set the Claude session display name."
     Assert-True ($launcherSource.Contains('"--add-dir", $standaloneRoot')) "Launcher does not load the /factory standalone skill."
-    Assert-True ($launcherSource.Contains('"--session-id", $newSessionId')) "Launcher does not assign a durable orchestrator session ID."
-    Assert-True ($launcherSource.Contains('@("--resume", $storedSessionId)')) "Launcher does not resume the stored orchestrator conversation."
     Assert-True ($launcherSource.Contains('"-Action", "start"')) "Launcher does not start the native scheduler."
     $tickSkillSource = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\tick\SKILL.md") -Raw
     Assert-True (-not $tickSkillSource.Contains("CronCreate")) "The internal tick still owns an AI cron scheduler."
@@ -249,7 +247,6 @@ try {
     Assert-True ($launcherSource.Contains('$selectedAgent = if ($Agent) { $Agent } else { "claude" }')) "Launcher does not default the full runtime to Claude."
     Assert-True ($launcherSource.Contains('Set-FactoryProperty -Target $factoryConfig -Name "codexCommand" -Value $configuredCodexCommand')) "Launcher persists an update-specific resolved Codex path."
     Assert-True ($launcherSource.Contains('Get-FactoryPendingOrchestratorRotation')) "Launcher does not consume pending orchestrator rotation."
-    Assert-True ($launcherSource.Contains('Complete-FactoryOrchestratorRotation')) "Launcher does not finalize orchestrator rotation after assigning a new session."
     Assert-True ($launcherSource.Contains('$env:CLAUDE_FACTORY_ORCHESTRATOR = "1"')) "Launcher does not mark child shells as running inside the orchestrator TUI."
     Assert-True ($launcherSource.Contains('$orchestratorEnvironmentWasSet = Test-Path Env:\CLAUDE_FACTORY_ORCHESTRATOR')) "Launcher does not remember whether its caller owned the orchestrator environment marker."
     Assert-True ($launcherSource.Contains('Remove-Item Env:\CLAUDE_FACTORY_ORCHESTRATOR -ErrorAction SilentlyContinue')) "Launcher does not clear its temporary orchestrator environment marker."
@@ -899,25 +896,25 @@ try {
     Write-FactoryTestState -Context $context -Value $postLaneState
 
     $orchestratorArgv = Join-Path $testRoot "orchestrator-argv.txt"
+    $orchestratorBackgroundArgv = Join-Path $testRoot "orchestrator-background-argv.txt"
     $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $orchestratorArgv
+    $env:CLAUDE_FACTORY_TEST_BACKGROUND_ARGV_FILE = $orchestratorBackgroundArgv
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
     if ($LASTEXITCODE -ne 0) { throw "Fresh orchestrator launcher fixture failed." }
-    $firstOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
-    $newSessionIndex = [Array]::IndexOf($firstOrchestratorArgs, "--session-id")
-    Assert-True ($newSessionIndex -ge 0 -and $newSessionIndex + 1 -lt $firstOrchestratorArgs.Count) "Fresh launcher did not assign an orchestrator session ID."
-    $orchestratorSessionId = $firstOrchestratorArgs[$newSessionIndex + 1]
-    $parsedOrchestratorSessionId = [Guid]::Empty
-    Assert-True ([Guid]::TryParse($orchestratorSessionId, [ref]$parsedOrchestratorSessionId)) "Launcher assigned an invalid orchestrator UUID."
+    $firstOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorBackgroundArgv, [Text.Encoding]::UTF8))
+    Assert-True ($firstOrchestratorArgs -contains '--bg' -and -not ($firstOrchestratorArgs -contains '--session-id')) "Fresh launcher did not use native background startup."
     $orchestratorIdentityPath = Join-Path ([string]$context.projectData) "orchestrator-session.json"
     $orchestratorIdentity = Read-FactoryJson -Path $orchestratorIdentityPath
-    Assert-Equal $orchestratorSessionId ([string]$orchestratorIdentity.sessionId) "Launcher did not persist the orchestrator UUID."
+    $orchestratorSessionId = [string]$orchestratorIdentity.sessionId
+    $parsedOrchestratorSessionId = [Guid]::Empty
+    Assert-True ([Guid]::TryParse($orchestratorSessionId, [ref]$parsedOrchestratorSessionId)) "Launcher assigned an invalid orchestrator UUID."
+    Assert-Equal 'attach' ([IO.File]::ReadAllLines($orchestratorArgv)[0]) "Fresh launcher did not attach its background session."
 
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
     if ($LASTEXITCODE -ne 0) { throw "Stored orchestrator resume fixture failed." }
     $resumedOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
-    $resumeIndex = [Array]::IndexOf($resumedOrchestratorArgs, "--resume")
-    Assert-True ($resumeIndex -ge 0 -and $resumeIndex + 1 -lt $resumedOrchestratorArgs.Count) "Repeated launcher did not resume the stored orchestrator."
-    Assert-Equal $orchestratorSessionId $resumedOrchestratorArgs[$resumeIndex + 1] "Repeated launcher resumed a different conversation."
+    Assert-Equal 'attach' $resumedOrchestratorArgs[0] "Repeated launcher did not attach the stored orchestrator."
+    Assert-Equal ([string]$orchestratorIdentity.backgroundId) $resumedOrchestratorArgs[1] "Repeated launcher attached a different conversation."
 
     $launcherCallerLocation = Get-Location
     $launcherCallerErrorAction = $ErrorActionPreference
@@ -963,6 +960,11 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
     $restartStopCapture = Join-Path $testRoot "restart-orchestrator-stops.txt"
+    $restartRespawnCapture = Join-Path $testRoot 'restart-respawns.txt'
+    $env:CLAUDE_FACTORY_TEST_RESPAWN_FILE = $restartRespawnCapture
+    $env:CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS = $testRoot
+    [IO.File]::WriteAllText((Join-Path $testRoot "$restartSessionId.jsonl"), '{"type":"user","message":"Do not replay"}')
+    $backgroundArgsBeforeRestart = [IO.File]::ReadAllText($orchestratorBackgroundArgv)
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $restartStopCapture
     $restartOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") restart `
         -Repository $repository -ClaudeCommand $fakeClaude | Out-String)
@@ -971,14 +973,14 @@ try {
     $restartStops = @([IO.File]::ReadAllLines($restartStopCapture, [Text.Encoding]::UTF8))
     Assert-True ($restartStops -contains "test1234" -and $restartStops -contains "orchestrator-static") "Factory restart did not stop every matching live Claude orchestrator row."
     Assert-True (-not ($restartStops -contains "other-orchestrator")) "Factory restart stopped an orchestrator owned by another repository."
-    $restartArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
-    $restartResumeIndex = [Array]::IndexOf($restartArgs, "--resume")
-    Assert-True ($restartResumeIndex -ge 0 -and $restartResumeIndex + 1 -lt $restartArgs.Count) "Factory restart did not resume the stored Claude conversation."
-    Assert-Equal $restartSessionId $restartArgs[$restartResumeIndex + 1] "Factory restart resumed the wrong Claude conversation."
+    Assert-Equal 'test1234' ([IO.File]::ReadAllText($restartRespawnCapture).Trim()) 'Factory restart did not respawn the registered conversation.'
+    Assert-Equal $backgroundArgsBeforeRestart ([IO.File]::ReadAllText($orchestratorBackgroundArgv)) 'Factory restart launched --bg --resume instead of respawn.'
     $restartIdentity = Read-FactoryJson -Path $orchestratorIdentityPath
     Assert-Equal $restartSessionId ([string]$restartIdentity.sessionId) "Factory restart replaced the stored Claude conversation UUID."
-    Assert-True (-not [string]$restartIdentity.backgroundId) "Factory restart retained a stopped background row ID."
+    Assert-Equal 'test1234' ([string]$restartIdentity.backgroundId) "Factory restart did not save the verified background row ID."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RESPAWN_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS -ErrorAction SilentlyContinue
 
     $env:CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR = "1"
     $interactiveRestartStopCapture = Join-Path $testRoot "interactive-restart-stops.txt"
@@ -999,13 +1001,16 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_STOP_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_AGENT_CWD -ErrorAction SilentlyContinue
 
+    & $fakeClaude stop ([string]$restartIdentity.backgroundId)
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -New 1> $null
     if ($LASTEXITCODE -ne 0) { throw "Explicit new orchestrator fixture failed." }
-    $newOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorArgv, [Text.Encoding]::UTF8))
-    $replacementSessionIndex = [Array]::IndexOf($newOrchestratorArgs, "--session-id")
-    Assert-True ($replacementSessionIndex -ge 0 -and $replacementSessionIndex + 1 -lt $newOrchestratorArgs.Count) "-New did not create a replacement orchestrator identity."
-    Assert-True ($newOrchestratorArgs[$replacementSessionIndex + 1] -ne $orchestratorSessionId) "-New reused the previous orchestrator UUID."
+    $newOrchestratorArgs = @([IO.File]::ReadAllLines($orchestratorBackgroundArgv, [Text.Encoding]::UTF8))
+    Assert-True ($newOrchestratorArgs -contains '--bg' -and -not ($newOrchestratorArgs -contains '--resume')) "-New did not create a replacement background orchestrator."
+    Assert-True ((Read-FactoryJson $orchestratorIdentityPath).sessionId -ne $orchestratorSessionId) "-New reused the previous orchestrator UUID."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_BACKGROUND_ARGV_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RESPAWN_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS -ErrorAction SilentlyContinue
 
     $safeLauncherProjectKey = ([string]$context.projectKey) -replace '[^A-Za-z0-9_.-]', '-'
     $liveLauncherMutex = New-Object Threading.Mutex($false, "Local\ClaudeFactorySession-$safeLauncherProjectKey")
@@ -1819,13 +1824,13 @@ try {
     Assert-True ($cliRotateStatus.Contains([string]$claudePendingRotation.rotationId)) "Factory rotate status did not show the pending request."
 
     $rotationArgv = Join-Path $testRoot "rotation-orchestrator-argv.txt"
-    $env:CLAUDE_FACTORY_TEST_ARGV_FILE = $rotationArgv
+    $env:CLAUDE_FACTORY_TEST_BACKGROUND_ARGV_FILE = $rotationArgv
+    & $fakeClaude stop ([string]$preRotationIdentity.backgroundId)
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "start-factory.ps1") -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime 1> $null
     Assert-Equal 0 $LASTEXITCODE "Pending Claude orchestrator rotation could not be activated."
     $rotatedClaudeArgs = @([IO.File]::ReadAllLines($rotationArgv, [Text.Encoding]::UTF8))
-    $rotatedSessionIndex = [Array]::IndexOf($rotatedClaudeArgs, "--session-id")
-    Assert-True ($rotatedSessionIndex -ge 0 -and $rotatedSessionIndex + 1 -lt $rotatedClaudeArgs.Count) "Claude rotation did not create a new session UUID."
-    $rotatedClaudeSessionId = $rotatedClaudeArgs[$rotatedSessionIndex + 1]
+    Assert-True ($rotatedClaudeArgs -contains '--bg' -and -not ($rotatedClaudeArgs -contains '--resume')) "Claude rotation did not create a new background session."
+    $rotatedClaudeSessionId = [string](Read-FactoryJson $orchestratorIdentityPath).sessionId
     Assert-True ($rotatedClaudeSessionId -ne [string]$preRotationIdentity.sessionId) "Claude rotation resumed the context-heavy session."
     Assert-True ([Array]::IndexOf($rotatedClaudeArgs, "--append-system-prompt") -ge 0) "Claude rotation did not inject its private handoff into bootstrap."
     Assert-True ($rotatedClaudeArgs -contains [string]$context.projectData) "Claude rotation did not grant the new session access to private handoff state."
@@ -4220,6 +4225,9 @@ $result = [ordered]@{
     Remove-Item Env:\CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_EXPECT_PATH_EXISTS_ON_RM -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ARGV_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_BACKGROUND_ARGV_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_RESPAWN_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_PROMPT_COPY -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_SYSTEM_PROMPT_COPY -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_VERSION -ErrorAction SilentlyContinue

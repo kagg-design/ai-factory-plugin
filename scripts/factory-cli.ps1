@@ -1546,6 +1546,9 @@ function Restart-CliFactoryOrchestrator {
     }
 
     if ($runtime -eq "claude") {
+        if (Test-Path -LiteralPath (Join-Path ([string]$Context.projectData) 'orchestrator-launch.json')) {
+            throw "A Claude orchestrator launch is unresolved. Run 'factory start' to recover its recorded row before restarting. No sessions were stopped."
+        }
         $identityPath = Get-FactoryOrchestratorIdentityPath -Context $Context -Runtime "claude"
         $identity = if (Test-Path -LiteralPath $identityPath -PathType Leaf) {
             try { Read-FactoryJson -Path $identityPath } catch { $null }
@@ -1570,7 +1573,7 @@ function Restart-CliFactoryOrchestrator {
         $matchingRows = @(Get-FactoryMatchingOrchestratorRows `
             -Rows $rows `
             -RepositoryRoot ([string]$Context.repositoryRoot) `
-            -Name $name)
+            -Name $name -SessionId $storedSessionId)
         $interactiveRows = @($matchingRows | Where-Object {
             [string](Get-CliProperty -InputObject $_ -Name "kind") -eq "interactive" -and
             -not (Test-FactoryTerminalAgentRow -Row $_)
@@ -1584,8 +1587,8 @@ function Restart-CliFactoryOrchestrator {
             [string](Get-CliProperty -InputObject $_ -Name "id") -and
             -not (Test-FactoryTerminalAgentRow -Row $_)
         })
-        $selected = Select-FactoryBackgroundOrchestrator -Rows $matchingRows -PreferredSessionId $storedSessionId
-        if (-not $storedSessionId -and $null -ne $selected) {
+        $selected = Select-FactoryOrchestratorConversation -Rows $matchingRows -PreferredSessionId $storedSessionId -IdentityUpdatedAt (Get-CliProperty -InputObject $identity -Name 'updatedAt')
+        if ($null -ne $selected) {
             $storedSessionId = [string](Get-CliProperty -InputObject $selected -Name "sessionId")
         }
         if ($liveBackgroundRows.Count -gt 0 -and -not $storedSessionId) {

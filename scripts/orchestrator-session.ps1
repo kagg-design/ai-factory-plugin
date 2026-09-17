@@ -5,13 +5,16 @@ function Get-FactoryMatchingOrchestratorRows {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Rows,
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$SessionId = ""
     )
 
+    $namePattern = '^' + [regex]::Escape($Name) + '(?: \([1-9][0-9]*\))?$'
     return @($Rows | Where-Object {
         $rowName = if ($null -ne $_.PSObject.Properties["name"]) { [string]$_.name } else { "" }
         $rowCwd = if ($null -ne $_.PSObject.Properties["cwd"]) { [string]$_.cwd } else { "" }
-        $rowName -ceq $Name -and $rowCwd -and
+        $rowSession = [string](Get-FactoryNestedValue $_ 'sessionId' '')
+        ($rowName -cmatch $namePattern -or ($SessionId -and $rowSession -eq $SessionId)) -and $rowCwd -and
             (Test-FactorySamePath -Left $rowCwd -Right $RepositoryRoot)
     })
 }
@@ -64,6 +67,220 @@ function Write-FactoryOrchestratorIdentity {
         backgroundId = if ($BackgroundId) { $BackgroundId } else { $null }
         updatedAt = Get-FactoryUtcTimestamp
     })
+}
+
+function Start-FactoryClaudeBackgroundOrchestrator {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClaudeCommand,
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$Arguments = @(),
+        [string]$SessionId = "",
+        $Rotation = $null
+    )
+
+    # A launch receipt prevents a lost/late CLI response from causing a second
+    # launch on retry. It is separate from the last verified conversation UUID.
+    $receiptPath = Join-Path ([string]$Context.projectData) 'orchestrator-launch.json'
+    if (Test-Path -LiteralPath $receiptPath) {
+        $receipt = Read-FactoryJson $receiptPath
+        if (-not (Test-FactorySamePath ([string]$receipt.repositoryRoot) ([string]$Context.repositoryRoot)) -or
+            [string]$receipt.name -cne $Name) {
+            throw "The pending orchestrator launch belongs to another repository or name: $receiptPath"
+        }
+        $SessionId = [string]$receipt.requestedSessionId
+        $backgroundId = [string]$receipt.backgroundId
+        if ([string](Get-FactoryNestedValue $receipt 'operation' '') -eq 'respawn') {
+            return Wait-FactoryRespawnedOrchestrator -ClaudeCommand $ClaudeCommand -Context $Context -Name $Name `
+                -BackgroundId $backgroundId -SessionId $SessionId
+        }
+        if (-not $backgroundId) {
+            throw "A previous Claude launch has an unknown outcome. Inspect 'claude agents' before retrying; launch receipt: $receiptPath. No second orchestrator was started."
+        }
+    } else {
+        $receipt = [pscustomobject]@{
+            repositoryRoot = [string]$Context.repositoryRoot; name = $Name
+            requestedSessionId = $SessionId; backgroundId = $null
+            startedAt = Get-FactoryUtcTimestamp
+        }
+        Write-FactoryJsonAtomic $receiptPath $receipt
+        $launchArguments = @($Arguments) + @('--bg')
+        if ($SessionId) { $launchArguments += @('--resume', $SessionId) }
+        # --bg needs a prompt. Opening the UI must not replay the last user
+        # action or authorize any new Factory/project operation.
+        $launchArguments += 'You are the Factory Orchestrator. This message only opens the orchestration interface. Wait for the operator next message. Do not call tools, resume previous actions, or modify project or Factory state.'
+        $result = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments $launchArguments -WorkingDirectory ([string]$Context.repositoryRoot)
+        $backgroundId = Get-FactoryBackgroundId -Output $result.output
+        $receipt.backgroundId = $backgroundId
+        Write-FactoryJsonAtomic $receiptPath $receipt
+        if ($result.exitCode -ne 0) {
+            throw "Claude background orchestrator launch failed: $($result.output). Launch receipt: $receiptPath. No interactive fallback was started."
+        }
+        if (-not $backgroundId) {
+            throw "Claude returned no background session ID: $($result.output). Inspect 'claude agents'; launch receipt: $receiptPath. No second orchestrator was started."
+        }
+    }
+
+    $row = Wait-FactoryClaudeSessionVisible -ClaudeCommand $ClaudeCommand -BackgroundId $backgroundId
+    $actualSessionId = [string](Get-FactoryNestedValue $row 'sessionId' '')
+    $parsedSessionId = [Guid]::Empty
+    if ([string](Get-FactoryNestedValue $row 'kind' '') -ne 'background' -or
+        -not (Test-FactorySamePath ([string](Get-FactoryNestedValue $row 'cwd' '')) ([string]$Context.repositoryRoot)) -or
+        @((Get-FactoryMatchingOrchestratorRows -Rows @($row) -RepositoryRoot $Context.repositoryRoot -Name $Name)).Count -ne 1 -or
+        -not [Guid]::TryParse($actualSessionId, [ref]$parsedSessionId)) {
+        throw "Claude returned an unverified orchestrator row '$backgroundId'. Saved conversation unchanged; inspect the launch receipt: $receiptPath"
+    }
+    if ($SessionId -and $actualSessionId -ne $SessionId) {
+        throw "Claude created a copy '$actualSessionId' instead of resuming '$SessionId' (row '$backgroundId'). Saved conversation unchanged; no attachment or second launch was attempted. Inspect: $receiptPath"
+    }
+    if ([string](Get-FactoryNestedValue $row 'state' '') -in @('failed', 'stopped')) {
+        throw "Claude orchestrator '$backgroundId' is $($row.state). Saved conversation unchanged; inspect: $receiptPath"
+    }
+    Write-FactoryOrchestratorIdentity -Path (Join-Path ([string]$Context.projectData) 'orchestrator-session.json') `
+        -RepositoryRoot $Context.repositoryRoot -Name $Name -SessionId $actualSessionId -BackgroundId $backgroundId
+    if ($null -ne $Rotation) {
+        $null = Complete-FactoryOrchestratorRotation -Context $Context -Rotation $Rotation -NewSessionId $actualSessionId
+    }
+    Remove-Item -LiteralPath $receiptPath -Force
+    return $row
+}
+
+function Resume-FactoryClaudeBackgroundOrchestrator {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClaudeCommand,
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Row,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$TimeoutMilliseconds = 60000
+    )
+
+    $backgroundId = [string]$Row.id
+    $sessionId = [string]$Row.sessionId
+    if ([string](Get-FactoryNestedValue $Row 'kind' '') -ne 'background' -or
+        -not (Test-FactorySamePath ([string](Get-FactoryNestedValue $Row 'cwd' '')) ([string]$Context.repositoryRoot))) {
+        throw 'Cannot respawn an orchestrator outside the selected repository.'
+    }
+    # respawn replays the original intent if the saved transcript disappeared.
+    # Require history first, so a lifecycle operation cannot replay e.g. "go".
+    $transcript = [string](Get-FactoryNestedValue $Row 'transcriptPath' '')
+    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf)) {
+        $claudeConfigRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
+        $nativeStatePath = Join-Path $claudeConfigRoot "jobs\$backgroundId\state.json"
+        if (Test-Path -LiteralPath $nativeStatePath -PathType Leaf) {
+            $nativeState = Read-FactoryJson $nativeStatePath
+            if ([string](Get-FactoryNestedValue $nativeState 'sessionId' '') -eq $sessionId -and
+                (Test-FactorySamePath ([string](Get-FactoryNestedValue $nativeState 'cwd' '')) ([string]$Context.repositoryRoot))) {
+                $transcript = [string](Get-FactoryNestedValue $nativeState 'linkScanPath' '')
+            }
+        }
+    }
+    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf) -or
+        [IO.Path]::GetFileNameWithoutExtension($transcript) -ne $sessionId -or
+        (Get-Item -LiteralPath $transcript).Length -eq 0) {
+        throw "Cannot respawn orchestrator '$backgroundId': its saved transcript is missing or unverified. Original intent will not be replayed."
+    }
+
+    $receiptPath = Join-Path ([string]$Context.projectData) 'orchestrator-launch.json'
+    if (Test-Path -LiteralPath $receiptPath) { throw "An orchestrator launch is already pending: $receiptPath" }
+    Write-FactoryJsonAtomic $receiptPath ([ordered]@{
+        operation = 'respawn'; repositoryRoot = [string]$Context.repositoryRoot; name = $Name
+        requestedSessionId = $sessionId; backgroundId = $backgroundId; startedAt = Get-FactoryUtcTimestamp
+    })
+    $result = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @('respawn', $backgroundId) -WorkingDirectory ([string]$Context.repositoryRoot)
+    if ($result.exitCode -ne 0) {
+        throw "Claude could not respawn orchestrator '$backgroundId': $($result.output). No replacement was launched. Run 'factory start' to recheck the recorded session; receipt: $receiptPath"
+    }
+    return Wait-FactoryRespawnedOrchestrator -ClaudeCommand $ClaudeCommand -Context $Context -Name $Name `
+        -BackgroundId $backgroundId -SessionId $sessionId -TimeoutMilliseconds $TimeoutMilliseconds
+}
+
+function Wait-FactoryRespawnedOrchestrator {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClaudeCommand,
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$BackgroundId,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [int]$TimeoutMilliseconds = 60000
+    )
+    # Claude initially advertises a temporary TUI UUID while loading --resume.
+    # Wait for the registered conversation, not just the first visible row.
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        $rows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand | Where-Object {
+            [string](Get-FactoryNestedValue $_ 'id' '') -eq $backgroundId -and
+            [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq $sessionId -and
+            [string](Get-FactoryNestedValue $_ 'kind' '') -eq 'background' -and
+            [string](Get-FactoryNestedValue $_ 'state' '') -notin @('failed', 'stopped') -and
+            -not (Test-FactoryTerminalAgentRow $_) -and
+            (Test-FactorySamePath ([string](Get-FactoryNestedValue $_ 'cwd' '')) ([string]$Context.repositoryRoot))
+        })
+        if ($rows.Count -eq 1) {
+            Write-FactoryOrchestratorIdentity -Path (Join-Path ([string]$Context.projectData) 'orchestrator-session.json') `
+                -RepositoryRoot $Context.repositoryRoot -Name $Name -SessionId $sessionId -BackgroundId $backgroundId
+            Remove-Item -LiteralPath (Join-Path ([string]$Context.projectData) 'orchestrator-launch.json') -Force
+            return $rows[0]
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Claude respawn '$backgroundId' did not confirm conversation '$sessionId' within $TimeoutMilliseconds ms. No replacement was launched. Run 'factory start' to recheck the recorded session."
+}
+
+function Select-FactoryOrchestratorConversation {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Rows,
+        [string]$PreferredSessionId = "",
+        $IdentityUpdatedAt = $null
+    )
+
+    $live = Select-FactoryBackgroundOrchestrator -Rows $Rows -PreferredSessionId $PreferredSessionId
+    if ($null -ne $live) { return $live }
+    $completed = @($Rows | Where-Object {
+        [string](Get-FactoryNestedValue $_ 'kind' '') -eq 'background' -and
+        [string](Get-FactoryNestedValue $_ 'sessionId' '') -and
+        (Test-FactoryTerminalAgentRow $_)
+    } | Sort-Object { [long](Get-FactoryNestedValue $_ 'startedAt' 0) } -Descending)
+    if ($completed.Count -eq 0) { return $null }
+    $preferred = @($completed | Where-Object { [string]$_.sessionId -eq $PreferredSessionId } | Select-Object -First 1)
+    # A numbered copy created after the saved identity is evidence that Claude
+    # moved to another conversation. Recover it even after both processes exit.
+    # A deliberately refreshed identity (restart/rotation) must still win over
+    # older history, including when the recorded UUID has no Agent View row.
+    $cutoff = if ($preferred.Count) { [long](Get-FactoryNestedValue $preferred[0] 'startedAt' 0) } else { 0L }
+    $updated = ConvertFrom-FactoryRoundtripTimestamp $IdentityUpdatedAt
+    if ($updated.success) {
+        $cutoff = [Math]::Max($cutoff, ([DateTimeOffset]([DateTime]$updated.value)).ToUnixTimeMilliseconds())
+    }
+    if ($PreferredSessionId -and [long](Get-FactoryNestedValue $completed[0] 'startedAt' 0) -le $cutoff) {
+        if ($preferred.Count) { return $preferred[0] }
+        return $null
+    }
+    return $completed[0]
+}
+
+function Remove-FactoryObsoleteOrchestratorRows {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Rows,
+        [Parameter(Mandatory = $true)][string]$RetainedSessionId,
+        [Parameter(Mandatory = $true)][string]$ClaudeCommand
+    )
+
+    foreach ($row in $Rows) {
+        if ([string](Get-FactoryNestedValue $row 'kind' '') -ne 'background' -or
+            -not [string](Get-FactoryNestedValue $row 'id' '') -or
+            [string](Get-FactoryNestedValue $row 'sessionId' '') -eq $RetainedSessionId -or
+            -not (Test-FactoryTerminalAgentRow $row)) { continue }
+        $fresh = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand | Where-Object {
+            [string](Get-FactoryNestedValue $_ 'id' '') -eq [string]$row.id -and
+            [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq [string](Get-FactoryNestedValue $row 'sessionId' '') -and
+            [string](Get-FactoryNestedValue $_ 'name' '') -ceq [string](Get-FactoryNestedValue $row 'name' '') -and
+            (Test-FactorySamePath ([string](Get-FactoryNestedValue $_ 'cwd' '')) ([string](Get-FactoryNestedValue $row 'cwd' '')))
+        })
+        if ($fresh.Count -ne 1 -or -not (Test-FactoryTerminalAgentRow $fresh[0])) { continue }
+        $removed = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId ([string]$row.id)
+        if ($removed.removed) { Write-Host "Removed obsolete orchestrator from Agent View: $($row.id) (conversation retained)" }
+        elseif ($removed.warning) { Write-Warning $removed.warning }
+    }
 }
 
 function ConvertTo-FactoryOrchestratorHandoffLine {
