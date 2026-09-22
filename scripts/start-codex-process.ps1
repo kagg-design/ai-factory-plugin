@@ -9,7 +9,7 @@ try {
     if ($env:CLAUDE_FACTORY_TASK_ID) {
         $task = Get-FactoryTask -State (Read-FactoryJson $context.statePath) -TaskId $env:CLAUDE_FACTORY_TASK_ID
         $settings = Get-FactoryTestDatabaseSettings -Config (Read-FactoryJson $context.configPath) -RepositoryRoot $context.repositoryRoot
-        Assert-FactoryWorkerEnvironment -Task $task -DatabaseSettings $settings -PromptPath ([string]$request.promptPath)
+        Assert-FactoryWorkerEnvironment -Task $task -DatabaseSettings $settings
     }
     $process = Start-Process -FilePath ([string]$request.executable) `
         -ArgumentList ([string]$request.arguments) -WorkingDirectory ([string]$request.worktree) `

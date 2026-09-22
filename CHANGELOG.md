@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Allow absent database variables in daemon-hosted workers while retaining
+  ledger/foreign-database/task-ID checks. Ignore stale prompt pointers, require
+  explicit database pins for visible PHP test commands, and report expected and
+  actual values with process provenance on guard refusals.
+
 - Restart registered Claude background orchestrators with native `respawn`
   instead of `--bg --resume`, which can fork their conversations. Require saved
   history before respawning, wait through transient startup UUIDs, and recover

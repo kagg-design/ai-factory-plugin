@@ -103,13 +103,19 @@ grounded in the task, code, or tests, ask the user instead of guessing.
   `testLeaseScript -Action release -Token <token>` from a `finally`, including
   after a sync or test failure. Targeted iteration outside this final sequence
   remains unrestricted.
-- Before tests, verify that the shell database variable matches
-  `FACTORY_TASK.testDatabase` when assigned. A mismatch or another task's prompt
-  pointer is an environment fault: stop and request a worker relaunch, never
-  run tests against the inherited database or silence the guard.
-- When `FACTORY_TASK.testDatabase` is non-empty, the worker process already
-  carries that isolated database through its configured environment variable.
-  Never replace it with the repository's shared test database.
+- When `FACTORY_TASK.testDatabase` is non-empty, explicitly pin its configured
+  database variable in every test command: `DB_DATABASE=<assigned> php artisan
+  test` in Bash, or `$env:DB_DATABASE = '<assigned>'; php artisan test` in the
+  same PowerShell invocation. Apply this to phpunit and paratest too; substitute
+  the configured variable name when it is not DB_DATABASE.
+- Claude daemon workers may have no database variable at all; do not assume the
+  launcher's environment reached the session. An absent variable is normal and
+  requires the explicit test-command pin, not a relaunch. A stale inherited
+  prompt-file pointer is not task identity; use the supplied task/worktree.
+- A present foreign database or task ID is still an environment fault: stop and
+  report the guard's expected/actual values, never overwrite or clear inherited
+  values to bypass a refusal. Never disable the hook, edit environment/config
+  files as a workaround, or use the repository's shared test database.
 - Review `git diff` and include no unrelated files.
 - Create exactly one final task commit.
 - Suggested message: `fix(<task-id>): <task title>`.

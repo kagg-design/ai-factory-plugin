@@ -126,7 +126,7 @@ try {
     Assert-ParallelSafety ($env:DB_DATABASE -ceq 'foreign-worker-database' -and $env:CLAUDE_FACTORY_TASK_ID -eq 'foreign-task') 'Preparing workers mutated the launcher environment.'
     Assert-ParallelSafety ($workerEnvironments[0].DB_DATABASE -ne $workerEnvironments[2].DB_DATABASE) 'Worker environment maps were reused.'
     $guarded = $false
-    try { Assert-FactoryWorkerEnvironment -Task $task -DatabaseSettings $settings -PromptPath $prompt } catch { $guarded = $_.Exception.Message -match 'environment mismatch' }
+    try { Assert-FactoryWorkerEnvironment -Task $task -DatabaseSettings $settings } catch { $guarded = $_.Exception.Message -match 'environment mismatch' }
     Assert-ParallelSafety $guarded 'Foreign inherited database did not fail closed.'
 
     # Launch three overlapping native Codex workers through the detached,
@@ -203,7 +203,7 @@ try {
     } finally { Exit-FactoryMutex $stateLock }
     $reportPrompt = Join-Path $fixture 'report-prompt.txt'
     Write-FactoryJsonAtomic (Join-Path $context.sessionsPath 'report.json') ([ordered]@{ promptPath = $reportPrompt })
-    $guardPayload = [ordered]@{ cwd = $repository; tool_input = @{ command = 'php artisan test' } } | ConvertTo-Json -Compress
+    $guardPayload = [ordered]@{ tool_name = 'Bash'; cwd = $repository; tool_input = @{ command = 'DB_DATABASE=fixture_worker_report php artisan test' } } | ConvertTo-Json -Compress
     $guardEnvironment = New-FactoryWorkerEnvironment -Context $context -Task $reportTask -Worktree $repository -PromptPath $reportPrompt -DatabaseSettings $settings -DatabaseName $reportTask.testDatabase
     $guardRun = Invoke-SafetyGuard -Environment $guardEnvironment -Payload $guardPayload
     Assert-ParallelSafety ($guardRun.exitCode -eq 0) "The shell hook rejected the correct task environment: $($guardRun.output)"
@@ -213,7 +213,7 @@ try {
     $guardEnvironment.DB_DATABASE = $reportTask.testDatabase
     $guardEnvironment.CLAUDE_FACTORY_PROMPT_PATH = Join-Path $fixture 'foreign-prompt.txt'
     $guardRun = Invoke-SafetyGuard -Environment $guardEnvironment -Payload $guardPayload
-    Assert-ParallelSafety ($guardRun.exitCode -eq 2 -and $guardRun.output -match 'prompt environment belongs to another task') 'The shell hook allowed another worker prompt pointer.'
+    Assert-ParallelSafety ($guardRun.exitCode -eq 0) 'A stale prompt pointer blocked the correctly resolved worker.'
     $fakeClaude = Join-Path $fixture 'fake-claude.exe'
     Add-Type -Path (Join-Path $PluginRoot 'tests\FakeClaude.cs') -OutputAssembly $fakeClaude -OutputType ConsoleApplication
     $null = Publish-FactoryWorkerEvent -Context $context -Task $reportTask -SessionId 'report-session' -Worktree $repository -Message "FACTORY_RESULT`nThe work is finished."

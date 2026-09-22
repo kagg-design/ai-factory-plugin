@@ -40,6 +40,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'worker-environment-guard.tests.ps1') -PluginRoot $pluginRoot
 }
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\completed-archive.ps1")
@@ -1972,7 +1973,7 @@ try {
     Assert-Equal $fakeSessionId ([string]$launch.backgroundSession.sessionId) "Launcher did not bind the authoritative session UUID."
     Assert-Equal "plugin" ([string]$launch.backgroundSession.agentResolution) "Native agent success was not audited."
     Assert-Equal "factory_test_worker_test_task" ([string]$launch.testDatabase) "Worker did not receive its deterministic isolated database."
-    Assert-Equal "factory_test_worker_test_task" ((Get-Content -LiteralPath $databaseEnvironmentCapture | Select-Object -Last 1).Trim()) "Claude worker process did not inherit its isolated database."
+    Assert-Equal "factory_test_worker_test_task" ((Get-Content -LiteralPath $databaseEnvironmentCapture | Select-Object -Last 1).Trim()) "Claude launch client did not receive its isolated database (this does not assert daemon inheritance)."
     $databaseEvents = @(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_REGISTRY_FILE)
     Assert-Equal 1 (@($databaseEvents | Where-Object { $_ -eq "create`tfactory_test_worker_test_task" }).Count) "Worker database was not created exactly once."
     Assert-True (@(Get-Content -LiteralPath $env:CLAUDE_FACTORY_TEST_PSQL_AUDIT_FILE | Where-Object { $_ -match 'password-present$' }).Count -gt 0) "PostgreSQL maintenance did not receive the password through process environment."

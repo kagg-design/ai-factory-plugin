@@ -1135,8 +1135,11 @@ The connection defaults to the ignored `.env` and its standard `DB_HOST`,
 `DB_PORT`, `DB_USERNAME`, and `DB_PASSWORD` keys. The role must have `CREATEDB`.
 Do not put credentials in factory config.
 
-Worker `TASK_ID` receives `<prefix>_worker_<task_id>` as `DB_DATABASE` in the
-Claude process environment. A retry or answer reuses it; a hold preserves it.
+Worker `TASK_ID` is assigned `<prefix>_worker_<task_id>` in the ledger. Direct
+child processes receive it through the configured database variable, but Claude's
+shared daemon need not inherit the launch client's environment. Workers must
+explicitly pin the assigned database in each test command. A retry or answer
+reuses it; a hold preserves it.
 `cleanup` and confirmed `reject` stop every matching task process and then drop
 the exact derived database before touching the worktree. If the database cannot
 be dropped, Git artifacts and task state remain available for a safe retry.
@@ -1210,10 +1213,41 @@ Worker launch builds a separate per-task environment, removing inherited
 database settings and another task's prompt/identity before supplying the
 assigned database and prompt. Codex starts through a hidden isolated launcher
 without temporarily changing the scheduler's environment. Claude's shell hook
-checks task ownership from Git/runtime before commands: a mismatched database
-or prompt is a hard stop, even if a shared background host reused old variables.
-Relaunch the affected worker; do not bypass the guard or rely on PHPUnit defaults.
-The plugin does not change the application's PHPUnit configuration.
+checks task ownership from Git/runtime before commands. An absent database
+variable is allowed; a present foreign database/task ID or a mismatched ledger
+database is refused. An inherited prompt pointer is not authoritative and is
+ignored. Refusals print expected/actual values, their source, and guard/parent
+PIDs, without claiming to know which process donated the daemon environment.
+
+With database isolation enabled, visible `artisan test`, `phpunit` and `paratest`
+commands must name the assigned database explicitly: `DB_DATABASE=<assigned>
+php artisan test` in Bash, or `$env:DB_DATABASE = '<assigned>'; php artisan test`
+in the same PowerShell command. Use the configured variable name. Each Bash
+invocation needs its own inline assignment. PowerShell assignments must be
+literal and precede the test in its enclosing block, not an unrelated conditional
+branch. Pins after a test or in echoed/commented text are not evidence. Quoted
+`powershell -Command` and `bash -c` commands are checked recursively. This narrow
+check is not a general shell sandbox for scripts, aliases or dynamic commands.
+File reads, Git history, Pint, npm lint and tsc do not need a database pin.
+Do not clear foreign inherited values, silence the hook, or edit application
+`.env`/PHPUnit configuration to bypass a refusal. The plugin does not restart
+the machine-wide Claude daemon or change the application's configuration.
+
+Guard regression tests run with `tests/worker-environment-guard.tests.ps1` and
+use real hook subprocesses without touching live sessions or databases. The
+separate `tests/worker-environment-live.tests.ps1` is operator-approved only:
+it requires `-AllowDaemonRestart`, `-ConnectionRepository`, `-PhpExecutable`,
+and `-PhpUnitPath` (a Laravel vendor PHPUnit installation with Dotenv). It
+restarts the shared daemon and launches four short probes across two disposable
+worktrees. Each runs a real PHPUnit database-identity assertion using
+`SELECT current_database()`. Only newly created, uniquely named databases are
+dropped afterwards; credentials stay in the existing connection file. The
+temporary fixture and `report.json` are retained for audit. Prior background
+sessions with verified transcripts are respawned; unsafe-to-resume sessions
+remain stopped and are listed under `restorationDeferred`. This live test is
+never included in the default test runner. For an approved follow-up after the
+daemon has already been recycled, `-UseCurrentDaemon` runs the probes without
+interrupting or restoring any existing sessions.
 
 After native publication, cleanup verifies remote reachability, stops all exact
 task sessions (including those still marked `working`), then rechecks the clean

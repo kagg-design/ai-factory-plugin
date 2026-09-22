@@ -23,6 +23,7 @@ if (-not $command -or -not $cwd) { Stop-FactoryGuardClosed -Reason "hook payload
 # Resolve ownership from Git/state, never from the inherited prompt pointer.
 try {
     . (Join-Path $PSScriptRoot "factory-common.ps1")
+    . (Join-Path $PSScriptRoot "worker-command-guard.ps1")
     $branchProbe = Invoke-FactoryNativeProcess -Command git -Arguments @('-C', $cwd, 'branch', '--show-current')
     $branch = ([string]$branchProbe.stdout).Trim()
     if ($branchProbe.exitCode -eq 0 -and $branch -like "factory-worker/*") {
@@ -36,14 +37,14 @@ try {
             if ($matches.Count -eq 1) {
                 $config = Read-FactoryJson $context.configPath
                 $settings = Get-FactoryTestDatabaseSettings -Config $config -RepositoryRoot $context.repositoryRoot
-                $metadataPath = Join-Path $context.sessionsPath ((ConvertTo-FactoryTaskArtifactName $matches[0].id) + ".json")
-                $expectedPrompt = if (Test-Path -LiteralPath $metadataPath) { [string](Read-FactoryJson $metadataPath).promptPath } else { "" }
-                Assert-FactoryWorkerEnvironment -Task $matches[0] -DatabaseSettings $settings -PromptPath $expectedPrompt
-            } elseif ($env:CLAUDE_FACTORY_TASK_ID -or $env:CLAUDE_FACTORY_PROMPT_PATH) {
-                throw "Factory worker environment cannot be matched to exactly one task in this worktree."
+                Assert-FactoryWorkerEnvironment -Task $matches[0] -DatabaseSettings $settings
+                Assert-FactoryWorkerTestCommand -Task $matches[0] -DatabaseSettings $settings -Command $command `
+                    -ToolName ([string](Get-FactoryNestedValue $payload 'tool_name' 'Bash'))
+            } else {
+                throw "Factory worker branch/worktree cannot be matched to exactly one task in the ledger."
             }
-        } elseif ($env:CLAUDE_FACTORY_TASK_ID -or $env:CLAUDE_FACTORY_PROMPT_PATH) {
-            throw "Factory worker environment points at a runtime without this project's state."
+        } else {
+            throw "Factory worker branch has no project state for task ownership verification."
         }
     }
 } catch { Stop-FactoryGuardClosed -Reason $_.Exception.Message }

@@ -1730,22 +1730,46 @@ function New-FactoryWorkerEnvironment {
     return $environment
 }
 
+function Format-FactoryWorkerGuardDiagnostic {
+    param([string]$Expected, [AllowNull()][AllowEmptyString()][string]$Actual, [string]$Source)
+
+    $parentId = '<unavailable>'
+    try { $parentId = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop).ParentProcessId }
+    catch {
+        # Hook hosts can inherit a PS7 PSModulePath while running PS5.1. Read
+        # WMI through .NET as a fallback, without relying on module autoload.
+        try {
+            Add-Type -AssemblyName System.Management
+            $processInfo = New-Object System.Management.ManagementObject("Win32_Process.Handle='$PID'")
+            try { $parentId = [string]$processInfo.GetPropertyValue('ParentProcessId') }
+            finally { $processInfo.Dispose() }
+        } catch {}
+    }
+    $display = if ([string]::IsNullOrEmpty($Actual)) { '<empty>' } else { $Actual.Replace("`r", '\r').Replace("`n", '\n').Replace("'", "''") }
+    return "Expected: '$Expected'`nActual ($Source): '$display'`nProcess: guard PID=$PID; parent PID=$parentId (not proof of the daemon environment donor)."
+}
+
 function Assert-FactoryWorkerEnvironment {
-    param($Task, $DatabaseSettings, [string]$PromptPath)
+    param($Task, $DatabaseSettings)
 
     if ($null -ne $DatabaseSettings) {
         $expected = Get-FactoryTestDatabaseName -Settings $DatabaseSettings -Scope worker -TaskId ([string]$Task.id)
         $variable = [string]$DatabaseSettings.databaseEnvironmentVariable
         $actual = [Environment]::GetEnvironmentVariable($variable, "Process")
-        if ([string]$Task.testDatabase -cne $expected -or $actual -cne $expected) {
-            throw "Factory worker environment mismatch for task '$($Task.id)': $variable must be its assigned isolated database '$expected'. Relaunch this worker before running tests."
+        if ([string]$Task.testDatabase -cne $expected) {
+            throw ("Factory worker environment mismatch for task '$($Task.id)': $variable must be its assigned isolated database '$expected'. Relaunch this worker before running tests.`n" +
+                (Format-FactoryWorkerGuardDiagnostic -Expected $expected -Actual ([string]$Task.testDatabase) -Source 'ledger task.testDatabase'))
+        }
+        # Claude's daemon, not the --bg client, supplies the worker environment.
+        # Absence asserts nothing. An explicitly foreign database is still unsafe.
+        if ($actual -and $actual -cne $expected) {
+            throw ("Factory worker environment mismatch for task '$($Task.id)': $variable carries a foreign database. Stop and report this; do not overwrite inherited values to bypass the guard.`n" +
+                (Format-FactoryWorkerGuardDiagnostic -Expected $expected -Actual $actual -Source "process environment $variable"))
         }
     }
     if ($env:CLAUDE_FACTORY_TASK_ID -and $env:CLAUDE_FACTORY_TASK_ID -ne [string]$Task.id) {
-        throw "Factory worker environment belongs to another task. Relaunch worker '$($Task.id)'."
-    }
-    if ($env:CLAUDE_FACTORY_PROMPT_PATH -and $PromptPath -and -not (Test-FactorySamePath $env:CLAUDE_FACTORY_PROMPT_PATH $PromptPath)) {
-        throw "Factory worker prompt environment belongs to another task. Relaunch worker '$($Task.id)'."
+        throw ("Factory worker environment belongs to another task. Relaunch worker '$($Task.id)'.`n" +
+            (Format-FactoryWorkerGuardDiagnostic -Expected ([string]$Task.id) -Actual $env:CLAUDE_FACTORY_TASK_ID -Source 'process environment CLAUDE_FACTORY_TASK_ID'))
     }
 }
 
