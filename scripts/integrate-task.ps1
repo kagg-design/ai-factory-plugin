@@ -292,6 +292,15 @@ function Update-PipelineTask {
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path ([string]$context.configPath)
+. (Join-Path $PSScriptRoot "publication-ci.ps1")
+# Pending CI is not a publication lock. A known failure is, and leaves queued
+# approval intact while workers continue. This is outside the test/state locks.
+$ci = Sync-FactoryPublicationCi -Context $context
+if ($ci.blocked) {
+    [ordered]@{ taskId = $TaskId; status = "ci-blocked"; next = "factory ci"
+        error = $ci.error; blockingCommits = @($ci.blocking | ForEach-Object { $_.sha }) } | ConvertTo-Json -Depth 10
+    return
+}
 $initialState = Read-FactoryJson -Path ([string]$context.statePath)
 $task = Get-FactoryTask -State $initialState -TaskId $TaskId
 $taskCommit = [string]$task.commit
@@ -322,6 +331,7 @@ try {
         throw "Task '$TaskId' approval does not match its immutable review plan."
     }
     $productionBranch = ([string]$plan.productionBranch).Trim()
+    $ciRepository = Get-FactoryCiRepository -Context $context -Config $config -Remote ([string]$plan.remote)
     $developmentOnly = -not [bool]$productionBranch
     if (-not [bool]$plan.autoPushDevelopment) {
         throw "Task '$TaskId' plan does not authorize the development push."
@@ -468,16 +478,26 @@ try {
         throw "Production moved while parallel checks were running. Run review again."
     }
 
+    # Checks may have taken minutes. Refresh failure evidence, but never wait
+    # for a workflow to finish. Preserve approval when a prior push has gone red.
+    $ci = Sync-FactoryPublicationCi -Context $context
+    if ($ci.blocked) {
+        Update-PipelineTask -Status "approved" -ErrorText "Publication waits for a CI failure decision: factory ci" -IntegrationValue $integrationAudit -ProductionValue $productionAudit
+        [ordered]@{ taskId = $TaskId; status = "ci-blocked"; next = "factory ci"
+            error = $ci.error; blockingCommits = @($ci.blocking | ForEach-Object { $_.sha }) } | ConvertTo-Json -Depth 10
+        return
+    }
     $currentStage = "integration"
     $script:LastCheckResults = @($integrationTests)
     $null = Invoke-PipelineGit -WorkingDirectory $integrator -Arguments @("push", $remote, "HEAD:$developmentBranch") -Failure "Development push was rejected"
+    $developmentPublished = $true
+    Register-FactoryCiPublication -Context $context -Task $task -Slug $ciRepository -Branch $developmentBranch -Sha $integrationMerge
     $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments (@("fetch", $remote) + $pipelineBranches) -Failure "Could not verify development push"
     $publishedDevelopment = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$developmentBranch") -Failure "Cannot resolve published development"
     $productionAfterDevelopment = if ($developmentOnly) { "" } else { Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot recheck production after development push" }
     if ($publishedDevelopment -ne $integrationMerge -or -not (Test-PipelineAncestor -RepositoryRoot $repositoryRoot -Ancestor $taskCommit -Descendant "$remote/$developmentBranch")) {
         throw "Published development does not match the tested integration candidate."
     }
-    $developmentPublished = $true
     $integrationAudit.status = "published"
     $integrationAudit.mergeCommit = $publishedDevelopment
     Set-FactoryProperty -Target $integrationAudit -Name "publishedAt" -Value (Get-FactoryUtcTimestamp)
@@ -500,7 +520,10 @@ try {
         if ($productionBeforeProduction -ne $remoteProduction) {
             throw "Production moved after validation and before push. Run review again."
         }
+        $ci = Sync-FactoryPublicationCi -Context $context
+        if ($ci.blocked) { throw "Development was pushed; production is blocked by a known CI failure. Inspect: factory ci" }
         $null = Invoke-PipelineGit -WorkingDirectory $release -Arguments @("push", $remote, "HEAD:$productionBranch") -Failure "Production push was rejected"
+        Register-FactoryCiPublication -Context $context -Task $task -Slug $ciRepository -Branch $productionBranch -Sha $releaseMerge
         $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $productionBranch) -Failure "Could not verify production push"
         $publishedProduction = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("rev-parse", "$remote/$productionBranch") -Failure "Cannot resolve published production"
         if ($publishedProduction -ne $releaseMerge -or -not (Test-PipelineAncestor -RepositoryRoot $repositoryRoot -Ancestor $taskCommit -Descendant "$remote/$productionBranch")) {
@@ -564,7 +587,7 @@ try {
             } elseif ($currentStage -eq "production") {
                 Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $failureAudit -ClearApproval $true
             } else {
-                Update-PipelineTask -Status "awaiting-review" -ErrorText $failure -IntegrationValue $failureAudit -ProductionValue $null -ClearApproval $true
+                Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $failureAudit -ProductionValue $null -ClearApproval $true
             }
         }
     } catch {

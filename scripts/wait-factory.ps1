@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "attention-state.ps1")
+. (Join-Path $PSScriptRoot "publication-ci.ps1")
 
 $contextText = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize | Out-String).Trim()
 if (-not $contextText) { throw "Factory project context returned no data." }
@@ -19,6 +20,7 @@ $deadline = if ($TimeoutSeconds -gt 0) { [DateTime]::UtcNow.AddSeconds($TimeoutS
 $explicitCursor = $Cursor -ge 0
 
 while ($true) {
+    $null = Sync-FactoryPublicationCi -Context $context
     $state = Read-FactoryJson -Path ([string]$context.statePath)
     $config = Read-FactoryJson -Path ([string]$context.configPath)
     $attention = Sync-FactoryAttentionState -Context $context -State $state -Config $config

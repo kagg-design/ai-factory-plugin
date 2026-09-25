@@ -60,16 +60,22 @@ blocked result instead of guessing.
 - Run targeted tests freely while coding; they do not need the test lease.
 - Before emitting a completed result, create/amend the single task commit and
   acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Wait
-  for ownership; never infer availability from status alone. Keep acquire, sync,
-  checks and release in ONE long-lived PowerShell call, passing that call's
+  for ownership; never infer availability from status alone. Keep acquire, sync
+  and release in ONE long-lived PowerShell call, passing that call's
   `$PID`. Never use a one-shot shell as the owner or omit the PID.
 - While holding the lease, call
-  `syncScript -Action prepare -LeaseToken <token>`, re-read HEAD, then run every
-  trusted command in `FACTORY_TASK.fullTestCommands` plus the nearest required
-  lint/static check. Prefer the project's parallel full-suite form.
+  `syncScript -Action prepare -LeaseToken <token>` and re-read HEAD.
 - Release with `testLeaseScript -Action release -Token <token>` from a
-  `finally`, including after sync or test failure. Targeted iteration remains
-  unrestricted.
+  `finally`, including after sync failure. Then run targeted regression tests
+  and the nearest required lint/static checks on the synchronized commit,
+  outside the full-suite lane.
+- The default worker policy is targeted verification. Do not run full suites
+  just because implementation is finished or an older payload contains
+  `fullTestCommands`; native `go` owns full local candidate verification.
+  If trusted repository instructions, the operator, or a concrete cross-cutting
+  risk require a full suite, explain why and acquire the verify lease again.
+  Run checks and release in one long-lived PowerShell call with a `finally`.
+  Prefer the project's parallel full-suite form. Never skip a required check.
 - When `FACTORY_TASK.testDatabase` is non-empty, retain the isolated database
   already supplied in the worker environment. Verify it before testing; if it
   differs or the prompt pointer belongs to another task, stop and request a
@@ -78,6 +84,8 @@ blocked result instead of guessing.
   `git status --porcelain` afterward.
 - Record the branch, full SHA, absolute worktree, and exact test outcomes.
   Factory derives the authoritative changed-file list from that commit.
+- State targeted coverage and any untested risks in result notes. Never claim
+  full-suite coverage from targeted checks; `go` and CI are separate stages.
 
 ## Completion protocol
 

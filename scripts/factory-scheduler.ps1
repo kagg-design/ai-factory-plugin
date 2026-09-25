@@ -585,7 +585,7 @@ function Invoke-SchedulerTick {
                         "-TaskId", [string]$approved[0].id,
                         "-ClaudeCommand", $ClaudeCommand
                     )
-                    $integrated.Add($pipeline)
+                    if ([string]$pipeline.status -ne 'ci-blocked') { $integrated.Add($pipeline) }
                 } catch {
                     $errors.Add($_.Exception.Message)
                 }

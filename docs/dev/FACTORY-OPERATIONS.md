@@ -1155,6 +1155,9 @@ in parallel during coding, so database isolation remains strongly recommended.
 
 ## 15. Coding concurrency and the serialized test lane
 
+For the targeted-worker/full-`go` policy and independent background CI gate,
+see [Publication CI](PUBLICATION-CI.md).
+
 Show or change the current worker limit:
 
 ```text
@@ -1176,8 +1179,10 @@ exclude it before any session or worktree exists; `/factory release <task-id>`
 returns that cheap hold to `queued` without unpausing the factory.
 
 The test lane is fixed at one and cannot be raised with the concurrency
-command. Targeted coding tests do not need it. Worker final verification,
-review full suites, and native publication do. Publication phases
+command. Targeted coding tests do not need it. Worker final sync briefly uses
+it, then releases it before targeted verification on the synchronized commit.
+Explicit/risk-justified worker full suites, review full suites, and native
+publication require it. Publication phases
 (`integration`/`release`) outrank queued `verify`/`review` requests; ties are
 FIFO. `factory status` shows the holder, phase, age, and queue.
 
@@ -1191,8 +1196,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-lease.ps1 `
   -Action reclaim -Repository D:\Projects\MotiveHR
 ```
 
-Every acquisition requires an explicit `-OwnerPid`. Run acquire, sync, the full
-test suite and release in one long-lived PowerShell invocation and pass its
+Every acquisition requires an explicit `-OwnerPid`. Run acquire, the protected
+sync or full test suite, and release in one long-lived PowerShell invocation and pass its
 `$PID`. A shell that returns immediately after acquire cannot own a long-running
 test sequence. The native publication pipeline already passes its durable PID.
 The owner PID/start-time identity is recorded to avoid confusing reused PIDs.

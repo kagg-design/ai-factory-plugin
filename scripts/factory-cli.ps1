@@ -29,6 +29,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "orchestrator-session.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "codex-orchestrator.ps1")
+. (Join-Path $PSScriptRoot "publication-ci.ps1")
 
 $script:Tree = @{
     Top = [char]0x256D
@@ -520,6 +521,36 @@ function Add-CliDoneTree {
     }
 }
 
+function Add-CliCiLines {
+    param([Collections.Generic.List[string]]$Lines, $Ci, [switch]$Detail)
+    if (-not $Detail -and -not $Ci.entries.Count -and -not $Ci.error) { return }
+    $pending = @($Ci.entries | Where-Object { $_.status -eq 'pending' }).Count
+    $failed = @($Ci.entries | Where-Object { $_.failures.Count -gt 0 }).Count
+    $passed = @($Ci.entries | Where-Object { $_.status -eq 'passed' }).Count
+    $unknown = @($Ci.entries | Where-Object { $_.status -in @('unknown', 'unverified') }).Count
+    $gate = if ($Ci.blocked) { 'PUBLICATIONS BLOCKED' } else { 'publication gate open' }
+    $Lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) CI $($script:Tree.Horizontal) pending $pending; passed $passed; failed $failed; unverified $unknown; $gate")
+    if ($Ci.error) { Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)  " -ContinuationPrefix "$($script:Tree.Vertical)  " -Text (ConvertTo-CliLine $Ci.error) }
+    $rows = @($Ci.entries | Where-Object { $Detail -or $_.status -ne 'passed' } |
+        Sort-Object @{ Expression = { @(Get-FactoryCiUnacknowledgedFailures $_).Count }; Descending = $true }, publishedAt -Descending |
+        Select-Object -First $(if ($Detail) { 50 } else { 3 }))
+    foreach ($entry in $rows) {
+        $suffix = if ($entry.failures.Count -and -not @(Get-FactoryCiUnacknowledgedFailures $entry).Count) { ' (operator acknowledged; not green)' } else { '' }
+        $skipped = @($entry.runs | Where-Object { $_.conclusion -eq 'skipped' }).Count
+        if ($skipped -gt 0) { $suffix += " ($skipped workflow(s) skipped)" }
+        Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)  " -ContinuationPrefix "$($script:Tree.Vertical)  " `
+            -Text (ConvertTo-CliLine "$($entry.status)$suffix - $($entry.title) - $($entry.branch) @ $($entry.sha)")
+        $urls = @($entry.failures | ForEach-Object { $_.url })
+        if (-not $urls.Count) { $urls = @($entry.url) }
+        foreach ($url in $urls) { $Lines.Add("$($script:Tree.Vertical)    $(ConvertTo-CliLine $url)") }
+        if ($Detail) {
+            $Lines.Add("$($script:Tree.Vertical)    Task: $(ConvertTo-CliLine $entry.taskId); last checked: $($entry.lastPollAt)")
+            if ($entry.error) { Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)    " -ContinuationPrefix "$($script:Tree.Vertical)    " -Text (ConvertTo-CliLine $entry.error) }
+        }
+    }
+    if (-not $Detail) { $Lines.Add("$($script:Tree.Vertical)  Details: factory ci (push completion is not CI success)") }
+}
+
 function Write-CliStatus {
     param($Context, $Config, $State, [string]$Filter, [string]$ReconcileWarning, $TestLease, [string]$TestLeaseError)
 
@@ -562,7 +593,7 @@ function Write-CliStatus {
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $schedulerState
-    $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config)
+    $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + @(Get-FactoryCiAttentionEvents -Context $Context)
     $aiActions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "aiActionable" -Default $false) })
     $humanDecisions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "humanDecision" -Default $false) })
     $blockedTaskCount = @($allTasks | Where-Object { [string]$_.status -eq "blocked" }).Count
@@ -632,6 +663,7 @@ function Write-CliStatus {
         $lines.Add("$($script:Tree.Vertical)  Legacy Claude cron $cronId will remove itself on its next one-shot tick.")
     }
     if ($ReconcileWarning) { $lines.Add("$($script:Tree.Vertical)  Warning: $ReconcileWarning") }
+    Add-CliCiLines -Lines $lines -Ci (Get-FactoryCiStatus -Context $Context)
 
     $groups = @(
         [pscustomobject]@{ Name = "NEEDS YOUR ACTION"; Key = "Needs your action" },
@@ -1757,6 +1789,7 @@ function Write-CliHelp {
             "  factory agents",
             "  factory codex-server [status|start|stop|restart]",
             "  factory status [state|all] [-Limit 50]",
+            "  factory ci [status|acknowledge <full-published-sha> <reason>]",
             "  factory archive:seed [--preview]",
             "  factory inspect <task-id>",
             "  factory preview [<task-id>|stop] [-NoOpen]",
@@ -1793,6 +1826,16 @@ function Write-CliHelp {
     }
 
     switch ($topicKey) {
+        "ci" {
+            @(
+                'factory ci',
+                'factory ci acknowledge <full-published-sha> "operator reason"',
+                'CI is observed asynchronously for exact GitHub push SHAs; pending CI does not hold the test lane.',
+                'Known failures block further publications, not workers. A successful rerun of the failed run clears its block.',
+                'Acknowledgement explicitly accepts currently recorded failed run attempts, without making CI green.',
+                'Only use it after the operator authorizes proceeding (for example, to publish a fix). A new failed attempt blocks again.'
+            ) | Write-Output
+        }
         "status" {
             @(
                 "factory status [state|all] [-NoReconcile] [-Limit 50]",
@@ -2102,6 +2145,22 @@ if ($normalizedCommand -eq "status") {
 }
 
 $context = Get-CliContext
+if ($normalizedCommand -eq 'ci') {
+    if ($anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw 'ci does not accept these options. Use: factory help ci' }
+    $action = if ($Target) { $Target.ToLowerInvariant() } else { 'status' }
+    if ($action -eq 'acknowledge') {
+        if ($remainingValues.Count -ne 2) { throw 'Use: factory ci acknowledge <full-published-sha> "operator reason"' }
+        $ci = Confirm-FactoryCiFailure -Context $context -Sha $remainingValues[0] -Reason $remainingValues[1]
+    } elseif ($action -eq 'status' -and $remainingValues.Count -eq 0) {
+        $ci = Sync-FactoryPublicationCi -Context $context
+    } else { throw 'Use: factory ci [status|acknowledge <full-published-sha> "operator reason"]' }
+    $lines = New-Object Collections.Generic.List[string]
+    $lines.Add("$($script:Tree.Top)$($script:Tree.Horizontal) Factory publication CI")
+    Add-CliCiLines -Lines $lines -Ci $ci -Detail
+    $lines.Add("$($script:Tree.Bottom)$($script:Tree.Horizontal) Journal: $($ci.path)")
+    $lines | Write-Output
+    exit 0
+}
 if ($normalizedCommand -eq 'archive:seed') {
     $seedOptions = @(@($Target) + @($remainingValues) | Where-Object { $_ })
     if ($seedOptions.Count -gt 1 -or ($seedOptions.Count -eq 1 -and $seedOptions[0] -notin @('--preview', 'preview')) -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) {

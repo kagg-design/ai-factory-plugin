@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Default worker verification to targeted regression tests and relevant
+  analyzers after safe sync; retain full local checks on native publication.
+- Observe exact GitHub push SHAs asynchronously, expose CI separately in status,
+  and report failures through the attention journal. Pending CI does not hold
+  the test lane; known failures block new publications until a successful rerun
+  or explicit audited `factory ci acknowledge` decision. Workflows are unchanged.
+
 - Allow absent database variables in daemon-hosted workers while retaining
   ledger/foreign-database/task-ID checks. Ignore stale prompt pointers, require
   explicit database pins for visible PHP test commands, and report expected and

@@ -53,7 +53,8 @@ function Invoke-FactoryNativeProcess {
         [Parameter(Mandatory = $true)][string]$Command,
         [string[]]$Arguments = @(),
         [string]$WorkingDirectory = "",
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
     )
 
     $resolvedCommand = Get-Command $Command -ErrorAction Stop
@@ -96,7 +97,12 @@ function Invoke-FactoryNativeProcess {
         if (-not $process.Start()) { throw "Failed to start '$executable'." }
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        if ($TimeoutSeconds -gt 0) {
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                try { $process.Kill() } catch { }
+                throw "Native command '$Command' timed out after $TimeoutSeconds seconds."
+            }
+        } else { $process.WaitForExit() }
         $stdout = $stdoutTask.Result.TrimEnd("`r", "`n")
         $stderr = $stderrTask.Result.TrimEnd("`r", "`n")
         $combined = @($stdout, $stderr) | Where-Object { $_ } | ForEach-Object { [string]$_ }

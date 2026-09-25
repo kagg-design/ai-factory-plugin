@@ -28,6 +28,10 @@ if ($null -ne $ProjectContext) {
         ConvertFrom-Json
 }
 $config = Read-FactoryJson -Path $context.configPath
+. (Join-Path $PSScriptRoot "publication-ci.ps1")
+# Reconciliation is a fresh child invocation even in an already-running
+# scheduler. Observe pushes without waiting for CI or touching the test lane.
+$null = Sync-FactoryPublicationCi -Context $context
 $blockedSessionTimeoutMinutes = [Math]::Max(
     1,
     [int](Get-FactoryNestedValue -Target $config -Name "blockedSessionTimeoutMinutes" -Default 30)

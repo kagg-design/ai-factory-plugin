@@ -46,6 +46,8 @@ function Sync-FactoryAttentionState {
         [Parameter(Mandatory = $true)]$Config
     )
 
+    . (Join-Path $PSScriptRoot "publication-ci.ps1")
+    $ciEvents = @(Get-FactoryCiAttentionEvents -Context $Context)
     $path = Get-FactoryAttentionPath -Context $Context
     $mutex = Enter-FactoryMutex -ProjectKey "$([string]$Context.projectKey)-attention"
     try {
@@ -54,7 +56,7 @@ function Sync-FactoryAttentionState {
         } else { New-FactoryAttentionState }
         Add-MissingFactoryProperties -Target $attention -Defaults (New-FactoryAttentionState)
 
-        $currentEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config)
+        $currentEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + $ciEvents
         $previousActive = @((Get-FactoryNestedValue -Target $attention -Name "activeKeys" -Default @()) | ForEach-Object { [string]$_ })
         $currentKeys = New-Object Collections.Generic.List[string]
         $journal = New-Object Collections.Generic.List[object]

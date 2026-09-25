@@ -21,6 +21,9 @@
     "attentionBridge": true,
     "autoGoApprovedReviews": false
   },
+  "ciMonitoring": {
+    "enabled": true
+  },
   "preview": {
     "enabled": true,
     "host": "127.0.0.1",

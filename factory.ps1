@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
+        "help", "status", "ci", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
         "cleanup", "concurrency", "completion", "start", "restart", "rotate", "agents", "codex-server", "paths", "runtime", "config",
         "scheduler", "tick", "pause", "resume", "stop", "wait", "purge", "archive:seed"
     )]
@@ -24,7 +24,7 @@ param(
         $staticValues = @(switch ($typedCommand) {
             "help" {
                 @(
-                    "status", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
+                    "status", "ci", "inspect", "preview", "doctor", "chat", "add", "new", "go", "hold", "retry", "reject",
                     "cleanup", "concurrency", "completion", "start", "restart", "agents", "codex-server", "paths", "runtime",
                     "rotate", "config", "scheduler", "tick", "pause", "resume", "stop", "wait",
                     "purge", "archive:seed", "help"
@@ -41,6 +41,7 @@ param(
             "completion" { "status", "enable" }
             "config" { "path", "edit" }
             "runtime" { "status", "migrate" }
+            "ci" { "status", "acknowledge" }
             "codex-server" { "status", "start", "stop", "restart" }
             "scheduler" { "status", "start", "stop", "tick" }
             "rotate" { "status", "cancel" }

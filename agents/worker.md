@@ -25,7 +25,7 @@ or task-source quotations merely to match this setting.
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
 - Never merge, run `git rebase` directly, or modify shared branches. Immediately
-  before final full-suite verification, use the supplied `syncScript` while
+  before final verification, use the supplied `syncScript` while
   holding the test lease; that is the only permitted rebase path.
 - Cherry-pick and revert are allowed only inside the supplied worker worktree.
   Preserve the final one-task-commit invariant; prefer `--no-commit` followed
@@ -90,19 +90,24 @@ grounded in the task, code, or tests, ask the user instead of guessing.
   acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Do not
   inspect the lane and decide for yourself whether it is busy: call acquire and
   wait for ownership.
-- Run acquire, sync, full checks and release within ONE long-lived PowerShell
+- Run acquire, sync and release within ONE long-lived PowerShell
   invocation, passing that invocation's `$PID` as `-OwnerPid`. A one-shot shell
   that returns immediately after acquire is not a valid lease owner. Never
   guess a PID or omit it. Keep the token and release from the same `finally`.
 - While holding the lease, call `syncScript -Action prepare -LeaseToken <token>`.
   This rebases the clean one-commit branch onto the latest configured
   development tip. Re-read HEAD afterward because the commit may change.
-- Still under the same lease, run every trusted command in
-  `FACTORY_TASK.fullTestCommands` plus the nearest required lint/static check.
-  Prefer the project's parallel full-suite form. Always release with
-  `testLeaseScript -Action release -Token <token>` from a `finally`, including
-  after a sync or test failure. Targeted iteration outside this final sequence
-  remains unrestricted.
+- Release the sync lease with `testLeaseScript -Action release -Token <token>`
+  from a `finally`, including after sync failure. Then run targeted regression
+  tests for the changed behavior and the nearest required lint/static checks
+  on the synchronized commit, without occupying the full-suite lane.
+- The default worker policy is targeted verification. Do not run the full
+  integration/release suite merely because implementation is finished or an
+  older payload contains `fullTestCommands`. Native `go` owns full local
+  candidate verification. If trusted repository instructions, the operator,
+  or a concrete cross-cutting risk require a full suite, explain why, acquire
+  the verify lease again and run/release in one long-lived PowerShell call.
+  Prefer the project's parallel full-suite form. Never skip a required check.
 - When `FACTORY_TASK.testDatabase` is non-empty, explicitly pin its configured
   database variable in every test command: `DB_DATABASE=<assigned> php artisan
   test` in Bash, or `$env:DB_DATABASE = '<assigned>'; php artisan test` in the
@@ -124,6 +129,8 @@ grounded in the task, code, or tests, ask the user instead of guessing.
   branch still contains one final task commit.
 - Capture the branch, full SHA, absolute worktree path, and exact test outcomes.
   Factory derives the authoritative changed-file list from that commit.
+- State the targeted coverage and any untested risks in result notes. Do not
+  claim full-suite coverage from targeted checks; `go` and CI remain separate.
 
 ## Completion protocol
 
