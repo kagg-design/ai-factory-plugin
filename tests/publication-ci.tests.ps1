@@ -111,6 +111,15 @@ try {
     $before = $script:CiReadCount
     $null = Sync-FactoryPublicationCi $ciContext
     Assert-Ci ($script:CiReadCount -eq $before) 'Polling ignored the cooldown.'
+
+    $sortNow = [DateTime]::SpecifyKind([DateTime]'2026-09-27T12:00:00', [DateTimeKind]::Utc)
+    $mixedDue = @(Get-FactoryCiDueEntries -NowUtc $sortNow -Entries @(
+        [pscustomobject]@{ key = 'never'; publishedAt = $sortNow.AddHours(-1); lastPollAt = $null; status = 'pending'; failures = @(); acknowledgements = @() },
+        [pscustomobject]@{ key = 'datetime'; publishedAt = $sortNow.AddHours(-1).ToString('o'); lastPollAt = $sortNow.AddMinutes(-3); status = 'pending'; failures = @(); acknowledgements = @() },
+        [pscustomobject]@{ key = 'string'; publishedAt = $sortNow.AddHours(-1); lastPollAt = $sortNow.AddMinutes(-2).ToString('o'); status = 'pending'; failures = @(); acknowledgements = @() },
+        [pscustomobject]@{ key = 'offset'; publishedAt = $sortNow.AddHours(-1).ToString('o'); lastPollAt = [DateTimeOffset]$sortNow.AddMinutes(-1); status = 'pending'; failures = @(); acknowledgements = @() }
+    ))
+    Assert-Ci ((@($mixedDue | ForEach-Object { $_.key }) -join ',') -eq 'never,datetime,string,offset') 'Due CI sorting compared mixed timestamp representations directly.'
     Set-Item Function:Get-FactoryCiRuns -Value $originalReader
 
     # Exercise the real API/remote parsing boundary with captured native output.

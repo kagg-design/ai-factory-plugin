@@ -325,14 +325,15 @@ try {
             $null -ne $planEvent.PSObject.Properties["sessionId"] -and
             [string]$planEvent.sessionId -eq $expectedEventSessionId
         )
-        $planRecordedAt = if ($null -ne $task.PSObject.Properties["planRecordedAt"]) { [string]$task.planRecordedAt } else { "" }
+        $planRecordedAt = Get-FactoryNestedValue -Target $task -Name "planRecordedAt" -Default $null
         if ($planIsCurrent -and $planRecordedAt) {
-            $planIsCurrent = [DateTime]::Parse([string]$planEvent.capturedAt).ToUniversalTime() -gt
-                [DateTime]::Parse($planRecordedAt).ToUniversalTime()
+            $planIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $planEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $planRecordedAt)
         }
-        if ($planIsCurrent -and [string]$task.reworkRequestedAt) {
-            $planIsCurrent = [DateTime]::Parse([string]$planEvent.capturedAt).ToUniversalTime() -gt
-                [DateTime]::Parse([string]$task.reworkRequestedAt).ToUniversalTime()
+        $reworkRequestedAt = Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default $null
+        if ($planIsCurrent -and $reworkRequestedAt) {
+            $planIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $planEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $reworkRequestedAt)
         }
         if (
             $planIsCurrent -and
@@ -347,7 +348,7 @@ try {
                 Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
                 Set-FactoryProperty -Target $task -Name "error" -Value $null
             }
-            Set-FactoryProperty -Target $task -Name "planRecordedAt" -Value ([string]$planEvent.capturedAt)
+            Set-FactoryProperty -Target $task -Name "planRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $planEvent.capturedAt)
         }
 
         $resultEvent = if (Test-Path -LiteralPath $resultPath) {
@@ -361,20 +362,20 @@ try {
             $null -ne $resultEvent.PSObject.Properties["sessionId"] -and
             [string]$resultEvent.sessionId -eq $expectedEventSessionId
         )
-        $recordedAt = if ($null -ne $task.PSObject.Properties["resultRecordedAt"]) { [string]$task.resultRecordedAt } else { "" }
+        $recordedAt = Get-FactoryNestedValue -Target $task -Name "resultRecordedAt" -Default $null
         if ($resultIsCurrent -and $recordedAt) {
-            $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
-                [DateTime]::Parse($recordedAt).ToUniversalTime()
+            $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $recordedAt)
         }
-        if ($resultIsCurrent -and [string]$task.reworkRequestedAt) {
-            $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
-                [DateTime]::Parse([string]$task.reworkRequestedAt).ToUniversalTime()
+        if ($resultIsCurrent -and $reworkRequestedAt) {
+            $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $reworkRequestedAt)
         }
         if ($resultIsCurrent -and $invalidMarkerIsCurrent) {
             # A malformed latest turn must not be hidden by an older, as-yet
             # unrecorded result from the same worker session.
-            $resultIsCurrent = [DateTime]::Parse([string]$resultEvent.capturedAt).ToUniversalTime() -gt
-                [DateTime]::Parse([string]$latestEvent.capturedAt).ToUniversalTime()
+            $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $latestEvent.capturedAt)
         }
 
         if ($resultIsCurrent) {
@@ -434,8 +435,8 @@ try {
                                 Write-FactoryJsonAtomic -Path $resultPath -Value $resultEvent
                                 if (
                                     $latestEventIsCurrent -and
-                                    [string](Get-FactoryNestedValue -Target $latestEvent -Name "capturedAt" -Default "") -eq
-                                        [string](Get-FactoryNestedValue -Target $resultEvent -Name "capturedAt" -Default "")
+                                    (ConvertTo-FactoryUtcDateTime -Value (Get-FactoryNestedValue -Target $latestEvent -Name "capturedAt")) -eq
+                                        (ConvertTo-FactoryUtcDateTime -Value (Get-FactoryNestedValue -Target $resultEvent -Name "capturedAt"))
                                 ) {
                                     Set-FactoryProperty -Target $latestEvent -Name "changedFilesDiagnostic" -Value $changedFilesDiagnostic
                                     Set-FactoryProperty -Target $latestEvent -Name "payload" -Value $result
@@ -468,7 +469,7 @@ try {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
                 Set-FactoryProperty -Target $task -Name "error" -Value ([string]$result.blockingReason)
             }
-            Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value ([string]$resultEvent.capturedAt)
+            Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $resultEvent.capturedAt)
         } elseif (
             $invalidMarkerIsCurrent -and
             [string]$task.status -in @("starting", "planning", "running", "awaiting-input")
@@ -480,7 +481,7 @@ try {
             # a validated result or make the task eligible for review/GO.
             Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
             Set-FactoryProperty -Target $task -Name "error" -Value "Invalid $marker payload: $markerError Worktree and commits are retained. Ask the worker via factory chat $taskId to emit a corrected $marker report; publication remains gated."
-            Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value ([string]$latestEvent.capturedAt)
+            Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $latestEvent.capturedAt)
         } elseif ($null -ne $sessionRow -or $sessionMarkedMissing) {
             $sessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
             if (Test-FactoryTaskHasValidatedResult -Task $task) {

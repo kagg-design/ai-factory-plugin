@@ -740,58 +740,51 @@ function Get-FactoryUtcTimestamp {
     return [DateTime]::UtcNow.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function ConvertTo-FactoryUtcDateTime {
+    param(
+        [AllowNull()]$Value,
+        [switch]$AllowNull
+    )
+
+    if ($null -eq $Value -or ($Value -is [string] -and [string]::IsNullOrWhiteSpace([string]$Value))) {
+        if ($AllowNull) { return $null }
+        throw "timestamp is null or empty"
+    }
+    if ($Value -is [DateTime]) {
+        return ([DateTime]$Value).ToUniversalTime()
+    }
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).UtcDateTime
+    }
+    if ($Value -is [string]) {
+        return [DateTime]::Parse(
+            [string]$Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        ).ToUniversalTime()
+    }
+    throw "timestamp has unsupported type '$($Value.GetType().FullName)'"
+}
+
 function ConvertFrom-FactoryRoundtripTimestamp {
     param($Value)
 
-    if ($Value -is [DateTime]) {
-        $dateTime = [DateTime]$Value
-        if ($dateTime.Kind -eq [DateTimeKind]::Unspecified) {
-            $dateTime = [DateTime]::SpecifyKind($dateTime, [DateTimeKind]::Utc)
-        } else {
-            $dateTime = $dateTime.ToUniversalTime()
+    try {
+        $parsed = ConvertTo-FactoryUtcDateTime -Value $Value
+        return [pscustomobject]@{ success = $true; value = $parsed; error = "" }
+    } catch {
+        return [pscustomobject]@{
+            success = $false
+            value = $null
+            error = $_.Exception.Message
         }
-        return [pscustomobject]@{ success = $true; value = $dateTime; error = "" }
-    }
-
-    if ($null -eq $Value) {
-        return [pscustomobject]@{ success = $false; value = $null; error = "timestamp is null" }
-    }
-    $text = [string]$Value
-    if (-not $text) {
-        return [pscustomobject]@{ success = $false; value = $null; error = "timestamp is empty" }
-    }
-
-    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor
-        [Globalization.DateTimeStyles]::AdjustToUniversal
-    foreach ($format in @(
-        "o",
-        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK",
-        "yyyy-MM-dd'T'HH:mm:ssK"
-    )) {
-        $parsed = [DateTime]::MinValue
-        if ([DateTime]::TryParseExact(
-            $text,
-            $format,
-            [Globalization.CultureInfo]::InvariantCulture,
-            $styles,
-            [ref]$parsed
-        )) {
-            return [pscustomobject]@{ success = $true; value = $parsed.ToUniversalTime(); error = "" }
-        }
-    }
-    return [pscustomobject]@{
-        success = $false
-        value = $null
-        error = "timestamp '$text' is not an accepted invariant round-trip value"
     }
 }
 
 function ConvertTo-FactoryRoundtripTimestamp {
     param($Value)
 
-    $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $Value
-    if (-not [bool]$parsed.success) { throw [string]$parsed.error }
-    return ([DateTime]$parsed.value).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
+    return (ConvertTo-FactoryUtcDateTime -Value $Value).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Get-FactoryFileSha256 {

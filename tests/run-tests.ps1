@@ -41,6 +41,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'worker-environment-guard.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'timestamp-normalization.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'publication-ci.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'publication-ci-pipeline.tests.ps1') -PluginRoot $pluginRoot
 }

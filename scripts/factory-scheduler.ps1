@@ -131,10 +131,10 @@ function Test-SchedulerProcess {
     $pidValue = [int]$Scheduler.pid
     try {
         $process = Get-Process -Id $pidValue -ErrorAction Stop
-        $expectedStart = [string](Get-CliSafeProperty -InputObject $Scheduler -Name "processStartTimeUtc" -Default "")
+        $expectedStart = Get-CliSafeProperty -InputObject $Scheduler -Name "processStartTimeUtc" -Default $null
         if (-not $expectedStart) { return $true }
         $actual = $process.StartTime.ToUniversalTime()
-        $expected = [DateTime]::Parse($expectedStart).ToUniversalTime()
+        $expected = ConvertTo-FactoryUtcDateTime -Value $expectedStart
         return [Math]::Abs(($actual - $expected).TotalSeconds) -lt 1
     } catch {
         return $false

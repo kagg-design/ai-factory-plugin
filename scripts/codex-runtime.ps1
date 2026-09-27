@@ -258,8 +258,8 @@ function Get-FactoryCodexSessionSnapshot {
     if ($processId -gt 0) {
         try {
             $process = Get-Process -Id $processId -ErrorAction Stop
-            $expected = if ($null -ne $Session.PSObject.Properties["processStartTimeUtc"]) { [string]$Session.processStartTimeUtc } else { "" }
-            $alive = -not $expected -or [Math]::Abs(($process.StartTime.ToUniversalTime() - [DateTime]::Parse($expected).ToUniversalTime()).TotalSeconds) -lt 1
+            $expected = if ($null -ne $Session.PSObject.Properties["processStartTimeUtc"]) { $Session.processStartTimeUtc } else { $null }
+            $alive = -not $expected -or [Math]::Abs(($process.StartTime.ToUniversalTime() - (ConvertTo-FactoryUtcDateTime -Value $expected)).TotalSeconds) -lt 1
         } catch { $alive = $false }
     }
     $state = if ($alive) { "working" } elseif ($eventError) { "failed" } elseif ($terminal) { "done" } else { "stopped" }
@@ -292,8 +292,8 @@ function Stop-FactoryCodexWorkerProcess {
     } catch {
         return [pscustomobject]@{ stopped = $false; alreadyStopped = $true }
     }
-    $expected = if ($null -ne $Session.PSObject.Properties["processStartTimeUtc"]) { [string]$Session.processStartTimeUtc } else { "" }
-    if ($expected -and [Math]::Abs(($process.StartTime.ToUniversalTime() - [DateTime]::Parse($expected).ToUniversalTime()).TotalSeconds) -ge 1) {
+    $expected = if ($null -ne $Session.PSObject.Properties["processStartTimeUtc"]) { $Session.processStartTimeUtc } else { $null }
+    if ($expected -and [Math]::Abs(($process.StartTime.ToUniversalTime() - (ConvertTo-FactoryUtcDateTime -Value $expected)).TotalSeconds) -ge 1) {
         throw "Refusing to stop PID $processId because its process identity no longer matches the Codex worker."
     }
     $result = Invoke-FactoryNativeProcess -Command "taskkill" -Arguments @("/PID", [string]$processId, "/T", "/F")
@@ -305,7 +305,7 @@ function Stop-FactoryCodexWorkerProcess {
     do {
         try {
             $remaining = Get-Process -Id $processId -ErrorAction Stop
-            if ($expected -and [Math]::Abs(($remaining.StartTime.ToUniversalTime() - [DateTime]::Parse($expected).ToUniversalTime()).TotalSeconds) -ge 1) {
+            if ($expected -and [Math]::Abs(($remaining.StartTime.ToUniversalTime() - (ConvertTo-FactoryUtcDateTime -Value $expected)).TotalSeconds) -ge 1) {
                 return [pscustomobject]@{ stopped = $true; alreadyStopped = $false }
             }
         } catch {

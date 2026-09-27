@@ -55,7 +55,7 @@ try {
         $metadata = Read-FactoryJson -Path $metadataPath
         Set-FactoryProperty -Target $metadata -Name "transcriptPath" -Value $transcriptPath
         Set-FactoryProperty -Target $metadata -Name "lastAssistantMessage" -Value $message
-        Set-FactoryProperty -Target $metadata -Name "lastEventAt" -Value ([string]$event.capturedAt)
+        Set-FactoryProperty -Target $metadata -Name "lastEventAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $event.capturedAt)
         Write-FactoryJsonAtomic -Path $metadataPath -Value $metadata
     }
 } catch {

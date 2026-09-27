@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Normalize JSON-backed timestamps before comparison or process-identity
+  checks, so PowerShell 7 `DateTime` deserialization and non-US cultures cannot
+  block publication CI or misclassify live scheduler, preview, and Codex
+  processes. CI journal timestamps remain invariant ISO-8601 UTC across
+  Windows PowerShell 5.1 and PowerShell 7.
 - Default worker verification to targeted regression tests and relevant
   analyzers after safe sync; retain full local checks on native publication.
 - Observe exact GitHub push SHAs asynchronously, expose CI separately in status,

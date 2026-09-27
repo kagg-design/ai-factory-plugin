@@ -31,8 +31,10 @@ function Read-FactoryCiJournal {
         }
         if ($entry.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
             $entry.key -cne "$($entry.repository)|$($entry.branch)|$($entry.sha)") { throw "Invalid CI identity in $path" }
-        $null = [DateTime]::Parse($entry.publishedAt)
-        if ($entry.lastPollAt) { $null = [DateTime]::Parse($entry.lastPollAt) }
+        $entry.publishedAt = ConvertTo-FactoryRoundtripTimestamp -Value $entry.publishedAt
+        if ($entry.lastPollAt) {
+            $entry.lastPollAt = ConvertTo-FactoryRoundtripTimestamp -Value $entry.lastPollAt
+        }
         foreach ($failure in $entry.failures) {
             if ([string]$failure.runId -notmatch '^\d+$' -or [int]$failure.attempt -lt 1 -or
                 $failure.key -cne "$($failure.runId)/$($failure.attempt)") { throw "Invalid CI failure in $path" }
@@ -175,6 +177,31 @@ function Set-FactoryCiObservation {
         else { 'passed' }
 }
 
+function Get-FactoryCiDueEntries {
+    param(
+        [object[]]$Entries,
+        [DateTime]$NowUtc = [DateTime]::UtcNow,
+        [int]$Limit = 10
+    )
+
+    @($Entries | ForEach-Object {
+        $entry = $_
+        $publishedAtUtc = ConvertTo-FactoryUtcDateTime -Value $entry.publishedAt
+        $lastPollAtUtc = ConvertTo-FactoryUtcDateTime -Value $entry.lastPollAt -AllowNull
+        $ageDays = ($NowUtc.ToUniversalTime() - $publishedAtUtc).TotalDays
+        $unresolved = @(Get-FactoryCiUnacknowledgedFailures $entry).Count -gt 0
+        $interval = if ($entry.status -in @('passed', 'unverified')) { 300 } else { 30 }
+        $pollDue = $null -eq $lastPollAtUtc -or
+            ($NowUtc.ToUniversalTime() - $lastPollAtUtc).TotalSeconds -ge $interval
+        if (($ageDays -le 7 -or $unresolved) -and $pollDue) {
+            [pscustomobject]@{
+                entry = $entry
+                lastPollAtUtc = if ($null -eq $lastPollAtUtc) { [DateTime]::MinValue } else { $lastPollAtUtc }
+            }
+        }
+    } | Sort-Object lastPollAtUtc | Select-Object -First ([Math]::Max(0, $Limit)) | ForEach-Object { $_.entry })
+}
+
 function Sync-FactoryPublicationCi {
     param($Context)
     # One poller per project, independent of the task-state/test-lane locks.
@@ -187,13 +214,7 @@ function Sync-FactoryPublicationCi {
         if ($snapshot.error -or -not $snapshot.entries.Count) { return $snapshot }
         $now = [DateTime]::UtcNow
         $deadline = $now.AddSeconds(8)
-        $due = @($snapshot.entries | Where-Object {
-            $age = ($now - [DateTime]::Parse($_.publishedAt).ToUniversalTime()).TotalDays
-            $unresolved = @(Get-FactoryCiUnacknowledgedFailures $_).Count -gt 0
-            $interval = if ($_.status -in @('passed', 'unverified')) { 300 } else { 30 }
-            ($age -le 7 -or $unresolved) -and (-not $_.lastPollAt -or
-                ($now - [DateTime]::Parse($_.lastPollAt).ToUniversalTime()).TotalSeconds -ge $interval)
-        } | Sort-Object lastPollAt | Select-Object -First 10)
+        $due = @(Get-FactoryCiDueEntries -Entries $snapshot.entries -NowUtc $now -Limit 10)
         foreach ($entry in $due) {
             if ([DateTime]::UtcNow -ge $deadline) { break }
             $observation = $null; $pollError = ''

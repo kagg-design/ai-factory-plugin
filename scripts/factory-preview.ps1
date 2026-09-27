@@ -66,9 +66,9 @@ function Test-PreviewProcess {
     if ($processId -le 0) { return $false }
     try {
         $process = Get-Process -Id $processId -ErrorAction Stop
-        $expectedText = [string](Get-PreviewProperty -InputObject $Record -Name "processStartTimeUtc" -Default "")
-        if (-not $expectedText) { return $false }
-        $expected = [DateTime]::Parse($expectedText).ToUniversalTime()
+        $expectedValue = Get-PreviewProperty -InputObject $Record -Name "processStartTimeUtc" -Default $null
+        if (-not $expectedValue) { return $false }
+        $expected = ConvertTo-FactoryUtcDateTime -Value $expectedValue
         return [Math]::Abs(($process.StartTime.ToUniversalTime() - $expected).TotalSeconds) -lt 1
     } catch {
         return $false
