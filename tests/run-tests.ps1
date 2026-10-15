@@ -33,6 +33,7 @@ if (-not $RuntimeOnly) {
     }
     & (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
     if ($LedgerOnly) { return }
+    & (Join-Path $PSScriptRoot 'worker-result-followup.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
@@ -479,6 +480,12 @@ try {
     $invalidMarker = ConvertFrom-FactoryWorkerMarkerMessage -Message "FACTORY_RESULT`n{`"status`":`"completed`", broken}"
     Assert-Equal "invalid-marker" ([string]$invalidMarker.kind) "Malformed marker JSON was treated as an ordinary message."
     Assert-True ([string]$invalidMarker.payload.error -match "invalid JSON") "Malformed marker classification omitted the parse reason."
+    Assert-Equal "message" ([string](ConvertFrom-FactoryWorkerMarkerMessage -Message "The FACTORY_RESULT above remains in force.").kind) "An inline prose mention became a result marker."
+    Assert-Equal "invalid-marker" ([string](ConvertFrom-FactoryWorkerMarkerMessage -Message "FACTORY_RESULT`nNo JSON follows.").kind) "A standalone marker without JSON was accepted as prose."
+    $inlineResult = ConvertFrom-FactoryWorkerMarkerMessage -Message ('FACTORY_RESULT: ```json' + "`n" + '{"status":"completed"}')
+    Assert-Equal "result" ([string]$inlineResult.kind) "An inline marker with fenced JSON was not parsed."
+    Assert-Equal "completed" ([string]$inlineResult.payload.status) "Inline result JSON was lost."
+    Assert-Equal "invalid-marker" ([string](ConvertFrom-FactoryWorkerMarkerMessage -Message 'FACTORY_RESULT: {"status": broken}').kind) "An inline marker with broken JSON was accepted."
 
     $asanaUrl = Resolve-FactoryAsanaTaskUrl -Url "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1217516118946154?focus=true"
     Assert-Equal "1217516118946154" ([string]$asanaUrl.taskId) "Asana URL parser extracted the wrong task ID."

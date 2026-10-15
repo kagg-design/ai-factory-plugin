@@ -143,6 +143,7 @@ try {
             Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $deliveryInstructions
             Set-FactoryProperty -Target $task -Name "error" -Value $null
             Set-FactoryProperty -Target $task -Name "holdReason" -Value $null
+            Set-FactoryProperty -Target $task -Name "workerEventWarning" -Value $null
             Set-FactoryProperty -Target $state -Name "active" -Value $true
             Set-FactoryProperty -Target $state -Name "paused" -Value $false
             $Instructions = $deliveryInstructions

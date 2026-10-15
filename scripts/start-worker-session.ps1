@@ -295,6 +295,8 @@ Use the non-empty conversationLanguage value from FACTORY_TASK for all
 user-facing conversation and for prose inside FACTORY_PLAN and FACTORY_RESULT.
 Do not translate commands, identifiers, code, logs, paths, or task-source
 quotations merely to match this setting.
+After emitting the final result marker block, send no further prose mentioning
+marker tokens. If a follow-up is needed, refer to "the result above".
 
 FACTORY_TASK
 $payloadJson

@@ -812,6 +812,8 @@ function Write-CliInspect {
         $testStatus = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $test -Name "status") -Fallback "unknown"
         Add-CliInspectLine -Lines $lines -Text "Test: $testStatus $($script:Tree.Horizontal) $testCommand"
     }
+    $workerEventWarning = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "workerEventWarning")
+    if ($workerEventWarning) { Add-CliInspectLine -Lines $lines -Text "Warning: $workerEventWarning" }
     $review = Get-CliProperty -InputObject $task -Name "review"
     $reviewVerdict = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "verdict")
     $reviewMode = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $review -Name "mode")

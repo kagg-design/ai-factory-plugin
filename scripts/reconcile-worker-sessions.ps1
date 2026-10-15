@@ -356,29 +356,34 @@ try {
         } else {
             $null
         }
-        $resultIsCurrent = (
+        $resultIsForSession = (
             $null -ne $resultEvent -and
             $expectedEventSessionId -and
             $null -ne $resultEvent.PSObject.Properties["sessionId"] -and
             [string]$resultEvent.sessionId -eq $expectedEventSessionId
         )
+        if ($resultIsForSession -and $reworkRequestedAt) {
+            $resultIsForSession = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $reworkRequestedAt)
+        }
+        $resultIsCurrent = $resultIsForSession
         $recordedAt = Get-FactoryNestedValue -Target $task -Name "resultRecordedAt" -Default $null
         if ($resultIsCurrent -and $recordedAt) {
             $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
                 (ConvertTo-FactoryUtcDateTime -Value $recordedAt)
         }
-        if ($resultIsCurrent -and $reworkRequestedAt) {
-            $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
-                (ConvertTo-FactoryUtcDateTime -Value $reworkRequestedAt)
-        }
-        if ($resultIsCurrent -and $invalidMarkerIsCurrent) {
-            # A malformed latest turn must not be hidden by an older, as-yet
-            # unrecorded result from the same worker session.
-            $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
-                (ConvertTo-FactoryUtcDateTime -Value $latestEvent.capturedAt)
-        }
+        $latestKind = if ($latestEventIsCurrent) { [string]$latestEvent.kind } else { "" }
+        # A later message or malformed marker cannot displace a completed
+        # result while its commit and worktree still pass validation.
+        $followupAfterResult = (
+            $resultIsForSession -and
+            [string]$resultEvent.payload.status -eq "completed" -and
+            $latestKind -in @("message", "invalid-marker") -and
+            (ConvertTo-FactoryUtcDateTime -Value $latestEvent.capturedAt) -gt
+                (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt)
+        )
 
-        if ($resultIsCurrent) {
+        if ($resultIsCurrent -or $followupAfterResult) {
             $result = $resultEvent.payload
             $resultStatus = [string]$result.status
             $validationError = $null
@@ -450,16 +455,28 @@ try {
             }
 
             if ($validationError) {
-                Set-FactoryProperty -Target $task -Name "status" -Value "failed"
-                Set-FactoryProperty -Target $task -Name "error" -Value $validationError
+                if ($followupAfterResult -and $invalidMarkerIsCurrent -and [string]$latestEvent.payload.marker -eq "FACTORY_RESULT") {
+                    $markerError = [string](Get-FactoryNestedValue -Target $latestEvent.payload -Name "error" -Default "The marker JSON could not be parsed.")
+                    Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
+                    Set-FactoryProperty -Target $task -Name "error" -Value "Invalid FACTORY_RESULT payload: $markerError Worktree and commits are retained. Ask the worker via factory chat $taskId to emit a corrected FACTORY_RESULT report; publication remains gated."
+                    Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $latestEvent.capturedAt)
+                } else {
+                    Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+                    Set-FactoryProperty -Target $task -Name "error" -Value $validationError
+                }
             } elseif ($resultStatus -eq "completed") {
                 Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
-                Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
-                Set-FactoryProperty -Target $task -Name "review" -Value $null
-                Set-FactoryProperty -Target $task -Name "approval" -Value $null
-                Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
-                Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $null
-                Set-FactoryProperty -Target $task -Name "error" -Value $null
+                if ($resultIsCurrent) {
+                    Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
+                    Set-FactoryProperty -Target $task -Name "review" -Value $null
+                    Set-FactoryProperty -Target $task -Name "approval" -Value $null
+                    Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $null
+                    Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $null
+                    Set-FactoryProperty -Target $task -Name "error" -Value $null
+                } elseif ([string]$task.status -eq "awaiting-input") {
+                    Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-review"
+                    Set-FactoryProperty -Target $task -Name "error" -Value $null
+                }
             } elseif ($resultStatus -eq "blocked") {
                 Set-FactoryProperty -Target $task -Name "workerResult" -Value $result
                 Set-FactoryProperty -Target $task -Name "status" -Value "blocked"
@@ -469,7 +486,23 @@ try {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
                 Set-FactoryProperty -Target $task -Name "error" -Value ([string]$result.blockingReason)
             }
-            Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $resultEvent.capturedAt)
+            if ($resultIsCurrent) {
+                Set-FactoryProperty -Target $task -Name "resultRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $resultEvent.capturedAt)
+            }
+            $eventWarning = ""
+            if (-not $validationError -and $resultStatus -eq "completed" -and $followupAfterResult) {
+                $followupText = if ($latestKind -eq "invalid-marker") {
+                    "Invalid $([string]$latestEvent.payload.marker) follow-up: $([string]$latestEvent.payload.error)"
+                } else {
+                    "Worker follow-up after the validated result: $([string]$latestEvent.lastAssistantMessage)"
+                }
+                $eventWarning = ([regex]::Replace($followupText.Trim(), '\s+', ' '))
+                if ($eventWarning.Length -gt 240) { $eventWarning = $eventWarning.Substring(0, 240) + "..." }
+            }
+            if ([string](Get-FactoryNestedValue -Target $task -Name "workerEventWarning" -Default "") -ne $eventWarning) {
+                Set-FactoryProperty -Target $task -Name "workerEventWarning" -Value $eventWarning
+                $metadataChanged = $true
+            }
         } elseif (
             $invalidMarkerIsCurrent -and
             [string]$task.status -in @("starting", "planning", "running", "awaiting-input")

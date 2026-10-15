@@ -57,16 +57,27 @@ function ConvertFrom-FactoryWorkerMarkerMessage {
         }
     }
     if ($located.Count -eq 0) {
+        # Inline marker words in ordinary prose are not envelopes. Only an
+        # immediately following JSON object qualifies them as markers.
         foreach ($candidate in $candidates) {
-            $markerIndex = $Message.IndexOf([string]$candidate.Marker, [StringComparison]::Ordinal)
-            if ($markerIndex -ge 0) {
+            $markerIndex = 0
+            while (($markerIndex = $Message.IndexOf([string]$candidate.Marker, $markerIndex, [StringComparison]::Ordinal)) -ge 0) {
+                $jsonSearchIndex = $markerIndex + ([string]$candidate.Marker).Length
+                $following = $Message.Substring($jsonSearchIndex)
+                $prefix = [regex]::Match($following, '^\s*(?::\s*)?(?:```(?:json)?[ \t]*\r?\n\s*)?', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $firstBrace = $jsonSearchIndex + $prefix.Length
+                if ($firstBrace -ge $Message.Length -or $Message[$firstBrace] -ne '{') {
+                    $markerIndex = $jsonSearchIndex
+                    continue
+                }
                 $located.Add([pscustomobject]@{
                     Marker = [string]$candidate.Marker
                     Kind = [string]$candidate.Kind
                     Index = $markerIndex
-                    JsonSearchIndex = $markerIndex + ([string]$candidate.Marker).Length
+                    JsonSearchIndex = $jsonSearchIndex
                     Standalone = $false
                 })
+                break
             }
         }
     }
