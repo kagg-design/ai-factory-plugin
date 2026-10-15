@@ -57,7 +57,7 @@ try {
     Assert-Ci ($attention.revision -eq $again.revision -and $again.events.Count -eq 1) 'Unchanged CI failure spammed attention.'
     Assert-Ci ($again.events[0].aiActionable) 'CI failure was not visible to the orchestrator.'
     Set-FactoryCiObservation -Entry $entry -Observation $null -ErrorText 'Authentication expired'
-    Assert-Ci ($entry.status -eq 'unknown' -and $entry.failures.Count -eq 1) 'Auth error erased known failure.'
+    Assert-Ci ($entry.status -eq 'failed' -and $entry.failures.Count -eq 1) 'Auth error erased known failure.'
     Set-FactoryCiObservation $entry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha '' 2)) })
     Assert-Ci ($entry.failures.Count -eq 1) 'Pending rerun cleared failure too early.'
     Set-FactoryCiObservation $entry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha cancelled 2)) })
@@ -128,8 +128,11 @@ try {
     $script:CiApiArguments = @()
     function Invoke-FactoryNativeProcess {
         param([string]$Command, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutSeconds)
-        Assert-Ci ($TimeoutSeconds -eq 3) 'CI read lost its short native timeout.'
-        if ($Command -eq 'git') { return [pscustomobject]@{ exitCode = 0; stdout = $script:CiRemoteUrl } }
+        if ($Command -eq 'git') {
+            Assert-Ci ($TimeoutSeconds -eq 3) 'Remote lookup timeout changed.'
+            return [pscustomobject]@{ exitCode = 0; stdout = $script:CiRemoteUrl }
+        }
+        Assert-Ci ($TimeoutSeconds -eq 15) 'CI read did not use the 15-second default timeout.'
         Assert-Ci ($Command -eq 'gh') 'Observer invoked an unexpected executable.'
         $script:CiApiArguments = $Arguments
         [pscustomobject]@{ exitCode = 0; stdout = '{"total_count":101,"workflow_runs":[]}' }
@@ -147,6 +150,55 @@ try {
     Assert-Ci (-not $response.complete) 'API boundary did not mark pagination incomplete.'
     Assert-Ci (($script:CiApiArguments -join ' ') -match 'api --hostname github.com --method GET repos/example/project/actions/runs\?head_sha=a{40}&branch=feature%2Ftest&event=push&per_page=100') 'API query was not pinned to the exact host/branch/SHA/push event.'
     Set-Item Function:Invoke-FactoryNativeProcess -Value $originalNative
+
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    $fakeGh = Join-Path $ciTestRoot 'gh.exe'
+    & $compiler /nologo /target:exe "/out:$fakeGh" (Join-Path $PluginRoot 'tests\FakeGh.cs') | Out-Null
+    Assert-Ci ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $fakeGh)) 'Could not build the slow gh fixture.'
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = "$ciTestRoot;$savedPath"
+        $env:FACTORY_FAKE_GH_SHA = 'd' * 40
+        $env:FACTORY_FAKE_GH_BRANCH = 'develop'
+        $env:FACTORY_FAKE_GH_MODE = 'success'
+        Register-FactoryCiPublication -Context $ciContext -Task $task -Slug 'fixture/project' -Branch develop -Sha $env:FACTORY_FAKE_GH_SHA
+        $slowJournal = Read-FactoryCiJournal $ciContext
+        $slowJournal.entries = @($slowJournal.entries | Where-Object { $_.sha -eq $env:FACTORY_FAKE_GH_SHA })
+        Save-CiFixture $slowJournal
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $slowStatus = Sync-FactoryPublicationCi -Context $ciContext -Config ([pscustomobject]@{
+            ciMonitoring = [pscustomobject]@{ apiTimeoutSeconds = 15; pollBudgetSeconds = 20; maxObservationAttempts = 5 }
+        })
+        Assert-Ci ($slowStatus.entries[0].status -eq 'passed' -and $watch.Elapsed.TotalSeconds -ge 5 -and $watch.Elapsed.TotalSeconds -lt 15) 'A five-second gh response did not pass CI.'
+
+        $env:FACTORY_FAKE_GH_MODE = 'timeout'
+        $env:FACTORY_FAKE_GH_SHA = 'e' * 40
+        Register-FactoryCiPublication -Context $ciContext -Task $task -Slug 'fixture/project' -Branch develop -Sha $env:FACTORY_FAKE_GH_SHA
+        $timeoutJournal = Read-FactoryCiJournal $ciContext
+        $timeoutJournal.entries = @($timeoutJournal.entries | Where-Object { $_.sha -eq $env:FACTORY_FAKE_GH_SHA })
+        Save-CiFixture $timeoutJournal
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            $timeoutJournal = Read-FactoryCiJournal $ciContext
+            $timeoutJournal.entries[0].lastPollAt = $null
+            Save-CiFixture $timeoutJournal
+            $timeoutStatus = Sync-FactoryPublicationCi -Context $ciContext -Config ([pscustomobject]@{
+                ciMonitoring = [pscustomobject]@{ apiTimeoutSeconds = 1; pollBudgetSeconds = 2; maxObservationAttempts = 5 }
+            })
+            $expectedStatus = if ($attempt -eq 5) { 'unverified' } else { 'pending' }
+            Assert-Ci ($timeoutStatus.entries[0].status -eq $expectedStatus -and
+                [int]$timeoutStatus.entries[0].observationFailures -eq $attempt) "Timeout attempt $attempt had the wrong CI state."
+        }
+        $attentionState = [pscustomobject]@{ tasks = @(); active = $false; paused = $false; scheduler = [pscustomobject]@{ status = 'stopped' } }
+        $firstUnverified = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        $timeoutJournal = Read-FactoryCiJournal $ciContext
+        $timeoutJournal.entries[0].error = 'Native command gh timed out again.'
+        Save-CiFixture $timeoutJournal
+        $secondUnverified = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($firstUnverified.revision -eq $secondUnverified.revision) 'Changing timeout wording replayed one unverified outcome.'
+    } finally {
+        $env:PATH = $savedPath
+        Remove-Item Env:\FACTORY_FAKE_GH_MODE,Env:\FACTORY_FAKE_GH_SHA,Env:\FACTORY_FAKE_GH_BRANCH -ErrorAction SilentlyContinue
+    }
 
     # Native command timeout is opt-in; regular callers retain their behavior.
     $watch = [Diagnostics.Stopwatch]::StartNew()

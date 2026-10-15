@@ -593,6 +593,7 @@ function Write-CliStatus {
     $schedulerError = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastError")
     $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $schedulerState
+    $schedulerTickProblem = $schedulerAlive -and -not $paused -and (Test-FactoryPersistentSchedulerFailure -Scheduler $schedulerState)
     $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + @(Get-FactoryCiAttentionEvents -Context $Context)
     $aiActions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "aiActionable" -Default $false) })
     $humanDecisions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "humanDecision" -Default $false) })
@@ -674,7 +675,8 @@ function Write-CliStatus {
     )
     foreach ($group in $groups) {
         $groupTasks = @($selected | Where-Object { (Get-CliGroup -Status (Get-CliEffectiveStatus -Task $_)) -eq $group.Key })
-        $schedulerRows = if ($group.Key -eq "Needs your action" -and $schedulerProblem) { 1 } else { 0 }
+        $schedulerRows = if (($group.Key -eq "Needs your action" -and $schedulerProblem) -or
+            ($group.Key -eq "Problems" -and $schedulerTickProblem)) { 1 } else { 0 }
         $groupCount = $groupTasks.Count + $schedulerRows
         if ($groupCount -eq 0) { continue }
         $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $groupCount")
@@ -686,7 +688,7 @@ function Write-CliStatus {
                 -Lines $lines `
                 -FirstPrefix "$($script:Tree.Vertical)  $schedulerConnector$($script:Tree.Horizontal) " `
                 -ContinuationPrefix $schedulerDetailPrefix `
-                -Text "SCHEDULER $($script:Tree.Horizontal) $schedulerProblemStatus $($script:Tree.Horizontal) runnable work is not being processed"
+                -Text $(if ($schedulerTickProblem) { "SCHEDULER $($script:Tree.Horizontal) failed ticks keep retrying" } else { "SCHEDULER $($script:Tree.Horizontal) $schedulerProblemStatus $($script:Tree.Horizontal) runnable work is not being processed" })
             $schedulerReason = if ($paused) {
                 "Factory is paused; the scheduler will not launch or publish tasks."
             } elseif ($schedulerError) { $schedulerError } else { "No live native scheduler owns this project." }
@@ -700,7 +702,7 @@ function Write-CliStatus {
                 "Log: $(Join-Path ([string]$Context.projectData) 'scheduler.stderr.log')"
             }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix$($script:Tree.Vertical)  " -Text $schedulerDiagnostic
-            $schedulerNext = if ($paused) { "factory resume" } elseif ($schedulerStatus -in @("stopped", "failed")) { "factory scheduler start" } else { "factory scheduler status" }
+            $schedulerNext = if ($schedulerTickProblem) { "factory scheduler status" } elseif ($paused) { "factory resume" } elseif ($schedulerStatus -in @("stopped", "failed")) { "factory scheduler start" } else { "factory scheduler status" }
             Add-CliWrappedLine -Lines $lines -FirstPrefix "$schedulerDetailPrefix$($script:Tree.Last)$($script:Tree.Horizontal) " -ContinuationPrefix "$schedulerDetailPrefix   " -Text "$($script:Tree.Arrow) Next: $schedulerNext"
         }
         for ($index = 0; $index -lt $groupTasks.Count; $index++) {

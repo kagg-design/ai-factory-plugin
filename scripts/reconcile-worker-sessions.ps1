@@ -91,6 +91,7 @@ try {
     foreach ($task in @($state.tasks)) {
         $before = [string]$task.status
         $taskId = [string]$task.id
+        try {
         $recordedSessionState = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "state" -Default "")
         # Once a terminal worker has already moved its task into a settled
         # state, its final event has been consumed. Retained session metadata is
@@ -387,6 +388,7 @@ try {
             $result = $resultEvent.payload
             $resultStatus = [string]$result.status
             $validationError = $null
+            $invalidReportedCommit = $false
 
             if ([string]$result.taskId -ne $taskId) {
                 $validationError = "FACTORY_RESULT taskId did not match '$taskId'."
@@ -410,21 +412,31 @@ try {
                 } elseif (-not (Test-Path -LiteralPath ([string]$task.worktree))) {
                     $validationError = "Worker worktree no longer exists: $($task.worktree)"
                 } else {
-                    $resolvedCommit = (& git -C $task.worktree rev-parse "$reportedCommit^{commit}" 2>$null).Trim()
-                    if ($LASTEXITCODE -ne 0 -or -not $resolvedCommit) {
+                    $commitRead = if ($reportedCommit -match '^[a-fA-F0-9]{40}$') {
+                        Invoke-FactoryNativeProcess -Command git -Arguments @('-C', [string]$task.worktree, 'rev-parse', "$reportedCommit^{commit}") -TimeoutSeconds 10
+                    } else { $null }
+                    $resolvedCommit = if ($null -ne $commitRead) { ([string]$commitRead.stdout).Trim() } else { '' }
+                    if ($null -eq $commitRead -or $commitRead.exitCode -ne 0 -or -not $resolvedCommit) {
                         $validationError = "Worker commit is not valid: $reportedCommit"
+                        $invalidReportedCommit = $true
                     } else {
-                        $head = (& git -C $task.worktree rev-parse HEAD 2>$null).Trim()
-                        $currentBranch = (& git -C $task.worktree branch --show-current 2>$null).Trim()
-                        $dirty = @(& git -C $task.worktree status --porcelain 2>$null)
-                        if ($head -ne $resolvedCommit) {
+                        $headRead = Invoke-FactoryNativeProcess -Command git -Arguments @('-C', [string]$task.worktree, 'rev-parse', 'HEAD') -TimeoutSeconds 10
+                        $branchRead = Invoke-FactoryNativeProcess -Command git -Arguments @('-C', [string]$task.worktree, 'branch', '--show-current') -TimeoutSeconds 10
+                        $statusRead = Invoke-FactoryNativeProcess -Command git -Arguments @('-C', [string]$task.worktree, 'status', '--porcelain') -TimeoutSeconds 10
+                        $head = ([string]$headRead.stdout).Trim()
+                        $currentBranch = ([string]$branchRead.stdout).Trim()
+                        if ($headRead.exitCode -ne 0 -or $branchRead.exitCode -ne 0 -or $statusRead.exitCode -ne 0) {
+                            $validationError = "Worker Git state could not be verified."
+                        } elseif ($head -ne $resolvedCommit) {
                             $validationError = "Worker HEAD '$head' does not match result commit '$resolvedCommit'."
                         } elseif ($currentBranch -ne [string]$task.branch) {
                             $validationError = "Worker worktree is on '$currentBranch', expected '$($task.branch)'."
-                        } elseif ($dirty.Count -gt 0) {
+                        } elseif ([string]$statusRead.stdout) {
                             $validationError = "Worker worktree is not clean."
                         } else {
-                            $derivedFiles = @(Get-FactoryChangedFiles -Worktree ([string]$task.worktree) -Commit $resolvedCommit)
+                            $filesRead = Invoke-FactoryNativeProcess -Command git -Arguments @('-C', [string]$task.worktree, 'diff-tree', '--no-commit-id', '--name-only', '-r', $resolvedCommit) -TimeoutSeconds 10
+                            if ($filesRead.exitCode -ne 0) { throw "Worker changed files could not be verified: $($filesRead.stderr)" }
+                            $derivedFiles = @(([string]$filesRead.stdout) -split "`r?`n" | Where-Object { $_ } | Sort-Object -Unique)
                             $reportedFilesPresent = $null -ne $result.PSObject.Properties["changedFiles"]
                             $reportedFiles = if ($reportedFilesPresent) {
                                 @(Get-FactoryNestedValue -Target $result -Name "changedFiles" -Default @() | ForEach-Object { [string]$_ })
@@ -461,7 +473,7 @@ try {
                     Set-FactoryProperty -Target $task -Name "error" -Value "Invalid FACTORY_RESULT payload: $markerError Worktree and commits are retained. Ask the worker via factory chat $taskId to emit a corrected FACTORY_RESULT report; publication remains gated."
                     Set-FactoryProperty -Target $task -Name "markerErrorRecordedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $latestEvent.capturedAt)
                 } else {
-                    Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+                    Set-FactoryProperty -Target $task -Name "status" -Value $(if ($invalidReportedCommit) { "awaiting-input" } else { "failed" })
                     Set-FactoryProperty -Target $task -Name "error" -Value $validationError
                 }
             } elseif ($resultStatus -eq "completed") {
@@ -564,6 +576,16 @@ try {
                 from = $before
                 to = $after
             })
+        }
+        } catch {
+            $failure = "Reconciliation failed for task '$taskId': $($_.Exception.Message)"
+            Set-FactoryProperty -Target $task -Name "status" -Value "failed"
+            Set-FactoryProperty -Target $task -Name "error" -Value $failure
+            Set-FactoryProperty -Target $task -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
+            $metadataChanged = $true
+            if ($before -ne "failed") {
+                $changes.Add([pscustomobject]@{ taskId = $taskId; from = $before; to = "failed"; reason = $failure })
+            }
         }
     }
 

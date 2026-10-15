@@ -28,9 +28,12 @@ coverage rather than imply a full-suite pass.
 their published SHAs, branches, task titles, last observation, and run URLs.
 The native scheduler's regular reconciliation and `factory wait` perform
 rate-limited snapshots. There is no additional daemon and no `gh run watch`.
-GitHub reads run outside task-state/journal write locks. Each `gh` call times out
-after three seconds; each poll starts at most ten reads within an eight-second
-budget (at most one call may finish beyond the budget).
+GitHub reads run outside task-state/journal write locks. Each `gh` call has a
+15-second timeout by default, within a 20-second poll budget. Due entries are
+ordered by their last observation, so a slow call cannot permanently starve
+other publications. Private `ciMonitoring` config can set `apiTimeoutSeconds`,
+`pollBudgetSeconds`, and `maxObservationAttempts` (default 5). Values are
+bounded to 1–60, 1–60, and 1–20 respectively.
 
 The observer uses [GitHub's workflow-runs API](https://docs.github.com/en/rest/actions/workflow-runs)
 through the locally authenticated `gh` executable. It requires Actions read
@@ -55,11 +58,16 @@ not green. When at least one workflow succeeds and its only companions are
 skipped workflows, the aggregate passes and detail output explicitly counts
 the skips. This covers repositories where standalone CI stands aside because
 the deploy workflow invokes CI. A passed workflow is not a claim that every
-optional job/test ran. Authentication errors, timeouts, and truncated snapshots
-(more than 100 matching runs), missing known runs, or stale attempts remain
-unverified and visible; they do not create
+optional job/test ran. Authentication errors and timeouts leave a new entry
+pending until the configured attempt limit, then mark it unverified. Truncated
+snapshots (more than 100 matching runs), missing known runs, or stale attempts
+remain unverified and visible. These conditions do not create
 a new failure block, but preserve existing ones. An unreadable/corrupt journal
 blocks publications instead of resetting history.
+
+An unverified outcome produces one `factory wait` attention edge per published
+repository, branch, and SHA. Repeated timeout messages do not wake the
+orchestrator again; a changed CI outcome can produce a new edge.
 
 Snapshots are at most every 30 seconds per unresolved entry; successful or
 otherwise terminal unverified entries are checked every five minutes. Monitoring

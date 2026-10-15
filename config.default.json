@@ -22,7 +22,10 @@
     "autoGoApprovedReviews": false
   },
   "ciMonitoring": {
-    "enabled": true
+    "enabled": true,
+    "apiTimeoutSeconds": 15,
+    "pollBudgetSeconds": 20,
+    "maxObservationAttempts": 5
   },
   "preview": {
     "enabled": true,

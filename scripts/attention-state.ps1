@@ -29,11 +29,12 @@ function New-FactoryAttentionState {
 function Get-FactoryAttentionEventKey {
     param([Parameter(Mandatory = $true)]$Event)
 
+    $identity = [string](Get-FactoryNestedValue -Target $Event -Name "identity" -Default "")
     $parts = @(
         [string](Get-FactoryNestedValue -Target $Event -Name "kind" -Default ""),
         [string](Get-FactoryNestedValue -Target $Event -Name "taskId" -Default ""),
         [string](Get-FactoryNestedValue -Target $Event -Name "status" -Default ""),
-        [string](Get-FactoryNestedValue -Target $Event -Name "reason" -Default ""),
+        $(if ($identity) { $identity } else { [string](Get-FactoryNestedValue -Target $Event -Name "reason" -Default "") }),
         [string](Get-FactoryNestedValue -Target $Event -Name "command" -Default "")
     )
     return Get-FactoryTextSha256 -Value ($parts -join "`n")

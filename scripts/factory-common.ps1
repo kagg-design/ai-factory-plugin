@@ -538,6 +538,16 @@ function Get-FactoryOperatorActionEvents {
     }).Count
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $scheduler
     $paused = [bool](Get-FactoryNestedValue -Target $State -Name "paused" -Default $false)
+    if ($schedulerAlive -and -not $paused -and (Test-FactoryPersistentSchedulerFailure -Scheduler $scheduler -NowUtc $NowUtc)) {
+        $events.Add([pscustomobject][ordered]@{
+            kind = "scheduler-tick"; taskId = $null; title = "Native scheduler"; status = "failed"
+            identity = "consecutive-tick-failure"
+            audience = "orchestrator"; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
+            reason = "Native scheduler ticks keep failing: $([string](Get-FactoryNestedValue -Target $scheduler -Name 'lastError' -Default 'unknown error'))"
+            occurredAt = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastFailureAt" -Default "")
+            command = "factory scheduler status"
+        })
+    }
     if ($runnable -gt 0 -and ($paused -or -not $schedulerAlive)) {
         $reason = [string](Get-FactoryNestedValue -Target $scheduler -Name "lastError" -Default "")
         if (-not $reason) { $reason = "Runnable work exists, but the native scheduler process is not running." }
@@ -552,6 +562,16 @@ function Get-FactoryOperatorActionEvents {
         })
     }
     return @($events.ToArray())
+}
+
+function Test-FactoryPersistentSchedulerFailure {
+    param($Scheduler, [DateTime]$NowUtc = [DateTime]::UtcNow)
+
+    if ([string](Get-FactoryNestedValue -Target $Scheduler -Name "status" -Default "") -ne "failed") { return $false }
+    if (-not [string](Get-FactoryNestedValue -Target $Scheduler -Name "lastError" -Default "")) { return $false }
+    if ([int](Get-FactoryNestedValue -Target $Scheduler -Name "failureCount" -Default 0) -ge 3) { return $true }
+    $failedAt = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $Scheduler -Name "lastFailureAt")
+    return [bool]$failedAt.success -and ($NowUtc.ToUniversalTime() - ([DateTime]$failedAt.value)).TotalMinutes -ge 5
 }
 
 function Get-FactoryMutexDiagnosticPaths {

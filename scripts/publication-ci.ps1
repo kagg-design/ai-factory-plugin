@@ -81,6 +81,20 @@ function Get-FactoryCiRepository {
     return "" # Local fixtures and non-GitHub remotes have no Actions observer.
 }
 
+function Get-FactoryCiPollingSettings {
+    param($Context, $Config = $null)
+    if ($null -eq $Config -and $null -ne $Context.PSObject.Properties['configPath'] -and
+        (Test-Path -LiteralPath ([string]$Context.configPath) -PathType Leaf)) {
+        $Config = Read-FactoryJson -Path ([string]$Context.configPath)
+    }
+    $settings = Get-FactoryNestedValue -Target $Config -Name 'ciMonitoring'
+    return [pscustomobject]@{
+        apiTimeoutSeconds = [Math]::Max(1, [Math]::Min(60, [int](Get-FactoryNestedValue $settings 'apiTimeoutSeconds' 15)))
+        pollBudgetSeconds = [Math]::Max(1, [Math]::Min(60, [int](Get-FactoryNestedValue $settings 'pollBudgetSeconds' 20)))
+        maxObservationAttempts = [Math]::Max(1, [Math]::Min(20, [int](Get-FactoryNestedValue $settings 'maxObservationAttempts' 5)))
+    }
+}
+
 function Register-FactoryCiPublication {
     param($Context, $Task, [string]$Slug, [string]$Branch, [string]$Sha)
     if (-not $Slug) { return }
@@ -94,7 +108,8 @@ function Register-FactoryCiPublication {
             key = $key; repository = $Slug; branch = $Branch; sha = $Sha
             taskId = [string]$Task.id; title = [string]$Task.title
             publishedAt = Get-FactoryUtcTimestamp; lastPollAt = $null
-            status = 'pending'; error = ''; runs = @(); failures = @(); acknowledgements = @()
+            status = 'pending'; error = ''; observationFailures = 0
+            runs = @(); failures = @(); acknowledgements = @()
             url = "https://github.com/$Slug/actions?query=branch%3A$([Uri]::EscapeDataString($Branch))"
         })
         Write-FactoryJsonAtomic -Path (Get-FactoryCiPath $Context) -Value $journal
@@ -102,7 +117,7 @@ function Register-FactoryCiPublication {
 }
 
 function Get-FactoryCiRuns {
-    param($Context, $Entry, [int]$TimeoutSeconds = 3)
+    param($Context, $Entry, [int]$TimeoutSeconds = 15)
     $endpoint = "repos/$($Entry.repository)/actions/runs?head_sha=$($Entry.sha)&branch=$([Uri]::EscapeDataString([string]$Entry.branch))&event=push&per_page=100"
     $result = Invoke-FactoryNativeProcess -Command gh -Arguments @('api', '--hostname', 'github.com', '--method', 'GET', $endpoint) `
         -WorkingDirectory ([string]$Context.repositoryRoot) -TimeoutSeconds $TimeoutSeconds
@@ -120,13 +135,19 @@ function Get-FactoryCiRuns {
 }
 
 function Set-FactoryCiObservation {
-    param($Entry, $Observation, [string]$ErrorText = "")
+    param($Entry, $Observation, [string]$ErrorText = "", [int]$MaxObservationAttempts = 5)
     $Entry.lastPollAt = Get-FactoryUtcTimestamp
     if ($ErrorText) {
-        $Entry.status = 'unknown'
+        $failures = [int](Get-FactoryNestedValue $Entry 'observationFailures' 0) + 1
+        Set-FactoryProperty -Target $Entry -Name 'observationFailures' -Value $failures
+        if (@($Entry.failures).Count) { $Entry.status = 'failed' }
+        elseif ($Entry.status -notin @('passed', 'unverified')) {
+            $Entry.status = if ($failures -ge $MaxObservationAttempts) { 'unverified' } else { 'pending' }
+        }
         $Entry.error = $ErrorText
         return # Preserve known failure evidence through API/auth/timeout errors.
     }
+    Set-FactoryProperty -Target $Entry -Name 'observationFailures' -Value 0
     $runs = @($Observation.runs | Where-Object {
         [string]$_.head_sha -ceq [string]$Entry.sha -and [string]$_.head_branch -ceq [string]$Entry.branch -and
         [string]$_.event -eq 'push'
@@ -203,7 +224,7 @@ function Get-FactoryCiDueEntries {
 }
 
 function Sync-FactoryPublicationCi {
-    param($Context)
+    param($Context, $Config = $null)
     # One poller per project, independent of the task-state/test-lane locks.
     # Network I/O holds only this nonblocking poll ownership, never the journal
     # write mutex: concurrent pushes/acknowledgements are merged below.
@@ -212,20 +233,22 @@ function Sync-FactoryPublicationCi {
     try {
         $snapshot = Get-FactoryCiStatus $Context
         if ($snapshot.error -or -not $snapshot.entries.Count) { return $snapshot }
+        $settings = Get-FactoryCiPollingSettings -Context $Context -Config $Config
         $now = [DateTime]::UtcNow
-        $deadline = $now.AddSeconds(8)
+        $deadline = $now.AddSeconds($settings.pollBudgetSeconds)
         $due = @(Get-FactoryCiDueEntries -Entries $snapshot.entries -NowUtc $now -Limit 10)
         foreach ($entry in $due) {
             if ([DateTime]::UtcNow -ge $deadline) { break }
             $observation = $null; $pollError = ''
-            try { $observation = Get-FactoryCiRuns -Context $Context -Entry $entry }
+            $remainingSeconds = [Math]::Max(1, [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds))
+            try { $observation = Get-FactoryCiRuns -Context $Context -Entry $entry -TimeoutSeconds ([Math]::Min($settings.apiTimeoutSeconds, $remainingSeconds)) }
             catch { $pollError = $_.Exception.Message }
             $mutex = Enter-FactoryMutex -ProjectKey "$($Context.projectKey)-ci"
             try {
                 $journal = Read-FactoryCiJournal $Context
                 $current = @($journal.entries | Where-Object { $_.key -ceq $entry.key })
                 if ($current.Count -ne 1) { throw 'CI publication disappeared during observation.' }
-                Set-FactoryCiObservation -Entry $current[0] -Observation $observation -ErrorText $pollError
+                Set-FactoryCiObservation -Entry $current[0] -Observation $observation -ErrorText $pollError -MaxObservationAttempts $settings.maxObservationAttempts
                 Write-FactoryJsonAtomic -Path (Get-FactoryCiPath $Context) -Value $journal
             } finally { Exit-FactoryMutex $mutex }
         }
@@ -269,14 +292,16 @@ function Get-FactoryCiAttentionEvents {
     }
     foreach ($entry in $status.entries) {
         $failures = @(Get-FactoryCiUnacknowledgedFailures $entry)
-        if (-not $failures.Count -and -not $entry.error) { continue }
+        if (-not $failures.Count -and [string]$entry.status -ne 'unverified') { continue }
         $reason = if ($failures.Count) {
             "Publications blocked: $($entry.branch) $($entry.sha). " +
             (($failures | ForEach-Object { "$($_.name): $($_.conclusion) (attempt $($_.attempt)) $($_.url)" }) -join '; ')
-        } else { "CI is unverified for $($entry.branch) $($entry.sha): $($entry.error)" }
+        } elseif ($entry.error) { "CI is unverified for $($entry.branch) $($entry.sha): $($entry.error)" }
+        else { "CI is unverified for $($entry.branch) $($entry.sha)." }
         [pscustomobject]@{
             kind = 'publication-ci'; taskId = $entry.taskId; title = $entry.title
-            status = $(if ($failures.Count) { 'failed' } else { 'unknown' })
+            status = $(if ($failures.Count) { 'failed' } else { 'unverified' })
+            identity = $(if ($failures.Count) { "$($entry.key)|$(($failures | ForEach-Object { $_.key }) -join ',')" } else { [string]$entry.key })
             reason = $reason; command = 'factory ci'; occurredAt = $entry.publishedAt
             aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true
         }

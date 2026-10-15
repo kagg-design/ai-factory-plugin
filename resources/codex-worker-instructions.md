@@ -83,6 +83,7 @@ blocked result instead of guessing.
 - Review the diff, create exactly one final task commit, and require a clean
   `git status --porcelain` afterward.
 - Record the branch, full SHA, absolute worktree, and exact test outcomes.
+  Copy `commit` directly from `git rev-parse HEAD`; never type, shorten, or complete a SHA by hand.
   Factory derives the authoritative changed-file list from that commit.
 - State targeted coverage and any untested risks in result notes. Never claim
   full-suite coverage from targeted checks; `go` and CI are separate stages.

@@ -196,8 +196,10 @@ public static class StatusRuntime {
     $badEventPath = Join-Path $badEventDirectory 'latest.json'
     [IO.File]::WriteAllText($badEventPath, 'invalid json')
     $badEvent = Read-StatusFixture
-    Assert-Status ($badEvent.reconcileWarning -like 'Session reconciliation failed:*showing saved state.') 'Status hid a reconciliation failure.'
-    Assert-Status (@($badEvent.state.tasks).Count -eq 4 -and $badEvent.testLease.free) 'Reconciliation failure lost saved tasks or skipped lease status.'
+    $failedEventTask = @($badEvent.state.tasks | Where-Object { $_.id -eq 'bad-event-fixture' })[0]
+    Assert-Status (-not $badEvent.reconcileWarning -and $failedEventTask.status -eq 'failed' -and
+        $failedEventTask.error -like 'Reconciliation failed for task*') 'Status did not isolate a malformed worker event on its task.'
+    Assert-Status (@($badEvent.state.tasks).Count -eq 4 -and $badEvent.testLease.free) 'Per-task reconciliation failure lost saved tasks or skipped lease status.'
     Remove-Item -LiteralPath $badEventPath
 
     # Exercise the public command in both hosts, including filtering and errors.
