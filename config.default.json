@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -109,8 +109,29 @@
     "Add or update regression tests when practical"
   ],
   "asana": {
+    "enabled": false,
     "postStartComment": false,
     "postCompletionComment": false,
-    "markCompleteAfterProduction": false
-  }
+    "markCompleteAfterProduction": false,
+    "tokenEnv": "FACTORY_ASANA_TOKEN",
+    "workspace": "14748072439266",
+    "project": "1215506997644941",
+    "fields": {
+      "factory": "1219588322328561",
+      "ready": "1219588322328562",
+      "taken": "1219588322328563",
+      "question": "1219588322328564",
+      "done": "1219588322328565",
+      "failed": "1219588322328566",
+      "resolution": "1215172784016242",
+      "resolutionFixed": "1215172784016243"
+    },
+    "sections": {
+      "inProgress": "1215854734340165",
+      "done": "1215854734340166"
+    }
+  },
+  "poll": { "intervalMinutes": 5, "maxParallelWorkers": 2 },
+  "questions": { "answerPollMinutes": 5, "timeoutHours": 24 },
+  "launcher": { "path": "" }
 }

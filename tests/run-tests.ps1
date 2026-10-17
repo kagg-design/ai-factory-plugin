@@ -40,6 +40,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'factory-status.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'asana-integration.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'worker-environment-guard.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'timestamp-normalization.tests.ps1') -PluginRoot $pluginRoot

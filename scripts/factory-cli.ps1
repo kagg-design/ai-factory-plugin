@@ -992,6 +992,16 @@ function Write-CliGo {
 
     $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
+    $mergeGateApprovedCommit = ''
+    if ([bool](Get-CliProperty -InputObject $task -Name 'mergeGate' -Default $false)) {
+        if ([Console]::IsInputRedirected) {
+            throw "Merge gate requires an interactive terminal. Run 'factory go $TaskId' there and answer YES."
+        }
+        Write-Output "Merge gate: task $TaskId will publish reviewed commit $([string]$task.commit)."
+        $confirmation = Read-Host 'Igor, type YES to merge'
+        if ($confirmation -cne 'YES') { throw 'Merge gate declined; nothing was approved.' }
+        $mergeGateApprovedCommit = [string]$task.commit
+    }
     if ($DirectApproval) {
         $readiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $task -RepositoryRoot ([string]$Repository)
         if (-not [bool]$readiness.ready) {
@@ -1002,6 +1012,7 @@ function Write-CliGo {
         Invoke-CliJsonScript -ScriptName "approve-direct.ps1" -Arguments @(
             "-Repository", [string]$Repository,
             "-TaskId", $TaskId,
+            "-MergeGateApprovedCommit", $mergeGateApprovedCommit,
             "-ClaudeCommand", $ClaudeCommand
         )
     } else {
@@ -1009,6 +1020,7 @@ function Write-CliGo {
             "-Repository", [string]$Repository,
             "-Action", "go",
             "-TaskId", $TaskId,
+            "-MergeGateApprovedCommit", $mergeGateApprovedCommit,
             "-ClaudeCommand", $ClaudeCommand
         )
     }

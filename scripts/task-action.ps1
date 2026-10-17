@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry", "release")][string]$Action,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$Instructions = "",
+    [string]$MergeGateApprovedCommit = "",
     [string]$ClaudeCommand = "",
     [string]$CodexCommand = ""
 )
@@ -31,6 +32,10 @@ try {
 
     switch ($Action) {
         "go" {
+            if ([bool](Get-FactoryNestedValue -Target $task -Name 'mergeGate' -Default $false) -and
+                $MergeGateApprovedCommit -ne [string]$task.commit) {
+                throw "Merge gate for '$TaskId' requires Igor's explicit terminal YES for commit '$($task.commit)'."
+            }
             if ([string]$task.status -notin @("awaiting-review", "held")) {
                 throw "Task '$TaskId' is '$($task.status)', not awaiting review."
             }

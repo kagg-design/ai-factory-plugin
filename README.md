@@ -308,6 +308,11 @@ factory new "Describe the change"
 An Asana connector is needed only when the Codex orchestrator must read an
 Asana URL. It can be connected later without changing local task operation.
 
+For optional unattended intake from the [RAD] Asana board and the rock
+orchestrator launcher, see [Factory and Asana](docs/ASANA-INTEGRATION.md). This
+path uses a PAT in the factory's environment and does not require a ChatGPT
+Asana connection.
+
 ### Conversation language
 
 Set the language used for orchestrator, scheduler, and worker conversation in

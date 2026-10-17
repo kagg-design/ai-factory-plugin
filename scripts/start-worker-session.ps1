@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "worker-launch.ps1")
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "asana-common.ps1")
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -231,6 +232,60 @@ try {
 
     New-Item -ItemType Directory -Path $eventDirectory -Force | Out-Null
 
+    $sourceAdapter = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'source') -Name 'adapter' -Default '')
+    $asanaMode = [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false)
+    $asanaNotes = ''
+    if ($asanaMode) { $null = Get-FactoryAsanaToken -Config $config }
+    if ($sourceAdapter -eq 'asana' -and [Environment]::GetEnvironmentVariable([string]$config.asana.tokenEnv)) {
+        try {
+            $asanaTask = Get-FactoryAsanaTask -Config $config -Gid $TaskId
+            $factoryValue = Get-FactoryAsanaField -Task $asanaTask -Gid ([string]$config.asana.fields.factory)
+            if ($factoryValue) {
+                $asanaMode = $true
+                $asanaNotes = [string]$asanaTask.notes
+                if ($factoryValue -eq [string]$config.asana.fields.ready) {
+                    Set-FactoryAsanaField -Config $config -Gid $TaskId -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.taken)
+                    Move-FactoryAsanaTask -Config $config -Gid $TaskId -Section ([string]$config.asana.sections.inProgress)
+                    $null = Add-FactoryAsanaComment -Config $config -Gid $TaskId -Text "TAKEN (factory): worker $TaskId, worktree $(Split-Path $worktree -Leaf)."
+                    Write-FactoryAsanaTransition -Context $context -Gid $TaskId -From 'Ready' -To 'Taken' -WorkerId $TaskId
+                    $factoryValue = [string]$config.asana.fields.taken
+                }
+                $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+                try {
+                    $state = Read-FactoryJson -Path $context.statePath
+                    $savedTask = Get-FactoryTask -State $state -TaskId $TaskId
+                    Set-FactoryProperty -Target $savedTask -Name 'asanaMode' -Value $true
+                    Set-FactoryProperty -Target $savedTask -Name 'asanaState' -Value $(if ($factoryValue -eq [string]$config.asana.fields.question) { 'Question' } else { 'Taken' })
+                    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+                } finally { Exit-FactoryMutex -Mutex $mutex }
+            }
+        } catch {
+            if ($asanaMode) { throw }
+            # Manual add/new must continue in terminal mode when Asana is unavailable.
+        }
+    }
+    $specPath = ''
+    if ($asanaMode -and $asanaNotes -match '(?i)docs/tasks/(TASK-[A-Z0-9-]+-\d{3}-[a-z0-9-]+\.md)') {
+        $specPath = 'docs/tasks/' + $Matches[1]
+        $specFile = Join-Path $worktree ($specPath -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $specFile -PathType Leaf) -or
+            [IO.File]::ReadAllText($specFile) -cne $asanaNotes) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $specFile) -Force | Out-Null
+            [IO.File]::WriteAllText($specFile, $asanaNotes, (New-Object Text.UTF8Encoding($false)))
+        }
+    }
+    $mergeGate = $asanaMode -and $asanaNotes -match '(?i)Merge gate:\s*ask Igor before merging'
+    if ($asanaMode) {
+        $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+        try {
+            $state = Read-FactoryJson -Path $context.statePath
+            $savedTask = Get-FactoryTask -State $state -TaskId $TaskId
+            Set-FactoryProperty -Target $savedTask -Name 'asanaSpecPath' -Value $specPath
+            Set-FactoryProperty -Target $savedTask -Name 'mergeGate' -Value ([bool]$mergeGate)
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        } finally { Exit-FactoryMutex -Mutex $mutex }
+    }
+
     $taskPayload = [ordered]@{
         taskId = [string]$task.id
         url = $task.url
@@ -238,6 +293,10 @@ try {
         brief = [string]$task.brief
         acceptanceCriteria = @($task.acceptanceCriteria)
         sourceNotes = @($task.sourceNotes)
+        asanaMode = $asanaMode
+        asanaSpecPath = $specPath
+        asanaQuestionScript = if ($asanaMode) { Join-Path ([string]$context.pluginRoot) 'scripts\asana-question.ps1' } else { $null }
+        mergeGate = [bool]$mergeGate
         launchMode = $Mode
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)
@@ -282,6 +341,22 @@ $pendingInstructions
 "@
     } else { "" }
 
+    $asanaInstruction = if ($asanaMode) {
+@"
+
+ASANA_MODE
+Ask implementation questions by running asanaQuestionScript with -Repository,
+-TaskId, -Question, -QuestionContext, -Options and -Default. After posting a
+question, emit a blocked FACTORY_RESULT and stop. The factory will resume you
+with every comment after the question once the Asana Factory field returns to
+Taken. Do not ask routine questions in the terminal. Include the Asana spec
+file verbatim in your task commit; if asanaSpecPath is empty, find the intended
+docs/tasks/TASK-<AREA>-<NNN>-slug.md path from the task description. The
+factory owns Asana Done and Failed transitions after your result. A merge gate
+is enforced by the operator's terminal approval before publication.
+"@
+    } else { '' }
+
     $prompt = @"
 You are the dedicated worker session for one Factory task.
 
@@ -301,6 +376,7 @@ marker tokens. If a follow-up is needed, refer to "the result above".
 FACTORY_TASK
 $payloadJson
 $reworkInstruction
+$asanaInstruction
 "@
 
     if ($workerRuntime -eq "codex") {

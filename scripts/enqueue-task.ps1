@@ -8,6 +8,8 @@ param(
     [Parameter(ParameterSetName = "LocalFile")][string]$FileTitle = "",
     [Parameter(ParameterSetName = "Local")]
     [Parameter(ParameterSetName = "LocalFile")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
+    [switch]$NoResume,
+    [switch]$AsanaMode,
     [string]$ClaudeCommand = ""
 )
 
@@ -228,6 +230,7 @@ foreach ($requiredProperty in $allowedProperties) {
 if ([int]$normalized.version -ne 1) { throw "Unsupported normalized intake version '$($normalized.version)'." }
 if ([string]$normalized.startMode -notin @("interactive", "auto")) { throw "Invalid intake start mode." }
 $identity = Resolve-NormalizedSource -Source $normalized.source
+if ($AsanaMode -and [string]$identity.adapter -ne 'asana') { throw 'AsanaMode requires an Asana source.' }
 if ([string]$identity.adapter -eq "local" -and -not $isLocalIntake) {
     throw "The local source adapter is reserved for native 'factory new' tasks."
 }
@@ -284,6 +287,10 @@ try {
                 suppliedUrl = [string]$identity.suppliedUrl
                 normalizedAt = $now
             }
+            asanaMode = [bool]$AsanaMode
+            asanaState = if ($AsanaMode) { 'Taken' } else { $null }
+            asanaQuestion = $null
+            asanaSyncedState = $null
             startMode = [string]$normalized.startMode
             status = if ($sourceError) { "blocked" } else { "queued" }
             attempts = 0
@@ -333,7 +340,7 @@ try {
 if ($consumePaths.Count -gt 0) { Remove-ConsumedIntakeFiles -Paths $consumePaths }
 $scheduler = $null
 $schedulerError = $null
-if (-not $duplicate -and [string]$task.status -eq "queued") {
+if (-not $NoResume -and -not $duplicate -and [string]$task.status -eq "queued") {
     $schedulerRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "factory-scheduler.ps1"),
         "-Action", "resume",

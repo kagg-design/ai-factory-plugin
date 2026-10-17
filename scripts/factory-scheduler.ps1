@@ -570,6 +570,36 @@ function Invoke-SchedulerTick {
         $errors = New-Object Collections.Generic.List[string]
 
         $state = Read-FactoryJson -Path ([string]$context.statePath)
+        $asanaConfig = Read-FactoryJson -Path ([string]$context.configPath)
+        if (-not [bool]$state.paused) {
+            $asanaEnabled = [bool](Get-CliSafeProperty -InputObject (Get-CliSafeProperty -InputObject $asanaConfig -Name 'asana') -Name 'enabled' -Default $false)
+            if ($asanaEnabled) { try {
+                $asanaPoll = Invoke-FactoryNativeProcess -Command 'powershell' -Arguments @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'asana-poller.ps1'),
+                    '-Repository', [string]$context.repositoryRoot
+                ) -TimeoutSeconds 120
+                if ([int]$asanaPoll.exitCode -ne 0) { throw [string]$asanaPoll.output }
+                if ([string]$asanaPoll.stdout -match 'Claimed:') {
+                    Write-SchedulerLog -Stream stdout -Event 'asana-poll' -Values @{ result = [string]$asanaPoll.stdout }
+                }
+            } catch {
+                $errors.Add("Asana poll failed: $($_.Exception.Message)")
+            } }
+            $state = Read-FactoryJson -Path ([string]$context.statePath)
+            if ($asanaEnabled -or @($state.tasks | Where-Object { [bool](Get-CliSafeProperty -InputObject $_ -Name 'asanaMode' -Default $false) }).Count -gt 0) { try {
+                $asanaSync = Invoke-FactoryNativeProcess -Command 'powershell' -Arguments @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'asana-sync.ps1'),
+                    '-Repository', [string]$context.repositoryRoot
+                ) -TimeoutSeconds 120
+                if ([int]$asanaSync.exitCode -ne 0) { throw [string]$asanaSync.output }
+                if ([string]$asanaSync.stdout) {
+                    Write-SchedulerLog -Stream stdout -Event 'asana-sync' -Values @{ result = [string]$asanaSync.stdout }
+                }
+            } catch {
+                $errors.Add("Asana sync failed: $($_.Exception.Message)")
+            } }
+            $state = Read-FactoryJson -Path ([string]$context.statePath)
+        }
         if ([bool]$state.active -and -not [bool]$state.paused) {
             $approved = @($state.tasks | Where-Object { [string]$_.status -eq "approved" } | Sort-Object createdAt, id)
             if ($approved.Count -gt 0) {

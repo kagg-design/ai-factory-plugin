@@ -11,6 +11,7 @@
     "agents/worker.md",
     "CHANGELOG.md",
     "docs/dev/PUBLICATION-CI.md",
+    "docs/ASANA-INTEGRATION.md",
     "cleanup-project.ps1",
     "config.default.json",
     "edit-project-config.ps1",
@@ -19,7 +20,10 @@
     "hooks/hooks.json",
     "LICENSE",
     "MANIFEST.json",
+    "install-rock-cycle-task.ps1",
     "README.md",
+    "rock-cycle.json",
+    "rock-cycle.ps1",
     "resources/codex-worker-instructions.md",
     "resources/intake.schema.json",
     "resources/plan.schema.json",
@@ -27,6 +31,11 @@
     "resources/result.schema.json",
     "resources/state.template.json",
     "scripts/answer-task.ps1",
+    "scripts/asana-common.ps1",
+    "scripts/asana-poller.ps1",
+    "scripts/asana-question.ps1",
+    "scripts/asana-sync.ps1",
+    "scripts/asana-terminal-answer.ps1",
     "scripts/attention-state.ps1",
     "scripts/approve-direct.ps1",
     "scripts/capture-worker-stop.ps1",
@@ -84,6 +93,7 @@
     "tests/FakePsql.cs",
     "tests/FakePreviewServer.ps1",
     "tests/run-tests.ps1",
+    "tests/asana-integration.tests.ps1",
     "tests/factory-status.tests.ps1",
     "tests/claude-orchestrator-lifecycle.tests.ps1",
     "tests/local-file-intake.tests.ps1",
@@ -100,6 +110,7 @@
     "tests/state-ledger.tests.ps1",
     "tests/scheduler-ledger.tests.ps1",
     "docs/state-ledger-safety.md",
-    "docs/completed-task-archive.md"
+    "docs/completed-task-archive.md",
+    "uninstall-rock-cycle-task.ps1"
   ]
 }
