@@ -1,84 +1,97 @@
 # Factory and Asana
 
-The optional Asana integration uses the [RAD] Central Ticket Intake project
-(`1215506997644941`). The board is
-<https://app.asana.com/1/14748072439266/project/1215506997644941/board/1215507205009630>.
-It talks directly to Asana's API with a personal access token; ChatGPT access
-to Asana is not required.
+The optional integration uses the [RAD] Central Ticket Intake
+[board](https://app.asana.com/1/14748072439266/project/1215506997644941/board/1215507205009630).
+The factory and rock launcher use a personal access token through the Asana API.
+ChatGPT access to Asana is not required.
 
 ## Factory setup
 
-1. Set `FACTORY_ASANA_TOKEN` in the environment that starts the factory. Keep
-   the token out of config files and logs. The account must be able to read and
-   update tasks in the project.
-2. Run `factory config path` for the target repository. In that private config,
-   set `asana.enabled` to `true` and `launcher.path` to the absolute path of
-   `rock-cycle.ps1`. For multiple rock epics, set `launcher.epicGids` to their
-   Asana task IDs. The shipped default stays disabled
-   until setup is complete.
-3. The factory's scheduler polls every five minutes. To inspect candidates
-   without changing local state or Asana, run:
+1. Set `FACTORY_ASANA_TOKEN` for the Windows account that runs the factory.
+   Keep the token out of files, logs, and comments.
+2. Run `factory config path` for the target repository. Set `asana.enabled`
+   to `true` and `launcher.path` to the absolute path of `rock-cycle.ps1`.
+   The shipped default is disabled until setup is complete.
+3. Preview candidate tasks without writing local state or Asana:
 
    ```powershell
    powershell -NoProfile -File scripts\asana-poller.ps1 -Repository C:\path\to\awesomehr -DryRun
    ```
 
-   The scheduler invokes the poller and question/completion synchronizer while
-   the factory is active. A paused factory does not poll or sync.
+The scheduler polls every five minutes while the factory is active. It claims
+only tasks with Factory = Ready, in priority and creation order, up to two
+active Asana workers. A task whose description begins `Repo: owner/name` is
+skipped when the configured repository's Git remote identifies another repo.
+A task without a Factory value keeps the existing terminal flow.
 
-Tasks with Factory = Ready are claimed in priority and creation order, with a
-maximum of two active Asana workers. A task with no Factory value retains the
-existing terminal flow. Asana questions are posted as task comments; the worker
-resumes after the field returns to Taken and all later comments are collected.
-The 24-hour fallback opens a terminal prompt for Igor. A task whose description
-contains `Merge gate: ask Igor before merging` requires `YES` in the `factory
-go` terminal before publication. Done is reported only after the native
-publication pipeline reaches its done state.
+The factory starts one rock launcher after Question, Done, or Failed. The
+launcher chooses orchestrators from the task's Asana dependents. Factory
+comments begin with `TAKEN (factory):`, `QUESTION (factory):`,
+`DONE (factory):`, or `FAILED (factory):`. Orchestrator comments identify
+their speaker with `[access-orchestrator]` or `[billing-orchestrator]`;
+answers begin `ANSWER (access-orchestrator):` or
+`ANSWER (billing-orchestrator):`. An untagged comment is Igor's. When answers
+conflict, Igor's answer takes precedence.
+
+Questions resume only after Factory returns to Taken and every subsequent
+comment is passed to the worker. After 24 hours, the terminal fallback posts
+`ANSWER (Igor via terminal):`. A task that says
+`Merge gate: ask Igor before merging` still requires Igor's explicit YES
+before publication. Done is reported only after the native publication
+pipeline reaches done.
 
 ## Rock launcher setup
 
-1. Edit `rock-cycle.json` for shared settings. Its `epicGid` and `epicUrl`
-   select the default task; `-EpicGid` selects another task on the same Asana
-   board. Set `repoPath` to a clean, read-only AwesomeHR checkout. Keep
-   `stateDir` writable and outside the checkout. The launcher puts each epic's lock,
-   state and logs in its own `stateDir\<epicGid>` directory and uses a separate
-   mutex. If both configs point to the same checkout, their permitted
-   `git fetch` commands can contend for Git metadata; use separate checkouts
-   for full parallelism, or remove `Bash(git fetch *)` from `allowedTools`.
-2. Confirm `claude mcp list` shows an Asana server named `asana`. Check a
-   non-interactive call with `claude -p "list my Asana workspaces"
-   --allowedTools mcp__asana`. Claude Code must already be logged in.
-3. Set the same token environment variable for Igor's Windows logon session.
-   Check the launcher's decision with `powershell -NoProfile -File
-   .\rock-cycle.ps1 -DryRun -EpicGid 1219601019224697` and repeat with
-   `-EpicGid 1219601069124635`. These read Asana but
-   write no state and do not start Claude.
-4. Install one scheduled task per epic:
+1. Edit `rock-cycle.json`. It defines the named `access` and `billing`
+   orchestrators, their epic GIDs, and their `repoPath` and `extraDirs`.
+   Replace every placeholder path with a clean read-only checkout or directory.
+   Several orchestrators may share the same checkout because this launcher
+   runs their Claude processes sequentially. Its global mutex also prevents
+   separate launcher processes from overlapping.
+2. Confirm `claude mcp list` shows Asana connected. Check a
+   non-interactive call with
+   `claude -p "list my Asana workspaces" --allowedTools mcp__asana`.
+   Claude Code must already be logged in.
+3. Preview both decisions, or one named orchestrator:
 
    ```powershell
-   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -EpicGid 1219601019224697
-   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -EpicGid 1219601069124635
+   powershell -NoProfile -File .\rock-cycle.ps1 -DryRun
+   powershell -NoProfile -File .\rock-cycle.ps1 -Epic access -DryRun
+   powershell -NoProfile -File .\rock-cycle.ps1 -Epic billing -DryRun
    ```
 
-   The task name includes the epic GID, so the second install does not replace
-   the first. Both run every 30 minutes while Igor is logged on, start missed
-   runs when possible, and ignore overlap within the same epic. Remove each
-   with `uninstall-rock-cycle-task.ps1 -EpicGid <gid>`.
+   `-EpicGid <gid>` remains accepted as a compatibility alias for a
+   configured epic. `-Task <gid>` looks up that task's Asana dependents and
+   selects every configured epic among them. If none match, both epic change
+   checks run without forcing Claude. `-DryRun` reads Asana but writes no
+   state and does not start Claude.
+4. Install one scheduled task to run both orchestrators every 30 minutes:
 
-The launcher checks the epic and every dependency for changes and runs Claude
-once daily after 09:00 local time even if nothing changed. `/pause` and
-`/resume` comments by Igor on the epic control it. Factory wake-ups after
-Question, Done, or Failed request an immediate cycle. When `launcher.epicGids`
-lists both tasks, the factory starts both launchers and each ignores a hint
-task outside its epic and direct dependencies. An existing cycle keeps its
-own lock and the scheduled run catches up. `-Task` is a hint and wake-up filter;
-`-EpicGid` selects the root task, or the config's `epicGid` by default. This is a
-launcher scope check and prompt instruction, not an Asana permission boundary
-for Claude's MCP access.
+   ```powershell
+   powershell -NoProfile -File .\install-rock-cycle-task.ps1
+   ```
+
+   It runs only while Igor is logged on, starts missed runs when possible,
+   and ignores overlapping scheduled runs. Remove it with
+   `uninstall-rock-cycle-task.ps1`.
+
+The launcher checks each epic and its dependencies for changes. A task may be
+owned by one orchestrator as an epic child and watched by another as a
+dependency. Both see its changes; the watcher is instructed to treat it as
+read-only. Claude's Asana MCP permissions are broader than this instruction,
+so correct ownership still depends on the epic instructions and the agent
+following them. Claude runs in `dontAsk` mode with Edit, Write, and NotebookEdit
+denied. The launcher runs access, then billing, one Claude process
+at a time. Each has `stateDir\<name>` for its lock, state, and logs.
+An untagged `/pause` or `/resume` comment by Igor on one epic controls only
+that orchestrator. Each runs once daily after 09:00 local time even without
+other changes.
 
 ## Verification
 
-`tests/asana-integration.tests.ps1` covers the Done payload, Ready ordering,
-and search fallback without contacting Asana. Live acceptance needs a sandbox
-task and the token: check Ready → Taken, Question → Taken, Done, Failed,
-timeout fallback, and duplicate polling before enabling unattended intake.
+`tests/asana-integration.tests.ps1` covers factory fields, repo routing,
+comment tags, named rock selection, pause handling, and pagination without
+contacting Asana. Live acceptance needs sandbox tasks and the token: verify
+Ready → Taken, Question → Taken, Done, Failed, timeout fallback, duplicate
+polling, shared-task cross-wakes, and separate pause controls before
+enabling unattended intake.

@@ -11,9 +11,14 @@ $ErrorActionPreference = 'Stop'
 
 function Get-AsanaPriorityRank {
     param($Task)
-    foreach ($field in @($Task.custom_fields)) {
+    $customFields = $Task.PSObject.Properties['custom_fields']
+    if ($null -eq $customFields) { return 3 }
+    foreach ($field in @($customFields.Value)) {
+        if ($null -eq $field) { continue }
         if ([string]$field.name -ne 'Priority') { continue }
-        $value = if ($field.enum_value) { [string]$field.enum_value.name } else { [string]$field.text_value }
+        $enumValue = $field.PSObject.Properties['enum_value']
+        $textValue = $field.PSObject.Properties['text_value']
+        $value = if ($null -ne $enumValue -and $null -ne $enumValue.Value) { [string]$enumValue.Value.name } elseif ($null -ne $textValue) { [string]$textValue.Value } else { '' }
         switch ($value.ToLowerInvariant()) {
             'high' { return 0 }
             'medium' { return 1 }
@@ -84,6 +89,7 @@ try {
     $capacity = [Math]::Max(0, [int]$config.poll.maxParallelWorkers - $held)
     $ready = @(Get-ReadyTasks -Config $config)
     $selected = New-Object Collections.Generic.List[object]
+    $repositorySlug = ''
     foreach ($task in $ready) {
         if ($selected.Count -ge $capacity) { break }
         $gid = [string]$task.gid
@@ -94,6 +100,11 @@ try {
         if ([bool]$fresh.completed -or
             (Get-FactoryAsanaField -Task $fresh -Gid ([string]$config.asana.fields.factory)) -ne [string]$config.asana.fields.ready) {
             continue
+        }
+        $targetRepo = Get-FactoryAsanaTaskRepo -Notes ([string]$fresh.notes)
+        if ($targetRepo) {
+            if (-not $repositorySlug) { $repositorySlug = Get-FactoryRepositorySlug -Repository ([string]$context.repositoryRoot) -Remote ([string]$config.remote) }
+            if ($targetRepo -ne $repositorySlug) { continue }
         }
         $selected.Add($fresh)
     }
@@ -128,6 +139,11 @@ try {
             if ([bool]$fresh.completed -or
                 (Get-FactoryAsanaField -Task $fresh -Gid ([string]$config.asana.fields.factory)) -ne [string]$config.asana.fields.ready) {
                 continue
+            }
+            $targetRepo = Get-FactoryAsanaTaskRepo -Notes ([string]$fresh.notes)
+            if ($targetRepo) {
+                if (-not $repositorySlug) { $repositorySlug = Get-FactoryRepositorySlug -Repository ([string]$context.repositoryRoot) -Remote ([string]$config.remote) }
+                if ($targetRepo -ne $repositorySlug) { continue }
             }
             Set-FactoryAsanaField -Config $config -Gid $gid -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.taken)
             $phase = 'move'

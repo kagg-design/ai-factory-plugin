@@ -36,6 +36,18 @@ Assert-AsanaIntegration ($call.method -eq 'PUT' -and $call.path -eq '/tasks/123'
 Assert-AsanaIntegration ($call.data.completed -eq $true) 'Done did not complete the Asana task.'
 Assert-AsanaIntegration ($call.data.custom_fields[[string]$config.asana.fields.factory] -eq [string]$config.asana.fields.done) 'Done did not set Factory = Done.'
 Assert-AsanaIntegration ($call.data.custom_fields[[string]$config.asana.fields.resolution] -eq [string]$config.asana.fields.resolutionFixed) 'Done did not set Resolution = Fixed.'
+Assert-AsanaIntegration ((Get-FactoryAsanaTaskRepo -Notes ("Repo: awesomemotive/motivehr" + [Environment]::NewLine + "Build this")) -eq 'awesomemotive/motivehr') 'Repo routing header was not read.'
+Assert-AsanaIntegration (-not (Get-FactoryAsanaTaskRepo -Notes ("Build this" + [Environment]::NewLine + "Repo: other/repo"))) 'A later Repo line was treated as a routing header.'
+Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'ANSWER (billing-orchestrator): B') -eq 'billing-orchestrator') 'Billing answer tag was ignored.'
+Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'Igor says A') -eq 'Igor') 'Untagged Igor comment was misclassified.'
+Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'ANSWER (Igor via terminal): A') -eq 'Igor') 'Igor terminal answer was misclassified.'
+
+& {
+    Set-StrictMode -Version 2.0
+    $fieldWithoutValue = [pscustomobject]@{ gid = [string]$config.asana.fields.factory; name = 'Factory' }
+    $taskWithoutValue = [pscustomobject]@{ custom_fields = @($fieldWithoutValue) }
+    Assert-AsanaIntegration ((Get-FactoryAsanaField -Task $taskWithoutValue -Gid ([string]$config.asana.fields.factory)) -eq '') 'An unset Asana field failed under strict mode.'
+}
 
 & {
     Set-StrictMode -Version 2.0
@@ -56,6 +68,11 @@ foreach ($name in @('Get-AsanaPriorityRank', 'Get-ReadyTasks')) {
     $functionAst = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true))[0]
     Assert-AsanaIntegration ($null -ne $functionAst) "Missing poller function $name."
     . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+& {
+    Set-StrictMode -Version 2.0
+    $priorityWithoutValue = [pscustomobject]@{ custom_fields = @([pscustomobject]@{ name = 'Priority' }) }
+    Assert-AsanaIntegration ((Get-AsanaPriorityRank -Task $priorityWithoutValue) -eq 3) 'An unset Priority field failed under strict mode.'
 }
 
 function New-ReadyFixture {
@@ -103,7 +120,7 @@ Assert-AsanaIntegration ($script:seenPaths[1] -like '/projects/*/tasks*') 'Polle
 $rockSource = Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.ps1') -Raw
 $rockAst = [Management.Automation.Language.Parser]::ParseInput($rockSource, [ref]$tokens, [ref]$parseErrors)
 Assert-AsanaIntegration (@($parseErrors).Count -eq 0) 'Rock launcher does not parse.'
-foreach ($name in @('ConvertTo-RockTimestamp', 'Get-RockLockStatus', 'Test-RockAfter', 'Get-RockInstancePaths', 'Test-RockTaskInScope', 'Get-RockEpicUrl')) {
+foreach ($name in @('ConvertTo-RockTimestamp', 'Get-RockLockStatus', 'Test-RockAfter', 'Get-RockInstancePaths', 'Get-RockPauseControl', 'Test-RockEpicUrl', 'Select-RockOrchestrators')) {
     $functionAst = @($rockAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true))[0]
     Assert-AsanaIntegration ($null -ne $functionAst) "Missing rock launcher function $name."
     . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -119,21 +136,38 @@ try {
 $boundary = [DateTimeOffset]::Parse('2026-10-17T10:00:00Z')
 Assert-AsanaIntegration (Test-RockAfter -Value '2026-10-17T10:00:01Z' -Boundary $boundary) 'A new Asana change was missed.'
 Assert-AsanaIntegration (-not (Test-RockAfter -Value '2026-10-17T10:00:00Z' -Boundary $boundary)) 'The last run boundary retriggered a cycle.'
-$firstPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601019224697'
-$secondPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601069124635'
+$firstPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -Name 'access' -EpicGid '1219601019224697'
+$secondPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -Name 'billing' -EpicGid '1219601069124635'
 Assert-AsanaIntegration ($firstPaths.stateDir -ne $secondPaths.stateDir) 'Different epics share rock state.'
 Assert-AsanaIntegration ($firstPaths.mutexName -ne $secondPaths.mutexName) 'Different epics share a rock mutex.'
-Assert-AsanaIntegration ($firstPaths.mutexName -eq (Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601019224697').mutexName) 'The same epic bypasses its mutex.'
-$dependencies = @([pscustomobject]@{ gid = '123' })
-Assert-AsanaIntegration (Test-RockTaskInScope -TaskGid '1219601019224697' -EpicGid '1219601019224697' -Dependencies $dependencies) 'Epic wake-up was rejected.'
-Assert-AsanaIntegration (Test-RockTaskInScope -TaskGid '123' -EpicGid '1219601019224697' -Dependencies $dependencies) 'Dependency wake-up was rejected.'
-Assert-AsanaIntegration (-not (Test-RockTaskInScope -TaskGid '456' -EpicGid '1219601019224697' -Dependencies $dependencies)) 'Unrelated wake-up reached an epic.'
-$baseEpicUrl = (Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.json') -Raw | ConvertFrom-Json).epicUrl
-$selectedEpicUrl = Get-RockEpicUrl -ConfiguredUrl $baseEpicUrl -ConfiguredGid '1219601019224697' -TargetGid '1219601069124635'
-Assert-AsanaIntegration ($selectedEpicUrl -eq 'https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601069124635') 'Explicit epic GID selected the wrong Asana task.'
+Assert-AsanaIntegration ($firstPaths.stateDir -like '*\access') 'Rock state directory does not use the orchestrator name.'
+$rockConfig = Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.json') -Raw | ConvertFrom-Json
+$rockOrchestrators = @($rockConfig.orchestrators)
+Assert-AsanaIntegration ($rockOrchestrators.Count -eq 2) 'Rock config must list both orchestrators.'
+foreach ($orchestrator in $rockOrchestrators) {
+    Assert-AsanaIntegration (Test-RockEpicUrl -Url $orchestrator.epicUrl -EpicGid $orchestrator.epicGid) "Bad epic URL for $($orchestrator.name)."
+}
+$sharedDependents = @(
+    [pscustomobject]@{ gid = '1219601019224697' },
+    [pscustomobject]@{ gid = '1219601069124635' }
+)
+$selected = Select-RockOrchestrators -Orchestrators $rockOrchestrators -TaskGid '1219600878763453' -Dependents $sharedDependents
+Assert-AsanaIntegration ((@($selected.items).name -join ',') -eq 'access,billing' -and -not $selected.fallback) 'Shared task did not wake both orchestrators.'
+$selected = Select-RockOrchestrators -Orchestrators $rockOrchestrators -TaskGid 'access-only' -Dependents @([pscustomobject]@{ gid = '1219601019224697' })
+Assert-AsanaIntegration ((@($selected.items).name -join ',') -eq 'access') 'Access-only task woke billing.'
+$selected = Select-RockOrchestrators -Orchestrators $rockOrchestrators -TaskGid 'unknown' -Dependents @()
+Assert-AsanaIntegration (@($selected.items).Count -eq 2 -and $selected.fallback) 'Unknown task did not fall back to change checks for both.'
+$selected = Select-RockOrchestrators -Orchestrators $rockOrchestrators -EpicName 'billing'
+Assert-AsanaIntegration ((@($selected.items).name -join ',') -eq 'billing') 'Explicit -Epic selected the wrong orchestrator.'
+$stories = @(
+    [pscustomobject]@{ gid = '1'; created_at = '2026-10-17T09:00:00Z'; created_by = [pscustomobject]@{ gid = '1201416335822270' }; text = '/pause' },
+    [pscustomobject]@{ gid = '2'; created_at = '2026-10-17T10:00:00Z'; created_by = [pscustomobject]@{ gid = '1201416335822270' }; text = '[billing-orchestrator] /resume' }
+)
+Assert-AsanaIntegration ((Get-RockPauseControl -Stories $stories -IgorGid '1201416335822270') -eq 'paused') 'Tagged orchestrator control changed pause state.'
+$stories += [pscustomobject]@{ gid = '3'; created_at = '2026-10-17T11:00:00Z'; created_by = [pscustomobject]@{ gid = '1201416335822270' }; text = '/resume' }
+Assert-AsanaIntegration ((Get-RockPauseControl -Stories $stories -IgorGid '1201416335822270') -eq 'resumed') 'Untagged Igor resume was ignored.'
 
 $config.launcher.path = Join-Path $PluginRoot 'rock-cycle.ps1'
-$config.launcher.epicGids = @('1219601019224697', '1219601069124635')
 $script:launchArgs = New-Object Collections.Generic.List[string]
 function ConvertTo-FactoryWindowsArgument { param([string]$Value) return '"' + $Value + '"' }
 function Start-Process {
@@ -142,18 +176,14 @@ function Start-Process {
     return [pscustomobject]@{ Id = 1 }
 }
 Start-FactoryRockCycle -Config $config -Reason 'Done' -Gid '123'
-Assert-AsanaIntegration ($script:launchArgs.Count -eq 2) 'Factory wake-up did not start both rock epics.'
-Assert-AsanaIntegration ($script:launchArgs[0] -like '*-EpicGid*1219601019224697*' -and $script:launchArgs[1] -like '*-EpicGid*1219601069124635*') 'Factory wake-up used the wrong epic GIDs.'
-$legacyConfig = [pscustomobject]@{ launcher = [pscustomobject]@{ path = $config.launcher.path } }
-Start-FactoryRockCycle -Config $legacyConfig -Reason 'Done' -Gid '123'
-Assert-AsanaIntegration ($script:launchArgs.Count -eq 3 -and $script:launchArgs[2] -notlike '*-EpicGid*') 'Legacy single-epic launcher stopped working.'
+Assert-AsanaIntegration ($script:launchArgs.Count -eq 1) 'Factory wake-up started multiple rock launchers.'
+Assert-AsanaIntegration ($script:launchArgs[0] -like '*-Task*123*' -and $script:launchArgs[0] -notlike '*-EpicGid*') 'Factory wake-up did not delegate task selection to rock-cycle.'
 
-foreach ($scriptName in @('rock-cycle.ps1', 'install-rock-cycle-task.ps1', 'uninstall-rock-cycle-task.ps1')) {
+foreach ($scriptName in @('rock-cycle.ps1', 'install-rock-cycle-task.ps1')) {
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = (Get-Process -Id $PID).Path
     $scriptPath = Join-Path $PluginRoot $scriptName
-    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -EpicGid invalid' -f $scriptPath
-    if ($scriptName -eq 'rock-cycle.ps1') { $startInfo.Arguments += ' -DryRun' }
+    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $scriptPath, (Join-Path $PluginRoot 'missing-rock-config.json')
     $startInfo.WorkingDirectory = [IO.Path]::GetTempPath()
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
@@ -161,7 +191,7 @@ foreach ($scriptName in @('rock-cycle.ps1', 'install-rock-cycle-task.ps1', 'unin
     $process = [Diagnostics.Process]::Start($startInfo)
     $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
     $process.WaitForExit()
-    Assert-AsanaIntegration ($process.ExitCode -ne 0 -and $output -match 'GID must be numeric|Invalid epicGid') "$scriptName did not resolve its default config from another directory."
+    Assert-AsanaIntegration ($process.ExitCode -ne 0 -and $output -match 'Rock config not found') "$scriptName failed before checking its config path."
 }
 
-Write-Host 'Asana integration tests passed (Done payload, Ready ordering, search fallback, rock isolation and wake-up routing).' -ForegroundColor Green
+Write-Host 'Asana integration tests passed (factory fields, repo routing, comment tags, rock selection and pause control).' -ForegroundColor Green

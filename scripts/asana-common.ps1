@@ -47,10 +47,16 @@ function Get-FactoryAsanaPages {
 
 function Get-FactoryAsanaField {
     param($Task, [string]$Gid)
-    foreach ($field in @($Task.custom_fields)) {
+    $customFields = $Task.PSObject.Properties['custom_fields']
+    if ($null -eq $customFields) { return '' }
+    foreach ($field in @($customFields.Value)) {
+        if ($null -eq $field) { continue }
         if ([string]$field.gid -eq $Gid) {
-            if ($field.enum_value) { return [string]$field.enum_value.gid }
-            return [string]$field.text_value
+            $enumValue = $field.PSObject.Properties['enum_value']
+            if ($null -ne $enumValue -and $null -ne $enumValue.Value) { return [string]$enumValue.Value.gid }
+            $textValue = $field.PSObject.Properties['text_value']
+            if ($null -ne $textValue) { return [string]$textValue.Value }
+            return ''
         }
     }
     return ''
@@ -95,6 +101,31 @@ function Get-FactoryAsanaComments {
         Sort-Object created_at, gid)
 }
 
+function Get-FactoryAsanaCommentActor {
+    param([string]$Text)
+    if ($Text -match '^\s*(?:\[access-orchestrator\]|ANSWER \(access-orchestrator\):)') { return 'access-orchestrator' }
+    if ($Text -match '^\s*(?:\[billing-orchestrator\]|ANSWER \(billing-orchestrator\):)') { return 'billing-orchestrator' }
+    if ($Text -match '^\s*ANSWER \(Igor via terminal\):') { return 'Igor' }
+    if ($Text -match '^\s*(?:TAKEN|QUESTION|DONE|FAILED) \(factory\):') { return 'factory' }
+    return 'Igor'
+}
+
+function Get-FactoryAsanaTaskRepo {
+    param([string]$Notes)
+    if ($Notes -match '\A(?:\uFEFF)?[ \t]*Repo:[ \t]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)[ \t]*(?:\r?\n|\z)') {
+        return $Matches[1].ToLowerInvariant()
+    }
+    return ''
+}
+
+function Get-FactoryRepositorySlug {
+    param([string]$Repository, [string]$Remote = 'origin')
+    $remoteUrl = (& git -C $Repository remote get-url $Remote 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $remoteUrl) { throw "Could not read Git remote '$Remote' for Asana repo routing." }
+    if ([string]$remoteUrl -notmatch '[/:]([^/:]+/[^/:]+?)(?:\.git)?/?$') { throw "Could not identify owner/repo from Git remote '$Remote'." }
+    return $Matches[1].ToLowerInvariant()
+}
+
 function Move-FactoryAsanaTask {
     param($Config, [string]$Gid, [string]$Section)
     $null = Invoke-FactoryAsana -Config $Config -Method POST -Path "/sections/$Section/addTask" -Data @{ task = $Gid }
@@ -112,19 +143,8 @@ function Start-FactoryRockCycle {
     $path = [string]$Config.launcher.path
     if (-not $path) { return }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Rock launcher not found: $path" }
-    $epicGids = @()
-    if ($null -ne $Config.launcher.PSObject.Properties['epicGids']) {
-        $epicGids = @($Config.launcher.epicGids | Where-Object { [string]$_ })
-    }
-    foreach ($epicGid in $epicGids) {
-        if ([string]$epicGid -notmatch '^\d+$') { throw "Invalid launcher epic GID: $epicGid" }
-    }
     $hostPath = (Get-Process -Id $PID).Path
-    if ($epicGids.Count -eq 0) { $epicGids = @('') }
-    foreach ($epicGid in $epicGids) {
-        $items = @('-NoProfile', '-File', $path, '-Reason', $Reason, '-Task', $Gid)
-        if ($epicGid) { $items += @('-EpicGid', ([string]$epicGid)) }
-        $arguments = $items | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
-        $null = Start-Process -FilePath $hostPath -WindowStyle Hidden -ArgumentList ($arguments -join ' ') -PassThru
-    }
+    $items = @('-NoProfile', '-File', $path, '-Reason', $Reason, '-Task', $Gid)
+    $arguments = $items | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+    $null = Start-Process -FilePath $hostPath -WindowStyle Hidden -ArgumentList ($arguments -join ' ') -PassThru
 }

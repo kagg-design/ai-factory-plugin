@@ -38,7 +38,7 @@ try {
     Set-FactoryProperty -Target $task -Name 'asanaState' -Value 'Question'
     Set-FactoryProperty -Target $task -Name 'asanaQuestion' -Value ([pscustomobject][ordered]@{
         storyGid = [string]$story.gid
-        askedAt = if ($story.created_at) { [string]$story.created_at } else { Get-FactoryUtcTimestamp }
+        askedAt = if ($story.created_at) { (ConvertTo-FactoryUtcDateTime -Value $story.created_at).ToString('o') } else { Get-FactoryUtcTimestamp }
         text = $message
         fallbackStartedAt = $null
     })

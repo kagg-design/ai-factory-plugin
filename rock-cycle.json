@@ -1,9 +1,6 @@
 {
-  "repoPath": "C:\\path\\to\\awesomehr",
-  "epicGid": "1219601019224697",
-  "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601019224697",
-  "igorGid": "1201416335822270",
   "tokenEnv": "FACTORY_ASANA_TOKEN",
+  "igorGid": "1201416335822270",
   "stateDir": "%LOCALAPPDATA%\\rock-orchestrator",
   "claudePath": "claude",
   "timeoutMinutes": 45,
@@ -12,5 +9,21 @@
   "allowedTools": [
     "mcp__asana", "Read", "Grep", "Glob", "WebSearch", "WebFetch",
     "Bash(git fetch *)", "Bash(git log *)", "Bash(git show *)"
+  ],
+  "orchestrators": [
+    {
+      "name": "access",
+      "epicGid": "1219601019224697",
+      "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601019224697",
+      "repoPath": "C:\\path\\to\\awesomehr",
+      "extraDirs": []
+    },
+    {
+      "name": "billing",
+      "epicGid": "1219601069124635",
+      "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601069124635",
+      "repoPath": "C:\\path\\to\\awesomehr",
+      "extraDirs": ["C:\\path\\to\\cloud-infrastructure-auditors"]
+    }
   ]
 }

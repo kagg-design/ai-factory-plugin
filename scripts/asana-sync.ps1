@@ -36,7 +36,7 @@ foreach ($task in @($state.tasks | Where-Object {
         if ($question -and [string]$task.status -in @('blocked', 'held', 'awaiting-input')) {
             $lastCheck = [string](Get-FactoryNestedValue -Target $question -Name 'lastPolledAt' -Default '')
             if ($lastCheck -and
-                ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse($lastCheck)).TotalMinutes -lt [int]$config.questions.answerPollMinutes) {
+                ([DateTime]::UtcNow - (ConvertTo-FactoryUtcDateTime -Value $lastCheck)).TotalMinutes -lt [int]$config.questions.answerPollMinutes) {
                 continue
             }
             Set-FactoryProperty -Target $question -Name 'lastPolledAt' -Value (Get-FactoryUtcTimestamp)
@@ -52,16 +52,17 @@ foreach ($task in @($state.tasks | Where-Object {
                 $foundQuestion = $false
                 foreach ($comment in $comments) {
                     if ([string]$comment.gid -eq [string]$question.storyGid) { $foundQuestion = $true; continue }
-                    if ($foundQuestion -or ([DateTimeOffset]::Parse([string]$comment.created_at) -gt [DateTimeOffset]::Parse([string]$question.askedAt) -and
+                    if ($foundQuestion -or ((ConvertTo-FactoryUtcDateTime -Value $comment.created_at) -gt (ConvertTo-FactoryUtcDateTime -Value $question.askedAt) -and
                         [string]$comment.gid -ne [string]$question.storyGid)) {
                         $after.Add($comment)
                     }
                 }
                 if ($after.Count -eq 0) { continue }
                 $lines = @($after.ToArray() | ForEach-Object {
-                    "[$($_.created_at)] author $($_.created_by.gid): $($_.text)"
+                    $actor = Get-FactoryAsanaCommentActor -Text ([string]$_.text)
+                    "[$($_.created_at)] $actor`: $($_.text)"
                 })
-                $answer = "Asana comments after QUESTION (factory):`n" + ($lines -join "`n")
+                $answer = "Asana comments after QUESTION (factory). The leading comment tag identifies the speaker; the Asana account does not. If Igor's untagged answer or ANSWER (Igor via terminal) conflicts with an orchestrator's answer, follow Igor's. Read every comment below:`n" + ($lines -join "`n")
                 $result = Invoke-FactoryNativeProcess -Command 'powershell' -Arguments @(
                     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'answer-task.ps1'),
                     '-Repository', [string]$context.repositoryRoot, '-TaskId', $gid, '-Text', $answer, '-Mode', 'auto'
@@ -75,7 +76,7 @@ foreach ($task in @($state.tasks | Where-Object {
                 Write-Output "Resumed $gid from Asana answer."
             } elseif ($factoryValue -eq [string]$config.asana.fields.question -and
                 -not [string]$question.fallbackStartedAt -and
-                ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$question.askedAt)).TotalHours -ge [int]$config.questions.timeoutHours) {
+                ([DateTime]::UtcNow - (ConvertTo-FactoryUtcDateTime -Value $question.askedAt)).TotalHours -ge [int]$config.questions.timeoutHours) {
                 if (-not [Environment]::UserInteractive) { continue }
                 Set-FactoryProperty -Target $question -Name 'fallbackStartedAt' -Value (Get-FactoryUtcTimestamp)
                 Set-AsanaSyncState -TaskId $gid -Field 'asanaQuestion' -Value $question

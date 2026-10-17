@@ -23,7 +23,7 @@ if ((Get-FactoryAsanaField -Task $remote -Gid ([string]$config.asana.fields.fact
     Write-Output 'Task changed while waiting; answer was not posted.'
     return
 }
-$null = Add-FactoryAsanaComment -Config $config -Gid $TaskId -Text "ANSWER (Igor via factory terminal): $answer"
+$null = Add-FactoryAsanaComment -Config $config -Gid $TaskId -Text "ANSWER (Igor via terminal): $answer"
 Set-FactoryAsanaField -Config $config -Gid $TaskId -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.taken)
 Write-FactoryAsanaTransition -Context $context -Gid $TaskId -From 'Question' -To 'Taken' -WorkerId $TaskId
 $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
