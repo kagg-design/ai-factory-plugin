@@ -3,6 +3,7 @@ param(
     [switch]$Force,
     [string]$Reason = 'schedule',
     [string]$Task = '',
+    [string]$EpicGid = '',
     [switch]$DryRun,
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'rock-cycle.json')
 )
@@ -72,16 +73,30 @@ function Test-RockTaskInScope {
     return @($Dependencies | Where-Object { [string]$_.gid -eq $TaskGid }).Count -gt 0
 }
 
+function Get-RockEpicUrl {
+    param([string]$ConfiguredUrl, [string]$ConfiguredGid, [string]$TargetGid)
+    if ($ConfiguredGid -notmatch '^\d+$' -or $TargetGid -notmatch '^\d+$') { throw 'Epic GID must be numeric.' }
+    $uri = [Uri]$ConfiguredUrl
+    if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'app.asana.com' -or
+        $uri.AbsolutePath -notmatch ("/task/{0}(?:/|$)" -f [regex]::Escape($ConfiguredGid))) {
+        throw 'epicUrl must point to epicGid on app.asana.com.'
+    }
+    $builder = [UriBuilder]$uri
+    $builder.Path = [regex]::Replace($uri.AbsolutePath, '/task/\d+(?=/|$)', "/task/$TargetGid")
+    $builder.Query = ''
+    $builder.Fragment = ''
+    return $builder.Uri.AbsoluteUri.TrimEnd('/')
+}
+
 if (-not [IO.File]::Exists($ConfigPath)) { throw "Rock config not found: $ConfigPath" }
 $config = [IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json
 foreach ($required in @('repoPath', 'epicGid', 'epicUrl', 'igorGid', 'tokenEnv', 'stateDir', 'claudePath')) {
     if (-not [string]$config.$required) { throw "Rock config is missing '$required'." }
 }
 if ([string]$config.epicGid -notmatch '^\d+$' -or [string]$config.igorGid -notmatch '^\d+$') { throw 'Invalid Asana GID in rock config.' }
-$epicUrl = [Uri][string]$config.epicUrl
-if ($epicUrl.Host -ne 'app.asana.com' -or $epicUrl.AbsolutePath -notmatch ("/task/{0}(?:/|$)" -f [regex]::Escape([string]$config.epicGid))) {
-    throw 'epicUrl must point to epicGid on app.asana.com.'
-}
+$selectedEpicGid = if ($EpicGid) { $EpicGid } else { [string]$config.epicGid }
+$config.epicUrl = Get-RockEpicUrl -ConfiguredUrl ([string]$config.epicUrl) -ConfiguredGid ([string]$config.epicGid) -TargetGid $selectedEpicGid
+$config.epicGid = $selectedEpicGid
 if ([int]$config.timeoutMinutes -lt 1 -or [int]$config.timeoutMinutes -gt 60) { throw 'timeoutMinutes must be 1-60.' }
 if ([int]$config.staleLockMinutes -lt 1) { throw 'staleLockMinutes must be positive.' }
 if ([int]$config.dailyHourLocal -lt 0 -or [int]$config.dailyHourLocal -gt 23) { throw 'dailyHourLocal must be 0-23.' }

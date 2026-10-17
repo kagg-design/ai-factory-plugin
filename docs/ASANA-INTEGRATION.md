@@ -13,8 +13,8 @@ to Asana is not required.
    update tasks in the project.
 2. Run `factory config path` for the target repository. In that private config,
    set `asana.enabled` to `true` and `launcher.path` to the absolute path of
-   `rock-cycle.ps1`. For multiple rock epics, set `launcher.configPaths` to
-   the absolute paths of their JSON configs. The shipped default stays disabled
+   `rock-cycle.ps1`. For multiple rock epics, set `launcher.epicGids` to their
+   Asana task IDs. The shipped default stays disabled
    until setup is complete.
 3. The factory's scheduler polls every five minutes. To inspect candidates
    without changing local state or Asana, run:
@@ -37,10 +37,10 @@ publication pipeline reaches its done state.
 
 ## Rock launcher setup
 
-1. Edit `rock-cycle.json` for epic `1219601019224697`, and
-   `rock-cycle-1219601069124635.json` for epic `1219601069124635`. Set each
-   `repoPath` to a clean, read-only AwesomeHR checkout. Keep `stateDir`
-   writable and outside the checkout. The launcher puts each epic's lock,
+1. Edit `rock-cycle.json` for shared settings. Its `epicGid` and `epicUrl`
+   select the default task; `-EpicGid` selects another task on the same Asana
+   board. Set `repoPath` to a clean, read-only AwesomeHR checkout. Keep
+   `stateDir` writable and outside the checkout. The launcher puts each epic's lock,
    state and logs in its own `stateDir\<epicGid>` directory and uses a separate
    mutex. If both configs point to the same checkout, their permitted
    `git fetch` commands can contend for Git metadata; use separate checkouts
@@ -50,29 +50,29 @@ publication pipeline reaches its done state.
    --allowedTools mcp__asana`. Claude Code must already be logged in.
 3. Set the same token environment variable for Igor's Windows logon session.
    Check the launcher's decision with `powershell -NoProfile -File
-   .\rock-cycle.ps1 -DryRun -ConfigPath .\rock-cycle.json` and repeat with
-   `-ConfigPath .\rock-cycle-1219601069124635.json`. These read Asana but
+   .\rock-cycle.ps1 -DryRun -EpicGid 1219601019224697` and repeat with
+   `-EpicGid 1219601069124635`. These read Asana but
    write no state and do not start Claude.
-4. Install one scheduled task per config:
+4. Install one scheduled task per epic:
 
    ```powershell
-   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -ConfigPath .\rock-cycle.json
-   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -ConfigPath .\rock-cycle-1219601069124635.json
+   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -EpicGid 1219601019224697
+   powershell -NoProfile -File .\install-rock-cycle-task.ps1 -EpicGid 1219601069124635
    ```
 
    The task name includes the epic GID, so the second install does not replace
    the first. Both run every 30 minutes while Igor is logged on, start missed
    runs when possible, and ignore overlap within the same epic. Remove each
-   with `uninstall-rock-cycle-task.ps1 -ConfigPath <path>`.
+   with `uninstall-rock-cycle-task.ps1 -EpicGid <gid>`.
 
 The launcher checks the epic and every dependency for changes and runs Claude
 once daily after 09:00 local time even if nothing changed. `/pause` and
 `/resume` comments by Igor on the epic control it. Factory wake-ups after
-Question, Done, or Failed request an immediate cycle. When `launcher.configPaths`
-lists both configs, the factory starts both launchers and each ignores a hint
+Question, Done, or Failed request an immediate cycle. When `launcher.epicGids`
+lists both tasks, the factory starts both launchers and each ignores a hint
 task outside its epic and direct dependencies. An existing cycle keeps its
 own lock and the scheduled run catches up. `-Task` is a hint and wake-up filter;
-`epicGid` and `epicUrl` in the chosen config select the root task. This is a
+`-EpicGid` selects the root task, or the config's `epicGid` by default. This is a
 launcher scope check and prompt instruction, not an Asana permission boundary
 for Claude's MCP access.
 

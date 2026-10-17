@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = '',
+    [string]$EpicGid = '',
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'rock-cycle.json')
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Rock config not found: $ConfigPath" }
-$epicGid = [string]((Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).epicGid)
+$epicGid = if ($EpicGid) { $EpicGid } else { [string]((Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).epicGid) }
 if ($epicGid -notmatch '^\d+$') { throw "Invalid epicGid in rock config: $ConfigPath" }
 if (-not $TaskName) { $TaskName = "Rock Orchestrator Cycle $epicGid" }
 $scriptPath = Join-Path $PSScriptRoot 'rock-cycle.ps1'
@@ -14,7 +15,7 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Rock laun
 $hostPath = (Get-Process -Id $PID).Path
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $hostPath -Argument (
-    '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $scriptPath, ([IO.Path]::GetFullPath($ConfigPath))
+    '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -EpicGid {2}' -f $scriptPath, ([IO.Path]::GetFullPath($ConfigPath)), $epicGid
 )
 $trigger = New-ScheduledTaskTrigger -Daily -At '00:00'
 $trigger.Repetition = New-CimInstance -ClientOnly -Namespace 'root/Microsoft/Windows/TaskScheduler' `
