@@ -5,10 +5,11 @@ param(
     [string]$Task = '',
     [string]$EpicGid = '',
     [switch]$DryRun,
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'rock-cycle.json')
+    [string]$ConfigPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'rock-cycle.json' }
 . (Join-Path $PSScriptRoot 'scripts\factory-common.ps1')
 . (Join-Path $PSScriptRoot 'scripts\asana-common.ps1')
 

@@ -126,4 +126,20 @@ $legacyConfig = [pscustomobject]@{ launcher = [pscustomobject]@{ path = $config.
 Start-FactoryRockCycle -Config $legacyConfig -Reason 'Done' -Gid '123'
 Assert-AsanaIntegration ($script:launchArgs.Count -eq 3 -and $script:launchArgs[2] -notlike '*-EpicGid*') 'Legacy single-epic launcher stopped working.'
 
+foreach ($scriptName in @('rock-cycle.ps1', 'install-rock-cycle-task.ps1', 'uninstall-rock-cycle-task.ps1')) {
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = (Get-Process -Id $PID).Path
+    $scriptPath = Join-Path $PluginRoot $scriptName
+    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -EpicGid invalid' -f $scriptPath
+    if ($scriptName -eq 'rock-cycle.ps1') { $startInfo.Arguments += ' -DryRun' }
+    $startInfo.WorkingDirectory = [IO.Path]::GetTempPath()
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    Assert-AsanaIntegration ($process.ExitCode -ne 0 -and $output -match 'GID must be numeric|Invalid epicGid') "$scriptName did not resolve its default config from another directory."
+}
+
 Write-Host 'Asana integration tests passed (Done payload, Ready ordering, search fallback, rock isolation and wake-up routing).' -ForegroundColor Green
