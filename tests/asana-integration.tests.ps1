@@ -120,10 +120,25 @@ Assert-AsanaIntegration ($script:seenPaths[1] -like '/projects/*/tasks*') 'Polle
 $rockSource = Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.ps1') -Raw
 $rockAst = [Management.Automation.Language.Parser]::ParseInput($rockSource, [ref]$tokens, [ref]$parseErrors)
 Assert-AsanaIntegration (@($parseErrors).Count -eq 0) 'Rock launcher does not parse.'
-foreach ($name in @('ConvertTo-RockTimestamp', 'Get-RockLockStatus', 'Test-RockAfter', 'Get-RockInstancePaths', 'Get-RockPauseControl', 'Test-RockEpicUrl', 'Select-RockOrchestrators')) {
+foreach ($name in @('ConvertTo-RockTimestamp', 'Get-RockLockStatus', 'Test-RockAfter', 'Get-RockInstancePaths', 'Get-RockPauseControl', 'Test-RockEpicUrl', 'Select-RockOrchestrators', 'Write-RockStateAtomic')) {
     $functionAst = @($rockAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true))[0]
     Assert-AsanaIntegration ($null -ne $functionAst) "Missing rock launcher function $name."
     . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+$stateTestDir = Join-Path ([IO.Path]::GetTempPath()) ("rock-state-test-$([Guid]::NewGuid().ToString('N'))")
+$stateTestPath = Join-Path $stateTestDir 'state.json'
+try {
+    Write-RockStateAtomic -Path $stateTestPath -Value ([ordered]@{ lastRunEnd = '2026-10-17T10:00:00Z'; lastDailyRun = '2026-10-17' })
+    $firstState = [IO.File]::ReadAllText($stateTestPath) | ConvertFrom-Json
+    Assert-AsanaIntegration ((ConvertTo-RockTimestamp -Value $firstState.lastRunEnd) -eq (ConvertTo-RockTimestamp -Value '2026-10-17T10:00:00Z')) 'Rock state could not be written without a factory mutex.'
+    Write-RockStateAtomic -Path $stateTestPath -Value ([ordered]@{ lastRunEnd = '2026-10-17T11:00:00Z'; lastDailyRun = '2026-10-17' })
+    $secondState = [IO.File]::ReadAllText($stateTestPath) | ConvertFrom-Json
+    Assert-AsanaIntegration ((ConvertTo-RockTimestamp -Value $secondState.lastRunEnd) -eq (ConvertTo-RockTimestamp -Value '2026-10-17T11:00:00Z')) 'Rock state replacement failed.'
+} finally {
+    foreach ($path in @($stateTestPath, "$stateTestPath.previous.bak")) {
+        if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) }
+    }
+    if ([IO.Directory]::Exists($stateTestDir)) { [IO.Directory]::Delete($stateTestDir) }
 }
 $lockFile = Join-Path ([IO.Path]::GetTempPath()) ("rock-lock-test-$([Guid]::NewGuid().ToString('N')).json")
 try {

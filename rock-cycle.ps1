@@ -71,6 +71,26 @@ function Write-RockDecisionLog {
     [IO.File]::AppendAllText((Join-Path $logDir 'decisions.log'), $line, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Write-RockStateAtomic {
+    param([string]$Path, $Value)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($fullPath)) | Out-Null
+    $temporaryPath = "$fullPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = "$fullPath.previous.bak"
+    try {
+        $json = $Value | ConvertTo-Json -Depth 10
+        [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+        $null = [IO.File]::ReadAllText($temporaryPath) | ConvertFrom-Json
+        if ([IO.File]::Exists($fullPath)) {
+            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath, $true)
+        } else {
+            [IO.File]::Move($temporaryPath, $fullPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+    }
+}
+
 function Get-RockInstancePaths {
     param([string]$StateRoot, [string]$Name, [string]$EpicGid)
     $root = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($StateRoot))
@@ -207,7 +227,7 @@ function Invoke-RockOrchestrator {
                     lastRunEnd = [DateTimeOffset]::UtcNow.ToString('o')
                     lastDailyRun = if ($reason -eq 'daily') { $today } else { $lastDailyRun }
                 }
-                Write-FactoryJsonAtomic -Path $statePath -Value $newState
+                Write-RockStateAtomic -Path $statePath -Value $newState
             }
         }
         return [pscustomobject]@{ message = "$($name): cycle: $reason; exit: $exitCode; log: $logPath"; exitCode = $exitCode }
