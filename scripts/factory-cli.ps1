@@ -1923,7 +1923,7 @@ function Write-CliHelp {
                 "factory new [--auto] [text]",
                 "Creates a native local task without AI, Asana, or an intermediate JSON file.",
                 "File first, optional quoted title second. By default the title is the filename without its extension.",
-                "Reads the UTF-8 file verbatim (up to 20000 characters), without modifying or deleting it.",
+                "Reads the UTF-8 file verbatim (up to 50000 characters), without modifying or deleting it.",
                 "The default is interactive planning. With no input, the worker asks what to implement; --auto requires text or a non-empty file.",
                 "The native scheduler starts or wakes automatically. Open the worker with 'factory chat <task-id>'."
             ) | Write-Output

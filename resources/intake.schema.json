@@ -32,7 +32,7 @@
     },
     "startMode": { "enum": ["interactive", "auto"] },
     "title": { "type": "string", "maxLength": 500 },
-    "brief": { "type": "string", "maxLength": 20000 },
+    "brief": { "type": "string", "maxLength": 50000 },
     "acceptanceCriteria": {
       "type": "array",
       "maxItems": 50,

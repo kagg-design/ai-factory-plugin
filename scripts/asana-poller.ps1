@@ -47,9 +47,7 @@ function Get-ReadyTasks {
         @{ Expression = { [string]$_.created_at } }, @{ Expression = { [string]$_.gid } })
 }
 
-$contextArgs = @('-Repository', $Repository)
-if (-not $DryRun) { $contextArgs += '-Initialize' }
-$context = & (Join-Path $PSScriptRoot 'project-context.ps1') @contextArgs | ConvertFrom-Json
+$context = & (Join-Path $PSScriptRoot 'project-context.ps1') -Repository $Repository -Initialize:(-not $DryRun) | ConvertFrom-Json
 if (-not (Test-Path -LiteralPath $context.configPath -PathType Leaf) -or
     -not (Test-Path -LiteralPath $context.statePath -PathType Leaf)) {
     throw 'Factory project config and state must exist before polling.'

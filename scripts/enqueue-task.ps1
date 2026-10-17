@@ -250,7 +250,7 @@ $title = ([string]$normalized.title).Trim()
 $brief = if ($isLocalFile) { [string]$normalized.brief } else { ([string]$normalized.brief).Trim() }
 $sourceError = ([string]$normalized.sourceError).Trim()
 if ($title.Length -gt 500) { throw "Normalized intake title may contain at most 500 characters." }
-if ($brief.Length -gt 20000) { throw "Normalized intake brief may contain at most 20000 characters." }
+if ($brief.Length -gt 50000) { throw "Normalized intake brief may contain at most 50000 characters." }
 if ($sourceError.Length -gt 4000) { throw "Normalized intake sourceError may contain at most 4000 characters." }
 $acceptanceCriteria = @(Get-NormalizedIntakeArray -InputObject $normalized -Name "acceptanceCriteria")
 $sourceNotes = @(Get-NormalizedIntakeArray -InputObject $normalized -Name "sourceNotes")

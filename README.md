@@ -428,7 +428,7 @@ factory new --auto "C:\Tasks\TASK-REPORTS-UI-011.md"
 The file comes first; the optional short title comes second. With no override,
 the title is the filename without its extension (`TASK-REPORTS-UI-011`), not
 the file's heading. Contents are copied verbatim into the task brief (up to
-20,000 characters); the source file is left untouched. Relative paths resolve
+50,000 characters); the source file is left untouched. Relative paths resolve
 from the current directory. Quote paths and titles containing spaces.
 
 Inline task text and intentionally blank workers remain supported:

@@ -91,6 +91,11 @@ try {
     [IO.File]::WriteAllText($longPath, $longSpec, $script:FactoryUtf8NoBom)
     $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @($longPath))
     Assert-LocalIntake ($task.brief -ceq $longSpec) 'Large file content was truncated or passed through the command line.'
+    $asanaSizedPath = Join-Path $inputDirectory 'asana-sized.md'
+    $asanaSizedSpec = 'x' * 24585
+    [IO.File]::WriteAllText($asanaSizedPath, $asanaSizedSpec, $script:FactoryUtf8NoBom)
+    $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @($asanaSizedPath))
+    Assert-LocalIntake ($task.brief -ceq $asanaSizedSpec) 'A groomed Asana-sized specification exceeded the intake limit.'
     Assert-LocalIntake ([Convert]::ToBase64String([IO.File]::ReadAllBytes($specPath)) -ceq $sourceBytes) 'Intake modified or consumed the source file.'
 
     $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @('Update README.md'))
@@ -103,7 +108,7 @@ try {
     $emptyPath = Join-Path $inputDirectory 'empty.md'
     [IO.File]::WriteAllText($emptyPath, " `r`n`t", $script:FactoryUtf8NoBom)
     $oversizePath = Join-Path $inputDirectory 'too-large.md'
-    [IO.File]::WriteAllText($oversizePath, ('x' * 20001), $script:FactoryUtf8NoBom)
+    [IO.File]::WriteAllText($oversizePath, ('x' * 50001), $script:FactoryUtf8NoBom)
     $invalidUtf8Path = Join-Path $inputDirectory 'invalid-utf8.md'
     [IO.File]::WriteAllBytes($invalidUtf8Path, [byte[]]@(0xFF, 0x80))
     $before = [IO.File]::ReadAllText($context.statePath)
@@ -112,7 +117,7 @@ try {
         @{ tokens = @('missing.md'); message = 'does not exist' },
         @{ tokens = @($inputDirectory); message = 'not a file' },
         @{ tokens = @($emptyPath); message = 'empty' },
-        @{ tokens = @($oversizePath); message = '20000' },
+        @{ tokens = @($oversizePath); message = '50000' },
         @{ tokens = @($invalidUtf8Path); message = 'Unable to translate|Unable to decode' },
         @{ tokens = @('old title', $specPath); message = 'file goes first' },
         @{ tokens = @($specPath, 'unquoted', 'title'); message = 'Quote the title' },

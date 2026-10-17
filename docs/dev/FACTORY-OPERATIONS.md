@@ -591,7 +591,7 @@ the title portion capped at 28 characters. Use a short explicit title if the
 filename is unwieldy.
 
 The UTF-8 file contents become the task brief verbatim, including line breaks
-and surrounding whitespace, with the existing 20,000-character intake limit.
+and surrounding whitespace, with the 50,000-character intake limit.
 The file is neither changed nor deleted. This is a snapshot: later edits to
 the source file do not update the queued task. Relative paths resolve from the
 current directory. Missing, empty or oversized files fail without adding a task.
