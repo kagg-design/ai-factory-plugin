@@ -7,7 +7,12 @@
   "staleLockMinutes": 60,
   "dailyHourLocal": 9,
   "allowedTools": [
-    "mcp__asana", "Read", "Grep", "Glob", "WebSearch", "WebFetch",
+    "mcp__claude_ai_Asana__*",
+    "mcp__claude_ai_Asana__get_task", "mcp__claude_ai_Asana__get_task_stories",
+    "mcp__claude_ai_Asana__get_tasks", "mcp__claude_ai_Asana__search_tasks",
+    "mcp__claude_ai_Asana__add_comment", "mcp__claude_ai_Asana__update_tasks",
+    "mcp__claude_ai_Asana__create_tasks",
+    "Read", "Grep", "Glob", "WebSearch", "WebFetch",
     "Bash(git fetch *)", "Bash(git log *)", "Bash(git show *)"
   ],
   "orchestrators": [

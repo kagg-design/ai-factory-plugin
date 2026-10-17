@@ -49,9 +49,11 @@ pipeline reaches done.
    Several orchestrators may share the same checkout because this launcher
    runs their Claude processes sequentially. Its global mutex also prevents
    separate launcher processes from overlapping.
-2. Confirm `claude mcp list` shows Asana connected. Check a
+2. Confirm `claude mcp list` shows Asana connected. For the connected
+   `claude.ai Asana` server, tool names begin `mcp__claude_ai_Asana__`.
+   Check a
    non-interactive call with
-   `claude -p "list my Asana workspaces" --allowedTools mcp__asana`.
+   `claude -p "read my Asana epic" --allowedTools mcp__claude_ai_Asana__get_task`.
    Claude Code must already be logged in.
 3. Preview both decisions, or one named orchestrator:
 

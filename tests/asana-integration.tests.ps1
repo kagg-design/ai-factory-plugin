@@ -157,6 +157,8 @@ Assert-AsanaIntegration ($firstPaths.stateDir -ne $secondPaths.stateDir) 'Differ
 Assert-AsanaIntegration ($firstPaths.mutexName -ne $secondPaths.mutexName) 'Different epics share a rock mutex.'
 Assert-AsanaIntegration ($firstPaths.stateDir -like '*\access') 'Rock state directory does not use the orchestrator name.'
 $rockConfig = Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.json') -Raw | ConvertFrom-Json
+Assert-AsanaIntegration ('mcp__claude_ai_Asana__get_task' -in @($rockConfig.allowedTools)) 'Claude.ai Asana read tool is missing from the allowlist.'
+Assert-AsanaIntegration ('mcp__claude_ai_Asana__add_comment' -in @($rockConfig.allowedTools)) 'Claude.ai Asana comment tool is missing from the allowlist.'
 $rockOrchestrators = @($rockConfig.orchestrators)
 Assert-AsanaIntegration ($rockOrchestrators.Count -eq 2) 'Rock config must list both orchestrators.'
 foreach ($orchestrator in $rockOrchestrators) {

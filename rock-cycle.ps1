@@ -251,7 +251,12 @@ if ([int]$config.staleLockMinutes -lt 1) { throw 'staleLockMinutes must be posit
 if ([int]$config.dailyHourLocal -lt 0 -or [int]$config.dailyHourLocal -gt 23) { throw 'dailyHourLocal must be 0-23.' }
 if ($Task -and $Task -notmatch '^\d+$') { throw 'Task hint must be a numeric Asana GID.' }
 if ($Epic -and $EpicGid) { throw 'Use either -Epic or -EpicGid, not both.' }
-$safeTools = @('mcp__asana', 'Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch',
+$safeTools = @('mcp__claude_ai_Asana__*',
+    'mcp__claude_ai_Asana__get_task', 'mcp__claude_ai_Asana__get_task_stories',
+    'mcp__claude_ai_Asana__get_tasks', 'mcp__claude_ai_Asana__search_tasks',
+    'mcp__claude_ai_Asana__add_comment', 'mcp__claude_ai_Asana__update_tasks',
+    'mcp__claude_ai_Asana__create_tasks',
+    'Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch',
     'Bash(git fetch *)', 'Bash(git log *)', 'Bash(git show *)')
 foreach ($tool in @($config.allowedTools)) {
     if ([string]$tool -cnotin $safeTools) { throw "Unsafe or unknown rock tool: $tool" }
