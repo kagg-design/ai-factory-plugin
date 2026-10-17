@@ -44,7 +44,8 @@ pipeline reaches done.
 
 1. Edit `rock-cycle.json`. It defines the named `access` and `billing`
    orchestrators, their epic GIDs, and their `repoPath` and `extraDirs`.
-   Replace every placeholder path with a clean read-only checkout or directory.
+   Its paths point to the dedicated local checkouts under
+   `C:\laragon\www\Projects\rock-readonly`; update them if those checkouts move.
    Several orchestrators may share the same checkout because this launcher
    runs their Claude processes sequentially. Its global mutex also prevents
    separate launcher processes from overlapping.

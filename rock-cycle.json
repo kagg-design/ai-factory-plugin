@@ -15,15 +15,15 @@
       "name": "access",
       "epicGid": "1219601019224697",
       "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601019224697",
-      "repoPath": "C:\\path\\to\\awesomehr",
+      "repoPath": "C:\\laragon\\www\\Projects\\rock-readonly\\awesomehr",
       "extraDirs": []
     },
     {
       "name": "billing",
       "epicGid": "1219601069124635",
       "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601069124635",
-      "repoPath": "C:\\path\\to\\awesomehr",
-      "extraDirs": ["C:\\path\\to\\cloud-infrastructure-auditors"]
+      "repoPath": "C:\\laragon\\www\\Projects\\rock-readonly\\awesomehr",
+      "extraDirs": ["C:\\laragon\\www\\Projects\\rock-readonly\\cloud-infrastructure-auditors"]
     }
   ]
 }
