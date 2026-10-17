@@ -1,11 +1,14 @@
 [CmdletBinding()]
 param(
-    [string]$TaskName = 'Rock Orchestrator Cycle',
+    [string]$TaskName = '',
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'rock-cycle.json')
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw "Rock config not found: $ConfigPath" }
+$epicGid = [string]((Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).epicGid)
+if ($epicGid -notmatch '^\d+$') { throw "Invalid epicGid in rock config: $ConfigPath" }
+if (-not $TaskName) { $TaskName = "Rock Orchestrator Cycle $epicGid" }
 $scriptPath = Join-Path $PSScriptRoot 'rock-cycle.ps1'
 if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Rock launcher not found: $scriptPath" }
 $hostPath = (Get-Process -Id $PID).Path

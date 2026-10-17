@@ -108,8 +108,19 @@ function Start-FactoryRockCycle {
     $path = [string]$Config.launcher.path
     if (-not $path) { return }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Rock launcher not found: $path" }
+    $configPaths = @()
+    if ($null -ne $Config.launcher.PSObject.Properties['configPaths']) {
+        $configPaths = @($Config.launcher.configPaths | Where-Object { [string]$_ })
+    }
+    foreach ($configPath in $configPaths) {
+        if (-not (Test-Path -LiteralPath ([string]$configPath) -PathType Leaf)) { throw "Rock config not found: $configPath" }
+    }
     $hostPath = (Get-Process -Id $PID).Path
-    $arguments = @('-NoProfile', '-File', $path, '-Reason', $Reason, '-Task', $Gid) |
-        ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
-    $null = Start-Process -FilePath $hostPath -WindowStyle Hidden -ArgumentList ($arguments -join ' ') -PassThru
+    if ($configPaths.Count -eq 0) { $configPaths = @('') }
+    foreach ($configPath in $configPaths) {
+        $items = @('-NoProfile', '-File', $path, '-Reason', $Reason, '-Task', $Gid)
+        if ($configPath) { $items += @('-ConfigPath', ([IO.Path]::GetFullPath([string]$configPath))) }
+        $arguments = $items | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }
+        $null = Start-Process -FilePath $hostPath -WindowStyle Hidden -ArgumentList ($arguments -join ' ') -PassThru
+    }
 }

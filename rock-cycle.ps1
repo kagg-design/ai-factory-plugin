@@ -11,12 +11,19 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts\factory-common.ps1')
 . (Join-Path $PSScriptRoot 'scripts\asana-common.ps1')
 
+function ConvertTo-RockTimestamp {
+    param($Value)
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime() }
+    if ($Value -is [DateTime]) { return ([DateTimeOffset]$Value).ToUniversalTime() }
+    return [DateTimeOffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+}
+
 function Get-RockLockStatus {
     param([string]$Path, [int]$StaleMinutes)
     if (-not [IO.File]::Exists($Path)) { return 'absent' }
     try {
         $record = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
-        $started = [DateTimeOffset]::Parse([string]$record.startedAt)
+        $started = ConvertTo-RockTimestamp -Value $record.startedAt
         $age = ([DateTimeOffset]::UtcNow - $started.ToUniversalTime()).TotalMinutes
         $alive = $false
         if ([int]$record.pid -gt 0) {
@@ -37,7 +44,7 @@ function Get-RockStories {
 function Test-RockAfter {
     param($Value, $Boundary)
     if (-not $Boundary -or -not $Value) { return $true }
-    return [DateTimeOffset]::Parse([string]$Value).ToUniversalTime() -gt $Boundary
+    return (ConvertTo-RockTimestamp -Value $Value) -gt $Boundary
 }
 
 function Write-RockDecisionLog {
@@ -48,12 +55,33 @@ function Write-RockDecisionLog {
     [IO.File]::AppendAllText((Join-Path $logDir 'decisions.log'), $line, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Get-RockInstancePaths {
+    param([string]$StateRoot, [string]$EpicGid)
+    $root = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($StateRoot))
+    if ($root.Contains('%')) { throw 'stateDir contains an unexpanded environment variable.' }
+    return [pscustomobject]@{
+        stateDir = Join-Path $root $EpicGid
+        mutexName = "Local\RockOrchestratorCycle-$EpicGid"
+    }
+}
+
+function Test-RockTaskInScope {
+    param([string]$TaskGid, [string]$EpicGid, [object[]]$Dependencies)
+    if (-not $TaskGid) { return $true }
+    if ($TaskGid -eq $EpicGid) { return $true }
+    return @($Dependencies | Where-Object { [string]$_.gid -eq $TaskGid }).Count -gt 0
+}
+
 if (-not [IO.File]::Exists($ConfigPath)) { throw "Rock config not found: $ConfigPath" }
 $config = [IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json
 foreach ($required in @('repoPath', 'epicGid', 'epicUrl', 'igorGid', 'tokenEnv', 'stateDir', 'claudePath')) {
     if (-not [string]$config.$required) { throw "Rock config is missing '$required'." }
 }
 if ([string]$config.epicGid -notmatch '^\d+$' -or [string]$config.igorGid -notmatch '^\d+$') { throw 'Invalid Asana GID in rock config.' }
+$epicUrl = [Uri][string]$config.epicUrl
+if ($epicUrl.Host -ne 'app.asana.com' -or $epicUrl.AbsolutePath -notmatch ("/task/{0}(?:/|$)" -f [regex]::Escape([string]$config.epicGid))) {
+    throw 'epicUrl must point to epicGid on app.asana.com.'
+}
 if ([int]$config.timeoutMinutes -lt 1 -or [int]$config.timeoutMinutes -gt 60) { throw 'timeoutMinutes must be 1-60.' }
 if ([int]$config.staleLockMinutes -lt 1) { throw 'staleLockMinutes must be positive.' }
 if ([int]$config.dailyHourLocal -lt 0 -or [int]$config.dailyHourLocal -gt 23) { throw 'dailyHourLocal must be 0-23.' }
@@ -65,9 +93,8 @@ foreach ($tool in @($config.allowedTools)) {
 }
 if (@($config.allowedTools).Count -eq 0) { throw 'allowedTools may not be empty.' }
 
-$stateDir = [Environment]::ExpandEnvironmentVariables([string]$config.stateDir)
-if ($stateDir.Contains('%')) { throw 'stateDir contains an unexpanded environment variable.' }
-$stateDir = [IO.Path]::GetFullPath($stateDir)
+$instancePaths = Get-RockInstancePaths -StateRoot ([string]$config.stateDir) -EpicGid ([string]$config.epicGid)
+$stateDir = [string]$instancePaths.stateDir
 $lockPath = Join-Path $stateDir 'lock.json'
 $statePath = Join-Path $stateDir 'state.json'
 $forceRun = [bool]$Force -or $Reason -ne 'schedule'
@@ -78,7 +105,7 @@ $ownsLock = $false
 
 try {
     if (-not $DryRun) {
-        $mutex = New-Object Threading.Mutex($false, 'Local\RockOrchestratorCycle')
+        $mutex = New-Object Threading.Mutex($false, ([string]$instancePaths.mutexName))
         try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
         if (-not $ownsMutex) { Write-Output 'busy'; exit 0 }
     }
@@ -103,8 +130,19 @@ try {
         exit 0
     }
 
+    $deps = @()
+    if ($Task -or -not $forceRun) {
+        $deps = @(Get-FactoryAsanaPages -Config $apiConfig -Path "/tasks/$($config.epicGid)/dependencies?opt_fields=gid,name,modified_at")
+    }
+    if (-not (Test-RockTaskInScope -TaskGid $Task -EpicGid ([string]$config.epicGid) -Dependencies $deps)) {
+        $ignored = "ignored unrelated task $Task for epic $($config.epicGid)"
+        if (-not $DryRun) { Write-RockDecisionLog -StateDirectory $stateDir -Message $ignored }
+        Write-Output $(if ($DryRun) { "DryRun: $ignored" } else { $ignored })
+        exit 0
+    }
+
     $saved = if ([IO.File]::Exists($statePath)) { [IO.File]::ReadAllText($statePath) | ConvertFrom-Json } else { $null }
-    $boundary = if ($saved -and $saved.lastRunEnd) { [DateTimeOffset]::Parse([string]$saved.lastRunEnd).ToUniversalTime() } else { $null }
+    $boundary = if ($saved -and $saved.lastRunEnd) { ConvertTo-RockTimestamp -Value $saved.lastRunEnd } else { $null }
     $today = (Get-Date).ToString('yyyy-MM-dd')
     $lastDailyRun = if ($saved) { [string]$saved.lastDailyRun } else { '' }
     $dailyDue = [int](Get-Date).Hour -ge [int]$config.dailyHourLocal -and
@@ -112,7 +150,6 @@ try {
     $changed = New-Object Collections.Generic.List[string]
     if (-not $forceRun) {
         $epic = (Invoke-FactoryAsana -Config $apiConfig -Path "/tasks/$($config.epicGid)?opt_fields=gid,modified_at").data
-        $deps = @(Get-FactoryAsanaPages -Config $apiConfig -Path "/tasks/$($config.epicGid)/dependencies?opt_fields=gid,name,modified_at")
         foreach ($item in @($epic) + $deps) {
             if (-not $item -or -not [string]$item.gid) { continue }
             $stories = if ([string]$item.gid -eq [string]$config.epicGid) { $epicStories } else {
@@ -137,7 +174,7 @@ try {
 
     $repoPath = [IO.Path]::GetFullPath([string]$config.repoPath)
     if (-not [IO.Directory]::Exists($repoPath)) { throw "AwesomeHR read-only checkout not found: $repoPath" }
-    $prompt = "You are the orchestrator for Asana task $($config.epicUrl). Read it and run one cycle. Reason: $runReason. Changed tasks: $changedText."
+    $prompt = "You are the orchestrator for Asana task $($config.epicUrl). Read it and run one cycle. Work on this epic and its dependencies; do not act on other rock epics. Reason: $runReason. Changed tasks: $changedText."
     if ($Task) { $prompt += " Hint task: $Task." }
     $logsDir = Join-Path $stateDir 'logs'
     [IO.Directory]::CreateDirectory($logsDir) | Out-Null

@@ -133,5 +133,5 @@
   },
   "poll": { "intervalMinutes": 5, "maxParallelWorkers": 2 },
   "questions": { "answerPollMinutes": 5, "timeoutHours": 24 },
-  "launcher": { "path": "" }
+  "launcher": { "path": "", "configPaths": [] }
 }

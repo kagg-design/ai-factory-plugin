@@ -81,7 +81,7 @@ Assert-AsanaIntegration ($script:seenPaths[1] -like '/projects/*/tasks*') 'Polle
 $rockSource = Get-Content -LiteralPath (Join-Path $PluginRoot 'rock-cycle.ps1') -Raw
 $rockAst = [Management.Automation.Language.Parser]::ParseInput($rockSource, [ref]$tokens, [ref]$parseErrors)
 Assert-AsanaIntegration (@($parseErrors).Count -eq 0) 'Rock launcher does not parse.'
-foreach ($name in @('Get-RockLockStatus', 'Test-RockAfter')) {
+foreach ($name in @('ConvertTo-RockTimestamp', 'Get-RockLockStatus', 'Test-RockAfter', 'Get-RockInstancePaths', 'Test-RockTaskInScope')) {
     $functionAst = @($rockAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true))[0]
     Assert-AsanaIntegration ($null -ne $functionAst) "Missing rock launcher function $name."
     . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -97,5 +97,33 @@ try {
 $boundary = [DateTimeOffset]::Parse('2026-10-17T10:00:00Z')
 Assert-AsanaIntegration (Test-RockAfter -Value '2026-10-17T10:00:01Z' -Boundary $boundary) 'A new Asana change was missed.'
 Assert-AsanaIntegration (-not (Test-RockAfter -Value '2026-10-17T10:00:00Z' -Boundary $boundary)) 'The last run boundary retriggered a cycle.'
+$firstPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601019224697'
+$secondPaths = Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601069124635'
+Assert-AsanaIntegration ($firstPaths.stateDir -ne $secondPaths.stateDir) 'Different epics share rock state.'
+Assert-AsanaIntegration ($firstPaths.mutexName -ne $secondPaths.mutexName) 'Different epics share a rock mutex.'
+Assert-AsanaIntegration ($firstPaths.mutexName -eq (Get-RockInstancePaths -StateRoot ([IO.Path]::GetTempPath()) -EpicGid '1219601019224697').mutexName) 'The same epic bypasses its mutex.'
+$dependencies = @([pscustomobject]@{ gid = '123' })
+Assert-AsanaIntegration (Test-RockTaskInScope -TaskGid '1219601019224697' -EpicGid '1219601019224697' -Dependencies $dependencies) 'Epic wake-up was rejected.'
+Assert-AsanaIntegration (Test-RockTaskInScope -TaskGid '123' -EpicGid '1219601019224697' -Dependencies $dependencies) 'Dependency wake-up was rejected.'
+Assert-AsanaIntegration (-not (Test-RockTaskInScope -TaskGid '456' -EpicGid '1219601019224697' -Dependencies $dependencies)) 'Unrelated wake-up reached an epic.'
 
-Write-Host 'Asana integration tests passed (Done payload, Ready ordering, search fallback, rock lock and change boundary).' -ForegroundColor Green
+$config.launcher.path = Join-Path $PluginRoot 'rock-cycle.ps1'
+$config.launcher.configPaths = @(
+    (Join-Path $PluginRoot 'rock-cycle.json'),
+    (Join-Path $PluginRoot 'rock-cycle-1219601069124635.json')
+)
+$script:launchArgs = New-Object Collections.Generic.List[string]
+function ConvertTo-FactoryWindowsArgument { param([string]$Value) return '"' + $Value + '"' }
+function Start-Process {
+    param([string]$FilePath, [string]$WindowStyle, [string]$ArgumentList, [switch]$PassThru)
+    $script:launchArgs.Add($ArgumentList)
+    return [pscustomobject]@{ Id = 1 }
+}
+Start-FactoryRockCycle -Config $config -Reason 'Done' -Gid '123'
+Assert-AsanaIntegration ($script:launchArgs.Count -eq 2) 'Factory wake-up did not start both rock configs.'
+Assert-AsanaIntegration ($script:launchArgs[0] -like '*rock-cycle.json*' -and $script:launchArgs[1] -like '*rock-cycle-1219601069124635.json*') 'Factory wake-up used the wrong configs.'
+$legacyConfig = [pscustomobject]@{ launcher = [pscustomobject]@{ path = $config.launcher.path } }
+Start-FactoryRockCycle -Config $legacyConfig -Reason 'Done' -Gid '123'
+Assert-AsanaIntegration ($script:launchArgs.Count -eq 3 -and $script:launchArgs[2] -notlike '*-ConfigPath*') 'Legacy single-config launcher stopped working.'
+
+Write-Host 'Asana integration tests passed (Done payload, Ready ordering, search fallback, rock isolation and wake-up routing).' -ForegroundColor Green
