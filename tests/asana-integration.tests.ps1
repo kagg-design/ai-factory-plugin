@@ -14,6 +14,18 @@ $script:calls = New-Object Collections.Generic.List[object]
 function Invoke-FactoryAsana {
     param($Config, [string]$Method = 'GET', [string]$Path, $Data = $null)
     $script:calls.Add([pscustomobject]@{ method = $Method; path = $Path; data = $Data })
+    if ($Path -eq '/test-pagination') {
+        return [pscustomobject]@{
+            data = @([pscustomobject]@{ gid = 'first' })
+            next_page = [pscustomobject]@{ uri = 'https://app.asana.com/api/1.0/test-pagination?offset=second' }
+        }
+    }
+    if ($Path -eq '/test-pagination?offset=second') {
+        return [pscustomobject]@{ data = @([pscustomobject]@{ gid = 'second' }) }
+    }
+    if ($Path -eq '/test-null-page') {
+        return [pscustomobject]@{ data = @([pscustomobject]@{ gid = 'only' }); next_page = $null }
+    }
     return [pscustomobject]@{ data = [pscustomobject]@{ gid = '123'; created_at = '2026-10-17T00:00:00Z' } }
 }
 
@@ -24,6 +36,16 @@ Assert-AsanaIntegration ($call.method -eq 'PUT' -and $call.path -eq '/tasks/123'
 Assert-AsanaIntegration ($call.data.completed -eq $true) 'Done did not complete the Asana task.'
 Assert-AsanaIntegration ($call.data.custom_fields[[string]$config.asana.fields.factory] -eq [string]$config.asana.fields.done) 'Done did not set Factory = Done.'
 Assert-AsanaIntegration ($call.data.custom_fields[[string]$config.asana.fields.resolution] -eq [string]$config.asana.fields.resolutionFixed) 'Done did not set Resolution = Fixed.'
+
+& {
+    Set-StrictMode -Version 2.0
+    $onePage = @(Get-FactoryAsanaPages -Config $config -Path '/test-one-page')
+    Assert-AsanaIntegration ($onePage.Count -eq 1 -and $onePage[0].gid -eq '123') 'A final Asana page without next_page failed.'
+    $nullPage = @(Get-FactoryAsanaPages -Config $config -Path '/test-null-page')
+    Assert-AsanaIntegration ($nullPage.Count -eq 1 -and $nullPage[0].gid -eq 'only') 'A null Asana next_page failed.'
+    $twoPages = @(Get-FactoryAsanaPages -Config $config -Path '/test-pagination')
+    Assert-AsanaIntegration (($twoPages.gid -join ',') -eq 'first,second') 'Asana pagination skipped a page.'
+}
 
 $source = Get-Content -LiteralPath (Join-Path $PluginRoot 'scripts\asana-poller.ps1') -Raw
 $tokens = $null

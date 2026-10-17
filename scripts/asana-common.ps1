@@ -32,8 +32,12 @@ function Get-FactoryAsanaPages {
         $page = Invoke-FactoryAsana -Config $Config -Path $nextPath
         foreach ($row in @($page.data)) { if ($null -ne $row) { $rows.Add($row) } }
         $nextPath = ''
-        if ($page.next_page -and $page.next_page.uri) {
-            $nextUri = [Uri][string]$page.next_page.uri
+        $nextPage = $page.PSObject.Properties['next_page']
+        $uriProperty = if ($null -ne $nextPage -and $null -ne $nextPage.Value) {
+            $nextPage.Value.PSObject.Properties['uri']
+        } else { $null }
+        if ($null -ne $uriProperty -and [string]$uriProperty.Value) {
+            $nextUri = [Uri][string]$uriProperty.Value
             if ($nextUri.Host -ne 'app.asana.com' -or $nextUri.AbsolutePath -notlike '/api/1.0/*') { throw 'Asana returned an unexpected pagination URL.' }
             $nextPath = $nextUri.PathAndQuery.Substring('/api/1.0'.Length)
         }
