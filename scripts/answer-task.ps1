@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = "Text")][string]$Text,
     [ValidateSet("auto", "interactive")][string]$Mode = "auto",
     [string]$ClaudeCommand = "",
-    [string]$CodexCommand = ""
+    [string]$CodexCommand = "",
+    [switch]$FromAsanaSync
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,7 +37,15 @@ try {
     $task = Get-FactoryTask -State $state -TaskId $TaskId
     $isActiveRework = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -and
         [string]$task.status -in @("queued", "starting", "planning", "running", "awaiting-input", "blocked", "failed", "held")
-    if (([string]$task.commit -or $null -ne $task.workerResult) -and -not $isActiveRework) {
+    $pendingAsanaQuestion = [bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -and
+        $null -ne (Get-FactoryNestedValue -Target $task -Name "asanaQuestion") -and
+        [string]$task.status -in @("blocked", "held", "awaiting-input")
+    if ($pendingAsanaQuestion -and -not $FromAsanaSync) {
+        throw "Task '$TaskId' has an Asana question. Use factory answer to post the operator's answer in Asana first."
+    }
+    $resumableAsanaQuestion = $pendingAsanaQuestion -and $FromAsanaSync -and
+        -not [string]$task.commit -and [string](Get-FactoryNestedValue -Target $task.workerResult -Name "status" -Default "") -eq "blocked"
+    if (([string]$task.commit -or $null -ne $task.workerResult) -and -not $isActiveRework -and -not $resumableAsanaQuestion) {
         throw "Task '$TaskId' already has a validated result or commit."
     }
     $worktree = [string]$task.worktree

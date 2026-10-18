@@ -99,7 +99,7 @@ try {
         $parsed = ConvertFrom-FactoryWorkerMarkerMessage ('FACTORY_RESULT' + $tail)
         Assert-ParallelSafety ($parsed.kind -eq 'invalid-marker' -and $parsed.payload.error -match 'Following marker:') 'A malformed report was accepted or lacked a payload preview.'
     }
-    $parsed = ConvertFrom-FactoryWorkerMarkerMessage ('FACTORY_RESULT' + ('x' * 400))
+    $parsed = ConvertFrom-FactoryWorkerMarkerMessage ("FACTORY_RESULT`n" + ('x' * 400))
     Assert-ParallelSafety ($parsed.payload.followingMarker.Length -eq 200) 'Malformed report preview is not bounded.'
 
     $settings = [pscustomobject]@{

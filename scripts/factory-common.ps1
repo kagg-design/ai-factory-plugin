@@ -481,6 +481,19 @@ function Get-FactoryOperatorActionEvents {
             })
             continue
         }
+        $asanaQuestion = Get-FactoryNestedValue -Target $task -Name "asanaQuestion"
+        if ([bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -and
+            $null -ne $asanaQuestion -and $status -in @("blocked", "held", "awaiting-input")) {
+            $events.Add([pscustomobject][ordered]@{
+                kind = "asana-question"; taskId = $taskId; title = $title; status = $status
+                identity = [string](Get-FactoryNestedValue -Target $asanaQuestion -Name "storyGid" -Default "")
+                audience = "human"; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
+                reason = [string](Get-FactoryNestedValue -Target $asanaQuestion -Name "text" -Default "Worker needs an answer.")
+                occurredAt = [string](Get-FactoryNestedValue -Target $asanaQuestion -Name "askedAt" -Default $occurredAt)
+                command = "factory answer $taskId --text `"YOUR ANSWER`""
+            })
+            continue
+        }
         if ($status -eq "awaiting-input") {
             $events.Add([pscustomobject][ordered]@{
                 kind = "awaiting-input"; taskId = $taskId; title = $title; status = $status

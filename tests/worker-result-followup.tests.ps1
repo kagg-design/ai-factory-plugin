@@ -119,6 +119,56 @@ try {
     Assert-Followup ($task.status -eq 'awaiting-review' -and $task.commit -eq $result.commit) 'Corrected result did not restore review.'
     Assert-Followup (-not [string]$task.workerEventWarning) 'Corrected result retained an obsolete warning.'
 
+    # An unsynced moved HEAD must still fail when a later message arrives.
+    $oldResultEvent = Read-FactoryJson -Path $resultPath
+    $oldResultTime = ConvertTo-FactoryUtcDateTime -Value $oldResultEvent.capturedAt
+    [IO.File]::AppendAllText((Join-Path $repository 'README.md'), "third`n", (New-Object Text.UTF8Encoding($false)))
+    & git -C $repository add README.md
+    & git -C $repository commit -m 'test: rebased HEAD fixture' | Out-Null
+    $rebasedCommit = (& git -C $repository rev-parse HEAD).Trim()
+    $null = Publish-FactoryWorkerEvent -Context $context -Task $task -SessionId 'fixture-session' -Worktree $repository -Message 'A later plain-text follow-up.'
+    $latest = Read-FactoryJson -Path $latestPath
+    $latest.capturedAt = $oldResultTime.AddSeconds(30).ToString('o')
+    Write-FactoryJsonAtomic -Path $latestPath -Value $latest
+    $null = (& $shellCommand -NoProfile -ExecutionPolicy Bypass -File $reconcileScript -Repository $repository -ClaudeCommand 'missing-factory-claude-fixture') | ConvertFrom-Json
+    $task = (Read-FactoryJson -Path $context.statePath).tasks[0]
+    Assert-Followup ($task.status -eq 'failed' -and [string]$task.error -match 'does not match result commit') 'An unsynced moved HEAD did not fail validation.'
+
+    # Model sync-task.ps1 finalize: it adopts the new HEAD and stamps a later
+    # resultRecordedAt, while latest-result.json still holds the old commit.
+    $state = Read-FactoryJson -Path $context.statePath
+    $task = $state.tasks[0]
+    $task.commit = $rebasedCommit
+    $task.workerResult.commit = $rebasedCommit
+    $task.status = 'awaiting-review'
+    $task.error = $null
+    $task.resultRecordedAt = $oldResultTime.AddSeconds(60).ToString('o')
+    $state.tasks[0] = $task
+    $stateMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+    try {
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    } finally {
+        Exit-FactoryMutex -Mutex $stateMutex
+    }
+
+    $null = Publish-FactoryWorkerEvent -Context $context -Task $task -SessionId 'fixture-session' -Worktree $repository -Message 'Still chatting after orchestrator sync.'
+    $latest = Read-FactoryJson -Path $latestPath
+    $latest.capturedAt = $oldResultTime.AddSeconds(90).ToString('o')
+    Write-FactoryJsonAtomic -Path $latestPath -Value $latest
+    $null = (& $shellCommand -NoProfile -ExecutionPolicy Bypass -File $reconcileScript -Repository $repository -ClaudeCommand 'missing-factory-claude-fixture') | ConvertFrom-Json
+    $task = (Read-FactoryJson -Path $context.statePath).tasks[0]
+    Assert-Followup ($task.status -eq 'awaiting-review' -and $task.commit -eq $rebasedCommit -and
+        $task.workerResult.commit -eq $rebasedCommit -and -not $task.error) 'Late message revalidated a result superseded by sync.'
+
+    $null = Publish-FactoryWorkerEvent -Context $context -Task $task -SessionId 'fixture-session' -Worktree $repository -Message 'FACTORY_RESULT: {"status": broken}'
+    $latest = Read-FactoryJson -Path $latestPath
+    $latest.capturedAt = $oldResultTime.AddSeconds(120).ToString('o')
+    Write-FactoryJsonAtomic -Path $latestPath -Value $latest
+    $null = (& $shellCommand -NoProfile -ExecutionPolicy Bypass -File $reconcileScript -Repository $repository -ClaudeCommand 'missing-factory-claude-fixture') | ConvertFrom-Json
+    $task = (Read-FactoryJson -Path $context.statePath).tasks[0]
+    Assert-Followup ($task.status -eq 'awaiting-review' -and $task.commit -eq $rebasedCommit -and
+        $task.workerResult.commit -eq $rebasedCommit -and -not $task.error) 'Late invalid marker displaced a synced result.'
+
     Write-Output "Worker result follow-up tests passed under PowerShell $($PSVersionTable.PSVersion)."
 } finally {
     $env:CLAUDE_FACTORY_HOME = $savedRuntimeHome

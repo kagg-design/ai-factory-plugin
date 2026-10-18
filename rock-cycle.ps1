@@ -150,6 +150,7 @@ function Invoke-RockOrchestrator {
             [IO.File]::WriteAllText($lockPath, ($lock | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
             $ownsLock = $true
         }
+        if (-not $DryRun) { Write-Host "$($name): checking Asana..." }
         $epicStories = @(Get-RockStories -ApiConfig $ApiConfig -Gid $gid)
         if ((Get-RockPauseControl -Stories $epicStories -IgorGid ([string]$Config.igorGid)) -eq 'paused') {
             if (-not $DryRun) { Write-RockDecisionLog -StateDirectory $stateDir -Message 'paused by Igor in Asana' }
@@ -210,10 +211,28 @@ function Invoke-RockOrchestrator {
             $argumentLine = (@($claudeArgs | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }) -join ' ')
             $process = Start-Process -FilePath ([string]$claudeCommand.Source) -ArgumentList $argumentLine -WorkingDirectory $repoPath -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
             $started = $true
-            if (-not $process.WaitForExit([int]$Config.timeoutMinutes * 60000)) {
-                $null = Invoke-FactoryNativeProcess -Command 'taskkill' -Arguments @('/PID', [string]$process.Id, '/T', '/F') -TimeoutSeconds 10
-                $exitCode = 124
-            } else { $exitCode = [int]$process.ExitCode }
+            $timeoutMs = [int]$Config.timeoutMinutes * 60000
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            Write-Host ("{0}: started Claude (PID {1}); limit {2} min; log: {3}" -f $name, $process.Id, $Config.timeoutMinutes, $logPath)
+            while ($true) {
+                $remainingMs = $timeoutMs - [int]$timer.ElapsedMilliseconds
+                if ($remainingMs -le 0) {
+                    if ($process.HasExited) { $exitCode = [int]$process.ExitCode }
+                    else {
+                        Write-Host ("{0}: timeout after {1} min; stopping PID {2}" -f $name, $Config.timeoutMinutes, $process.Id)
+                        $null = Invoke-FactoryNativeProcess -Command 'taskkill' -Arguments @('/PID', [string]$process.Id, '/T', '/F') -TimeoutSeconds 10
+                        $exitCode = 124
+                    }
+                    break
+                }
+                if ($process.WaitForExit([int][Math]::Min(60000, $remainingMs))) {
+                    $exitCode = [int]$process.ExitCode
+                    break
+                }
+                if ($timer.ElapsedMilliseconds -lt $timeoutMs) {
+                    Write-Host ("{0}: still running ({1}/{2} min, PID {3})" -f $name, [int][Math]::Floor($timer.Elapsed.TotalMinutes), $Config.timeoutMinutes, $process.Id)
+                }
+            }
         } catch {
             $exitCode = 1
             [IO.File]::AppendAllText($stderrPath, "Launcher error: $($_.Exception.Message)" + [Environment]::NewLine)
@@ -246,7 +265,7 @@ foreach ($required in @('tokenEnv', 'igorGid', 'stateDir', 'claudePath')) {
     if (-not [string]$config.$required) { throw "Rock config is missing '$required'." }
 }
 if ([string]$config.igorGid -notmatch '^\d+$') { throw 'Invalid Igor Asana GID in rock config.' }
-if ([int]$config.timeoutMinutes -lt 1 -or [int]$config.timeoutMinutes -gt 60) { throw 'timeoutMinutes must be 1-60.' }
+if ([int]$config.timeoutMinutes -lt 1 -or [int]$config.timeoutMinutes -gt 120) { throw 'timeoutMinutes must be 1-120.' }
 if ([int]$config.staleLockMinutes -lt 1) { throw 'staleLockMinutes must be positive.' }
 if ([int]$config.dailyHourLocal -lt 0 -or [int]$config.dailyHourLocal -gt 23) { throw 'dailyHourLocal must be 0-23.' }
 if ($Task -and $Task -notmatch '^\d+$') { throw 'Task hint must be a numeric Asana GID.' }

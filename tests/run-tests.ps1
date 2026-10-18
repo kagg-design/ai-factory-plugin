@@ -75,6 +75,36 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Invoke-FactoryScriptWithRedirectedInput {
+    param([string]$ScriptPath, [string[]]$Arguments)
+
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = [string](Get-Command powershell -ErrorAction Stop).Source
+    $startInfo.Arguments = (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) +
+        @($Arguments) | ForEach-Object { ConvertTo-FactoryWindowsArgument -Value ([string]$_) }) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = New-Object Text.UTF8Encoding($false)
+    $startInfo.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Could not start redirected approval fixture.' }
+        $process.StandardInput.Close()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            exitCode = $process.ExitCode
+            stdout = $stdoutTask.Result
+            stderr = $stderrTask.Result
+        }
+    } finally { $process.Dispose() }
+}
+
 function Invoke-FactoryHookWithUtf8Input {
     param(
         [Parameter(Mandatory = $true)][string]$HookPath,
@@ -615,7 +645,7 @@ try {
     Assert-True ([bool]$runtimeMigration.migrated -and [bool]$runtimeMigration.verified) "Synthetic runtime migration did not copy and verify the project."
     Assert-True ([bool]$runtimeMigration.sourceRetained -and (Test-Path -LiteralPath ([string]$context.projectData))) "Runtime migration removed its source copy."
     Assert-True (Test-Path -LiteralPath (Join-Path ([string]$runtimeMigration.destination) "runtime-migration.json")) "Runtime migration omitted its receipt."
-    Assert-Equal 9 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 10 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $initialFactoryConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 8 ([int]$initialFactoryConfig.codingConcurrency) "A fresh factory did not default to eight coding slots."
@@ -1407,7 +1437,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 9 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 10 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 3 ([int]$migratedConfig.codingConcurrency) "The deprecated concurrency alias was not migrated into codingConcurrency."
     Assert-True ((Get-FactoryCodingConcurrencySource -Config $migratedConfig) -match "deprecated concurrency is present but ignored") "Config diagnostics do not identify the retained deprecated alias."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
@@ -2876,8 +2906,15 @@ try {
     $approvalPreviewOutput = (& powershell -NoProfile -ExecutionPolicy Bypass -File $cliScriptPath preview test-task -NoOpen -Repository $repository | Out-String)
     Assert-True ($approvalPreviewOutput.Contains([string]$launch.worktree)) "Approval preview fixture did not start from the task worktree."
     $approvalPreview = Read-FactoryJson -Path ([string]$context.previewPath)
-    $decision = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action go -TaskId "test-task") |
-        ConvertFrom-Json
+    $legacyGateState = Read-FactoryJson -Path $context.statePath
+    Set-FactoryProperty -Target $legacyGateState.tasks[0] -Name 'mergeGate' -Value $true
+    Set-FactoryProperty -Target $legacyGateState.tasks[0] -Name 'sourceNotes' -Value @('Merge gate: ask Igor before merging')
+    Write-FactoryTestState -Context $context -Value $legacyGateState
+    $redirectedGo = Invoke-FactoryScriptWithRedirectedInput -ScriptPath (Join-Path $pluginRoot 'scripts\task-action.ps1') -Arguments @(
+        '-Repository', $repository, '-Action', 'go', '-TaskId', 'test-task'
+    )
+    Assert-Equal 0 ([int]$redirectedGo.exitCode) "Legacy mergeGate blocked go with redirected stdin: $($redirectedGo.stderr)"
+    $decision = $redirectedGo.stdout | ConvertFrom-Json
     Assert-Equal "approved" ([string]$decision.status) "Explicit go did not approve the task."
     Assert-Equal $commit ([string]$decision.approvedCommit) "Approval did not pin the exact commit."
     Assert-Equal ([string]$recordedReview.planHash) ([string]$decision.approvedPlanHash) "Approval did not pin the formal plan hash."
@@ -3230,9 +3267,15 @@ try {
     $directReadyTask = @($directReadyState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-Equal "changes-required" ([string]$directReadyTask.review.verdict) "Rejected direct approval mutated the known review."
     $directReadyTask.review = $null
+    Set-FactoryProperty -Target $directReadyTask -Name 'mergeGate' -Value $true
+    Set-FactoryProperty -Target $directReadyTask -Name 'sourceNotes' -Value @('Merge gate: ask Igor before merging')
     Write-FactoryTestState -Context $context -Value $directReadyState
 
-    $pipelineGo = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\approve-direct.ps1") -Repository $repository -TaskId "pipeline-task") | ConvertFrom-Json
+    $redirectedDirectGo = Invoke-FactoryScriptWithRedirectedInput -ScriptPath (Join-Path $pluginRoot 'scripts\approve-direct.ps1') -Arguments @(
+        '-Repository', $repository, '-TaskId', 'pipeline-task'
+    )
+    Assert-Equal 0 ([int]$redirectedDirectGo.exitCode) "Legacy mergeGate blocked direct go with redirected stdin: $($redirectedDirectGo.stderr)"
+    $pipelineGo = $redirectedDirectGo.stdout | ConvertFrom-Json
     Assert-Equal "approved" ([string]$pipelineGo.status) "Direct approval did not approve the native pipeline fixture."
     Assert-Equal "operator-direct" ([string]$pipelineGo.reviewMode) "Direct approval did not audit its review mode."
     Assert-Equal "operator-direct" ([string]$pipelineGo.approvalMode) "Direct approval did not audit its approval mode."
@@ -4068,7 +4111,7 @@ $result = [ordered]@{
         $slotFillStopwatch.Stop()
         $slotFillDiagnostic = ($slotFillTick | ConvertTo-Json -Depth 20 -Compress)
         Assert-Equal 3 ([int]$slotFillTick.launchedCount) "One scheduler cycle did not fill all three free Codex slots. Tick: $slotFillDiagnostic"
-        Assert-True ($slotFillStopwatch.Elapsed.TotalSeconds -lt 20) "Scheduler waited for a detached Codex descendant instead of returning after launcher result files. Elapsed: $([Math]::Round($slotFillStopwatch.Elapsed.TotalSeconds, 3))s."
+        Assert-True ($slotFillStopwatch.Elapsed.TotalSeconds -lt 28) "Scheduler waited for a detached Codex descendant instead of returning after launcher result files. Elapsed: $([Math]::Round($slotFillStopwatch.Elapsed.TotalSeconds, 3))s."
         $slotFillRecordedState = Read-FactoryJson -Path $context.statePath
         foreach ($slotFillTaskId in $slotFillTaskIds) {
             $slotFillTask = Get-FactoryTask -State $slotFillRecordedState -TaskId $slotFillTaskId

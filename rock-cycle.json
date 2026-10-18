@@ -3,8 +3,8 @@
   "igorGid": "1201416335822270",
   "stateDir": "%LOCALAPPDATA%\\rock-orchestrator",
   "claudePath": "claude",
-  "timeoutMinutes": 45,
-  "staleLockMinutes": 60,
+  "timeoutMinutes": 90,
+  "staleLockMinutes": 120,
   "dailyHourLocal": 9,
   "allowedTools": [
     "mcp__claude_ai_Asana__*",

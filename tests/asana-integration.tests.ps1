@@ -3,10 +3,32 @@ param([Parameter(Mandatory = $true)][string]$PluginRoot)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PluginRoot 'scripts\asana-common.ps1')
+. (Join-Path $PluginRoot 'scripts\factory-common.ps1')
+. (Join-Path $PluginRoot 'scripts\attention-state.ps1')
 
 function Assert-AsanaIntegration {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
+}
+
+$syncSource = Get-Content -LiteralPath (Join-Path $PluginRoot 'scripts\asana-sync.ps1') -Raw
+$syncTokens = $null
+$syncParseErrors = $null
+$syncAst = [Management.Automation.Language.Parser]::ParseInput($syncSource, [ref]$syncTokens, [ref]$syncParseErrors)
+Assert-AsanaIntegration (@($syncParseErrors).Count -eq 0) 'Asana sync does not parse.'
+$summaryFunction = @($syncAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Format-FactoryAsanaTestSummary' }, $true))[0]
+Assert-AsanaIntegration ($null -ne $summaryFunction) 'Asana sync test summary formatter is missing.'
+. ([scriptblock]::Create($summaryFunction.Extent.Text))
+& {
+    Set-StrictMode -Version 2.0
+    $checks = @(
+        [pscustomobject]@{ command = 'php artisan test --parallel'; status = 'passed' }
+        [pscustomobject]@{ name = 'Pint'; status = 'passed' }
+        [pscustomobject]@{ command = 'private command' }
+    )
+    $summary = Format-FactoryAsanaTestSummary -Checks $checks
+    Assert-AsanaIntegration ($summary -eq 'Check 1: passed, Pint: passed, Check 3: unknown') 'Asana sync could not summarize checks without a name or status, or exposed a raw command.'
+    Assert-AsanaIntegration ((Format-FactoryAsanaTestSummary -Checks @()) -eq 'See factory review and integration checks.') 'Asana sync lost the empty-check fallback.'
 }
 
 $config = Get-Content -LiteralPath (Join-Path $PluginRoot 'config.default.json') -Raw | ConvertFrom-Json
@@ -41,6 +63,31 @@ Assert-AsanaIntegration (-not (Get-FactoryAsanaTaskRepo -Notes ("Build this" + [
 Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'ANSWER (billing-orchestrator): B') -eq 'billing-orchestrator') 'Billing answer tag was ignored.'
 Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'Igor says A') -eq 'Igor') 'Untagged Igor comment was misclassified.'
 Assert-AsanaIntegration ((Get-FactoryAsanaCommentActor -Text 'ANSWER (Igor via terminal): A') -eq 'Igor') 'Igor terminal answer was misclassified.'
+
+$pendingQuestion = [pscustomobject]@{
+    storyGid = 'question-story-1'
+    askedAt = '2026-10-17T10:00:00Z'
+    text = "QUESTION (factory):`n1. Which option?`n   Options: A or B"
+}
+$questionState = [pscustomobject]@{
+    tasks = @([pscustomobject]@{
+        id = '123'; title = 'Asana worker'; status = 'blocked'; asanaMode = $true
+        asanaQuestion = $pendingQuestion; updatedAt = '2026-10-17T10:01:00Z'
+        error = 'Worker stopped for an answer.'
+    })
+    scheduler = [pscustomobject]@{ status = 'stopped' }
+    paused = $false
+}
+$questionEvents = @(Get-FactoryOperatorActionEvents -State $questionState -Config $config)
+Assert-AsanaIntegration ($questionEvents.Count -eq 1 -and $questionEvents[0].kind -eq 'asana-question') 'An Asana question appeared as a generic blocked failure.'
+Assert-AsanaIntegration ($questionEvents[0].reason -eq $pendingQuestion.text -and $questionEvents[0].command -like 'factory answer 123*') 'The terminal attention event omitted the question or answer command.'
+$questionKey = Get-FactoryAttentionEventKey -Event $questionEvents[0]
+$questionState.tasks[0].updatedAt = '2026-10-17T10:05:00Z'
+$nextEvents = @(Get-FactoryOperatorActionEvents -State $questionState -Config $config)
+Assert-AsanaIntegration ((Get-FactoryAttentionEventKey -Event $nextEvents[0]) -eq $questionKey) 'A routine state update repeated the same Asana question.'
+$questionState.tasks[0].asanaQuestion = $null
+$closedEvents = @(Get-FactoryOperatorActionEvents -State $questionState -Config $config)
+Assert-AsanaIntegration ($closedEvents[0].kind -eq 'blocked') 'A resolved Asana question remained an active terminal question.'
 
 & {
     Set-StrictMode -Version 2.0
@@ -211,4 +258,100 @@ foreach ($scriptName in @('rock-cycle.ps1', 'install-rock-cycle-task.ps1')) {
     Assert-AsanaIntegration ($process.ExitCode -ne 0 -and $output -match 'Rock config not found') "$scriptName failed before checking its config path."
 }
 
-Write-Host 'Asana integration tests passed (factory fields, repo routing, comment tags, rock selection and pause control).' -ForegroundColor Green
+$answerTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("factory-asana-answer-$([Guid]::NewGuid().ToString('N'))")
+$answerRepo = Join-Path $answerTestRoot 'repo'
+$answerWorktree = Join-Path $answerTestRoot 'worker'
+$previousFactoryHome = $env:CLAUDE_FACTORY_HOME
+$previousTestToken = [Environment]::GetEnvironmentVariable('FACTORY_ASANA_TEST_TOKEN')
+try {
+    New-Item -ItemType Directory -Path $answerRepo -Force | Out-Null
+    New-Item -ItemType Directory -Path $answerWorktree -Force | Out-Null
+    & git -C $answerRepo init -q
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create isolated Asana answer test repository.' }
+    $env:CLAUDE_FACTORY_HOME = Join-Path $answerTestRoot 'runtime'
+    [Environment]::SetEnvironmentVariable('FACTORY_ASANA_TEST_TOKEN', 'unit-test-token')
+    $answerContext = & (Join-Path $PluginRoot 'scripts\project-context.ps1') -Repository $answerRepo -Initialize | ConvertFrom-Json
+    $answerConfig = Read-FactoryJson -Path $answerContext.configPath
+    $answerConfig.asana.tokenEnv = 'FACTORY_ASANA_TEST_TOKEN'
+    Write-FactoryJsonAtomic -Path $answerContext.configPath -Value $answerConfig
+    $answerMutex = Enter-FactoryMutex -ProjectKey ([string]$answerContext.projectKey)
+    try {
+        $answerState = Read-FactoryJson -Path $answerContext.statePath
+        Set-FactoryProperty -Target $answerState -Name 'tasks' -Value @([pscustomobject]@{
+            id = '123'; title = 'Asana question'; status = 'blocked'; asanaMode = $true
+            worktree = $answerWorktree; brief = 'Finish the Asana task.'; attempts = 1
+            commit = $null; workerResult = [pscustomobject]@{ status = 'blocked' }
+            asanaState = 'Question'; asanaQuestion = [pscustomobject]@{
+                storyGid = 'question-story-1'; askedAt = '2026-10-17T10:00:00Z'
+                text = 'QUESTION (factory): A or B?'; lastPolledAt = '2026-10-17T10:05:00Z'
+            }
+        })
+        Write-FactoryJsonAtomic -Path $answerContext.statePath -Value $answerState
+    } finally { Exit-FactoryMutex -Mutex $answerMutex }
+
+    $global:FactoryAsanaAnswerTest = [pscustomobject]@{
+        factoryValue = [string]$answerConfig.asana.fields.question
+        comments = New-Object Collections.Generic.List[object]
+        posts = 0
+    }
+    function Invoke-RestMethod {
+        param($Uri, $Method, $Headers, $ErrorAction, $ContentType, $Body)
+        $requestPath = ([uri]$Uri).AbsolutePath
+        if ($requestPath -eq '/api/1.0/tasks/123' -and $Method -eq 'GET') {
+            return [pscustomobject]@{ data = [pscustomobject]@{
+                name = 'Asana question'; permalink_url = 'https://app.asana.com/0/project/123'
+                custom_fields = @([pscustomobject]@{
+                    gid = [string]$answerConfig.asana.fields.factory
+                    enum_value = [pscustomobject]@{ gid = [string]$global:FactoryAsanaAnswerTest.factoryValue }
+                })
+            } }
+        }
+        if ($requestPath -eq '/api/1.0/tasks/123/stories' -and $Method -eq 'GET') {
+            return [pscustomobject]@{ data = @($global:FactoryAsanaAnswerTest.comments.ToArray()) }
+        }
+        if ($requestPath -eq '/api/1.0/tasks/123/stories' -and $Method -eq 'POST') {
+            $payload = $Body | ConvertFrom-Json
+            $global:FactoryAsanaAnswerTest.posts++
+            $comment = [pscustomobject]@{
+                gid = "answer-$($global:FactoryAsanaAnswerTest.posts)"; text = [string]$payload.data.text
+                created_at = '2026-10-17T10:06:00Z'; resource_subtype = 'comment_added'
+            }
+            $global:FactoryAsanaAnswerTest.comments.Add($comment)
+            return [pscustomobject]@{ data = $comment }
+        }
+        if ($requestPath -eq '/api/1.0/tasks/123' -and $Method -eq 'PUT') {
+            $payload = $Body | ConvertFrom-Json
+            $field = [string]$answerConfig.asana.fields.factory
+            $global:FactoryAsanaAnswerTest.factoryValue = [string]$payload.data.custom_fields.$field
+            return [pscustomobject]@{ data = [pscustomobject]@{} }
+        }
+        throw "Unexpected isolated Asana request: $Method $requestPath"
+    }
+    $firstAnswer = @(& (Join-Path $PluginRoot 'factory.ps1') answer '123' --text 'A' -Repository $answerRepo -NoReconcile)
+    Assert-AsanaIntegration ($global:FactoryAsanaAnswerTest.posts -eq 1 -and $global:FactoryAsanaAnswerTest.factoryValue -eq [string]$answerConfig.asana.fields.taken) 'Terminal answer did not post once and return Asana to Taken.'
+    $answerState = Read-FactoryJson -Path $answerContext.statePath
+    Assert-AsanaIntegration ($answerState.tasks[0].asanaState -eq 'Taken' -and $null -eq $answerState.tasks[0].asanaQuestion.lastPolledAt) 'Terminal answer did not request an immediate Asana sync.'
+    $secondAnswer = @(& (Join-Path $PluginRoot 'factory.ps1') answer '123' --text 'A' -Repository $answerRepo -NoReconcile)
+    Assert-AsanaIntegration ($global:FactoryAsanaAnswerTest.posts -eq 1 -and ($secondAnswer -join ' ') -match 'already posted') 'Repeating a terminal answer posted a duplicate comment.'
+    $answerTaskScript = Join-Path $PluginRoot 'scripts\answer-task.ps1'
+    $directAnswerError = ''
+    try { $null = & $answerTaskScript -Repository $answerRepo -TaskId '123' -Text 'A' -Mode auto }
+    catch { $directAnswerError = $_.Exception.Message }
+    Assert-AsanaIntegration ($directAnswerError -match 'Use factory answer') 'Direct answer bypassed the pending Asana question.'
+    $syncOutput = @(& (Join-Path $PluginRoot 'scripts\asana-sync.ps1') -Repository $answerRepo)
+    $resumedState = Read-FactoryJson -Path $answerContext.statePath
+    Assert-AsanaIntegration ($resumedState.tasks[0].status -eq 'queued' -and $null -eq $resumedState.tasks[0].asanaQuestion -and
+        (Test-Path -LiteralPath (Join-Path $answerWorktree 'FACTORY-DECISIONS.md'))) 'Asana sync could not resume a worker with a blocked FACTORY_RESULT.'
+} finally {
+    $env:CLAUDE_FACTORY_HOME = $previousFactoryHome
+    [Environment]::SetEnvironmentVariable('FACTORY_ASANA_TEST_TOKEN', $previousTestToken)
+    Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+    Remove-Variable -Name FactoryAsanaAnswerTest -Scope Global -ErrorAction SilentlyContinue
+    $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    $resolvedAnswerRoot = [IO.Path]::GetFullPath($answerTestRoot)
+    if ($resolvedAnswerRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedAnswerRoot)) {
+        Remove-Item -LiteralPath $resolvedAnswerRoot -Recurse -Force
+    }
+}
+
+Write-Host 'Asana integration tests passed (fields, routing, rock selection, terminal questions and worker resume).' -ForegroundColor Green

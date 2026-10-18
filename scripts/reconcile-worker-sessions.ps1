@@ -373,11 +373,19 @@ try {
             $resultIsCurrent = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
                 (ConvertTo-FactoryUtcDateTime -Value $recordedAt)
         }
+        # Sync adopts a rebased commit and advances resultRecordedAt. The saved
+        # result event is then historical and must not be checked against HEAD.
+        $resultCommitMatchesTask = (
+            $resultIsForSession -and
+            [string]$task.commit -and
+            [string]$resultEvent.payload.commit -eq [string]$task.commit
+        )
+        $resultMayBeValidated = $resultIsCurrent -or $resultCommitMatchesTask
         $latestKind = if ($latestEventIsCurrent) { [string]$latestEvent.kind } else { "" }
         # A later message or malformed marker cannot displace a completed
         # result while its commit and worktree still pass validation.
         $followupAfterResult = (
-            $resultIsForSession -and
+            $resultMayBeValidated -and
             [string]$resultEvent.payload.status -eq "completed" -and
             $latestKind -in @("message", "invalid-marker") -and
             (ConvertTo-FactoryUtcDateTime -Value $latestEvent.capturedAt) -gt

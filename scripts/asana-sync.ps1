@@ -21,6 +21,19 @@ function Set-AsanaSyncState {
     } finally { Exit-FactoryMutex -Mutex $mutex }
 }
 
+function Format-FactoryAsanaTestSummary {
+    param([object[]]$Checks)
+    if (-not $Checks.Count) { return 'See factory review and integration checks.' }
+    $number = 0
+    return (@($Checks | ForEach-Object {
+        $number++
+        $name = [string](Get-FactoryNestedValue -Target $_ -Name 'name' -Default '')
+        if (-not $name) { $name = "Check $number" }
+        $status = [string](Get-FactoryNestedValue -Target $_ -Name 'status' -Default 'unknown')
+        "${name}: $status"
+    }) -join ', ')
+}
+
 foreach ($task in @($state.tasks | Where-Object {
     [bool](Get-FactoryNestedValue -Target $_ -Name 'asanaMode' -Default $false) -and (
         ($null -ne (Get-FactoryNestedValue -Target $_ -Name 'asanaQuestion') -and
@@ -65,7 +78,7 @@ foreach ($task in @($state.tasks | Where-Object {
                 $answer = "Asana comments after QUESTION (factory). The leading comment tag identifies the speaker; the Asana account does not. If Igor's untagged answer or ANSWER (Igor via terminal) conflicts with an orchestrator's answer, follow Igor's. Read every comment below:`n" + ($lines -join "`n")
                 $result = Invoke-FactoryNativeProcess -Command 'powershell' -Arguments @(
                     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'answer-task.ps1'),
-                    '-Repository', [string]$context.repositoryRoot, '-TaskId', $gid, '-Text', $answer, '-Mode', 'auto'
+                    '-Repository', [string]$context.repositoryRoot, '-TaskId', $gid, '-Text', $answer, '-Mode', 'auto', '-FromAsanaSync'
                 ) -TimeoutSeconds 120
                 if ([int]$result.exitCode -ne 0) { throw "Could not resume worker: $($result.output)" }
                 Set-AsanaSyncState -TaskId $gid -Field 'asanaQuestion' -Value $null
@@ -95,7 +108,7 @@ foreach ($task in @($state.tasks | Where-Object {
             $productionSha = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'production') -Name 'mergeCommit' -Default '')
             $spec = [string](Get-FactoryNestedValue -Target $task -Name 'asanaSpecPath' -Default '')
             $checks = @(Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'workerResult') -Name 'tests' -Default @())
-            $testText = if ($checks.Count) { @($checks | ForEach-Object { [string]$_.name + ': ' + [string]$_.status }) -join ', ' } else { 'See factory review and integration checks.' }
+            $testText = Format-FactoryAsanaTestSummary -Checks $checks
             $message = "DONE (factory):`nMerged: $($config.developmentBranch) $developmentSha, $($config.productionBranch) $productionSha`nSpec: $spec`nTests: $testText`nNotes: Verify the published change."
             $comments = @(Get-FactoryAsanaComments -Config $config -Gid $gid)
             if (-not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {

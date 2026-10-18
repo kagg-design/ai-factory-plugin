@@ -178,6 +178,10 @@ function Invoke-CliReconcile {
 function Get-CliTaskReason {
     param($Task)
 
+    $asanaQuestion = Get-CliProperty -InputObject $Task -Name "asanaQuestion"
+    if ($null -ne $asanaQuestion -and [string](Get-CliProperty -InputObject $Task -Name "status") -in @("blocked", "held", "awaiting-input")) {
+        return ConvertTo-CliLine -Value (Get-CliProperty -InputObject $asanaQuestion -Name "text")
+    }
     $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
     $blockedReason = if ((Get-CliEffectiveStatus -Task $Task) -eq "session-blocked") {
         Get-CliProperty -InputObject $session -Name "blockedReason"
@@ -402,8 +406,14 @@ function Get-CliNextAction {
         default { "$prompt inspect $id" }
     }
 
+    $asanaQuestion = Get-CliProperty -InputObject $Task -Name "asanaQuestion"
+    if ($null -ne $asanaQuestion -and $status -in @("blocked", "held", "awaiting-input")) {
+        $primary = "$prompt answer $id --text `"...`""
+    }
+
     $alternative = ""
-    if ($status -eq "awaiting-input") { $alternative = "$prompt answer $id --text `"...`"" }
+    if ($null -ne $asanaQuestion -and $status -in @("blocked", "held", "awaiting-input")) { $alternative = "" }
+    elseif ($status -eq "awaiting-input") { $alternative = "$prompt answer $id --text `"...`"" }
     elseif ($status -eq "awaiting-review" -and -not $reviewSessionActive) {
         $review = Get-CliProperty -InputObject $Task -Name "review"
         $reviewVerdict = [string](Get-CliProperty -InputObject $review -Name "verdict")
@@ -992,16 +1002,6 @@ function Write-CliGo {
 
     $task = Get-CliTask -State $State -TaskId $TaskId -CommandName "go"
     $title = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $task -Name "title") -Fallback "Untitled task"
-    $mergeGateApprovedCommit = ''
-    if ([bool](Get-CliProperty -InputObject $task -Name 'mergeGate' -Default $false)) {
-        if ([Console]::IsInputRedirected) {
-            throw "Merge gate requires an interactive terminal. Run 'factory go $TaskId' there and answer YES."
-        }
-        Write-Output "Merge gate: task $TaskId will publish reviewed commit $([string]$task.commit)."
-        $confirmation = Read-Host 'Igor, type YES to merge'
-        if ($confirmation -cne 'YES') { throw 'Merge gate declined; nothing was approved.' }
-        $mergeGateApprovedCommit = [string]$task.commit
-    }
     if ($DirectApproval) {
         $readiness = Get-FactoryDirectApprovalReadiness -Config $Config -State $State -Task $task -RepositoryRoot ([string]$Repository)
         if (-not [bool]$readiness.ready) {
@@ -1012,7 +1012,6 @@ function Write-CliGo {
         Invoke-CliJsonScript -ScriptName "approve-direct.ps1" -Arguments @(
             "-Repository", [string]$Repository,
             "-TaskId", $TaskId,
-            "-MergeGateApprovedCommit", $mergeGateApprovedCommit,
             "-ClaudeCommand", $ClaudeCommand
         )
     } else {
@@ -1020,7 +1019,6 @@ function Write-CliGo {
             "-Repository", [string]$Repository,
             "-Action", "go",
             "-TaskId", $TaskId,
-            "-MergeGateApprovedCommit", $mergeGateApprovedCommit,
             "-ClaudeCommand", $ClaudeCommand
         )
     }
@@ -1812,6 +1810,7 @@ function Write-CliHelp {
             "  factory chat <task-id>",
             "  factory new [--auto] <file> [title] | factory new [--auto] [text]",
             "  factory add --file <task.json>",
+            "  factory answer <task-id> --text <answer>  (pending Asana question)",
             "  factory go <task-id> [--direct]",
             "  factory hold <task-id>",
             "  factory retry <task-id>",
@@ -1883,6 +1882,13 @@ function Write-CliHelp {
                 "factory chat <task-id>",
                 "Resolves the saved Claude or Codex worker session and prints the exact attach command.",
                 "Run the printed command in PowerShell; the orchestrator does not start a nested interactive process."
+            ) | Write-Output
+        }
+        "answer" {
+            @(
+                'factory answer <task-id> --text "your answer"',
+                'Posts an answer to a pending Asana question and returns Factory to Taken.',
+                'The native scheduler then resumes the worker from the Asana comments.'
             ) | Write-Output
         }
         "hold" {
@@ -2340,6 +2346,14 @@ switch ($normalizedCommand) {
     "chat" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "chat accepts exactly one task ID." }
         Write-CliChat -State $state -TaskId $Target -ReconcileWarning $reconcileWarning
+    }
+    "answer" {
+        if (-not $Target -or $remainingValues.Count -ne 2 -or $remainingValues[0] -ne '--text' -or
+            -not [string]$remainingValues[1] -or $anyDestructiveOptionsUsed -or $startOptionsUsed) {
+            throw 'Use: factory answer <task-id> --text "your answer"'
+        }
+        & (Join-Path $PSScriptRoot 'asana-terminal-answer.ps1') -Repository ([string]$context.repositoryRoot) `
+            -TaskId $Target -Answer ([string]$remainingValues[1])
     }
     "go" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "go accepts exactly one task ID." }

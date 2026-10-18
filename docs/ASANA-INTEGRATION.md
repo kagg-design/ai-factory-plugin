@@ -35,10 +35,8 @@ conflict, Igor's answer takes precedence.
 
 Questions resume only after Factory returns to Taken and every subsequent
 comment is passed to the worker. After 24 hours, the terminal fallback posts
-`ANSWER (Igor via terminal):`. A task that says
-`Merge gate: ask Igor before merging` still requires Igor's explicit YES
-before publication. Done is reported only after the native publication
-pipeline reaches done.
+`ANSWER (Igor via terminal):`. Done is reported only after the native
+publication pipeline reaches done.
 
 ## Rock launcher setup
 
@@ -86,6 +84,8 @@ so correct ownership still depends on the epic instructions and the agent
 following them. Claude runs in `dontAsk` mode with Edit, Write, and NotebookEdit
 denied. The launcher runs access, then billing, one Claude process
 at a time. Each has `stateDir\<name>` for its lock, state, and logs.
+Each Claude process has a 90-minute limit. The interactive launcher prints
+when it checks Asana, when Claude starts, and once per minute while it runs.
 An untagged `/pause` or `/resume` comment by Igor on one epic controls only
 that orchestrator. Each runs once daily after 09:00 local time even without
 other changes.

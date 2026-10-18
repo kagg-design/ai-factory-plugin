@@ -68,6 +68,7 @@ Fast local commands (prefix with !; no AI interpretation)
   !factory new [text]      create a local task without AI or Asana
   !factory new FILE [title] create a local task from a specification file
   !factory add --file PATH import normalized task without AI
+  !factory answer <id> --text "..." answer a pending Asana worker question
   !factory go <id> [--direct] approve, optionally skipping AI review
   !factory hold <id>       retain task on hold
   !factory retry <id>      retry a recoverable worker/launch failure
@@ -531,6 +532,9 @@ Choose `Next:` from the actual task data:
   manual hold.
 - `blocked` or `failed`: `/factory inspect <id>`, then show
   `/factory retry <id>` only when its retry prerequisites are satisfied.
+- A blocked, held, or awaiting-input Asana worker with `asanaQuestion`: show the
+  recorded question and `/factory answer <id> --text "..."` as the next action.
+  Do not treat this as a generic worker failure or retry it before answering.
 - `rejected`: this exists only after `reject --keep`; use `/factory inspect <id>`
   or run ordinary `/factory reject <id>` to discard it after confirmation.
 
@@ -862,8 +866,25 @@ that must remain inspectable.
 
 ### `answer <task-id> (--text TEXT|--file PATH) [--interactive]`
 
-Record decisions for a stopped, blocked, or awaiting-input worker with the
-bundled script:
+For a pending Asana question (`asanaQuestion` in factory state), show the exact
+question, context, options, and default to Igor in this orchestrator conversation.
+The `asana-question` event from `factory wait` carries those details. Check the
+current task before asking or posting: the rock orchestrator may already have
+answered in Asana. Do not choose the answer or send a placeholder on Igor's
+behalf. After Igor replies, run:
+
+```powershell
+factory answer TASK_ID --text "IGOR'S ANSWER"
+```
+
+This posts `ANSWER (Igor via terminal)` on the Asana child task and changes its
+Factory field from Question to Taken. Native Asana sync then imports all comments
+after the question, gives Igor's answer precedence, and requeues the worker.
+If Asana is already Taken, inspect the existing answer instead of overwriting it.
+Keep `factory wait` active between turns so new question edges reach this terminal.
+
+For ordinary stopped, blocked, or awaiting-input workers without `asanaQuestion`,
+record decisions with the bundled script:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/answer-task.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -TaskId TASK_ID -Text TEXT -Mode auto

@@ -274,14 +274,12 @@ try {
             [IO.File]::WriteAllText($specFile, $asanaNotes, (New-Object Text.UTF8Encoding($false)))
         }
     }
-    $mergeGate = $asanaMode -and $asanaNotes -match '(?i)Merge gate:\s*ask Igor before merging'
     if ($asanaMode) {
         $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
         try {
             $state = Read-FactoryJson -Path $context.statePath
             $savedTask = Get-FactoryTask -State $state -TaskId $TaskId
             Set-FactoryProperty -Target $savedTask -Name 'asanaSpecPath' -Value $specPath
-            Set-FactoryProperty -Target $savedTask -Name 'mergeGate' -Value ([bool]$mergeGate)
             Write-FactoryJsonAtomic -Path $context.statePath -Value $state
         } finally { Exit-FactoryMutex -Mutex $mutex }
     }
@@ -296,7 +294,6 @@ try {
         asanaMode = $asanaMode
         asanaSpecPath = $specPath
         asanaQuestionScript = if ($asanaMode) { Join-Path ([string]$context.pluginRoot) 'scripts\asana-question.ps1' } else { $null }
-        mergeGate = [bool]$mergeGate
         launchMode = $Mode
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)

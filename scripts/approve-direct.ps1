@@ -1,7 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$TaskId,
-    [string]$MergeGateApprovedCommit = "",
     [string]$ClaudeCommand = ""
 )
 
@@ -35,10 +34,6 @@ $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PS
     ConvertFrom-Json
 $state = Read-FactoryJson -Path ([string]$context.statePath)
 $task = Get-FactoryTask -State $state -TaskId $TaskId
-if ([bool](Get-FactoryNestedValue -Target $task -Name 'mergeGate' -Default $false) -and
-    $MergeGateApprovedCommit -ne [string]$task.commit) {
-    throw "Merge gate for '$TaskId' requires Igor's explicit terminal YES for commit '$($task.commit)'."
-}
 $config = Read-FactoryJson -Path ([string]$context.configPath)
 $readiness = Get-FactoryDirectApprovalReadiness -Config $config -State $state -Task $task -RepositoryRoot ([string]$context.repositoryRoot)
 if (-not [bool]$readiness.ready) {
@@ -68,7 +63,6 @@ try {
         "-Repository", [string]$context.repositoryRoot,
         "-Action", "go",
         "-TaskId", $TaskId,
-        "-MergeGateApprovedCommit", $MergeGateApprovedCommit,
         "-ClaudeCommand", $ClaudeCommand
     )
     [ordered]@{
