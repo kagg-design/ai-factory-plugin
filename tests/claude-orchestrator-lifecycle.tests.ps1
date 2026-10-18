@@ -111,6 +111,7 @@ try {
     $config = Read-FactoryJson $context.configPath
     $config.nativeScheduler.enabled = $false
     $config.nativeScheduler.startWithOrchestrator = $false
+    Set-FactoryProperty -Target $config.orchestrator -Name 'name' -Value 'Claude Factory Orchestrator'
     Write-FactoryJsonAtomic $context.configPath $config
     $identityPath = Join-Path $context.projectData 'orchestrator-session.json'
     Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $repository -Name 'Claude Factory Orchestrator' -SessionId $sessionId -BackgroundId 'test1234'
@@ -304,6 +305,27 @@ try {
     $rotationArgs = [IO.File]::ReadAllLines($backgroundArgvPath)
     Assert-Lifecycle ($rotationArgs -contains '--append-system-prompt' -and $rotationArgs -contains $context.projectData) 'Rotation lost the private handoff.'
     Assert-Lifecycle ([IO.File]::ReadAllText($context.statePath) -ceq $beforeState) 'Background lifecycle changed the task ledger.'
+
+    # Changing the configured label retains the exact conversation. The old
+    # stopped Agent View row is removed only after verifying its transcript.
+    $beforeRename = Read-FactoryJson $identityPath
+    [IO.File]::WriteAllText((Join-Path $transcriptsPath "$($beforeRename.sessionId).jsonl"), '{"type":"user","message":"Keep this conversation"}')
+    $renamedConfig = Read-FactoryJson $context.configPath
+    Set-FactoryProperty -Target $renamedConfig.orchestrator -Name 'name' -Value 'AwesomeHR'
+    Write-FactoryJsonAtomic $context.configPath $renamedConfig
+    $renamed = Invoke-LifecycleCommand 'restart'
+    Assert-Lifecycle ($renamed.exitCode -eq 0) "Named restart failed: $($renamed.output)"
+    $afterRename = Read-FactoryJson $identityPath
+    $expectedName = 'Factory ' + [char]0x00B7 + ' AwesomeHR'
+    Assert-Lifecycle ($afterRename.sessionId -eq $beforeRename.sessionId -and $afterRename.name -ceq $expectedName) 'Named restart changed the conversation UUID or kept the old label.'
+    $namedArgs = [IO.File]::ReadAllLines($backgroundArgvPath)
+    Assert-Lifecycle ($namedArgs -contains $expectedName -and $namedArgs -contains '--resume' -and $namedArgs -contains $beforeRename.sessionId) 'Named restart did not pass the label and exact UUID to Claude.'
+    Assert-Lifecycle ([IO.File]::ReadAllText($context.statePath) -ceq $beforeState) 'Named restart changed the task ledger.'
+    $launchesBeforeOverride = [IO.File]::ReadAllText($launchCountPath)
+    $override = Invoke-LifecycleCommand 'start' @('-Name', 'Auditors')
+    Assert-Lifecycle ($override.exitCode -eq 0) "-Name start failed: $($override.output)"
+    Assert-Lifecycle ((Read-FactoryJson $context.configPath).orchestrator.name -ceq 'Auditors') '-Name did not persist the short label.'
+    Assert-Lifecycle ([IO.File]::ReadAllText($launchCountPath) -ceq $launchesBeforeOverride) '-Name started a second live orchestrator.'
     Write-Host 'Claude orchestrator lifecycle tests passed (background-first launch, attach/restart, numbered recovery, unknown launches, task preservation).'
 } finally {
     foreach ($name in $savedEnvironment.Keys) {

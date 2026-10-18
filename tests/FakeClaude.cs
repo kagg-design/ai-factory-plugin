@@ -128,7 +128,8 @@ public static class FakeClaude
     private static string SessionJson(SessionRow row)
     {
         string transcripts = Env("CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS");
-        if (!String.IsNullOrEmpty(transcripts) && row.Name.StartsWith("Claude Factory Orchestrator"))
+        if (!String.IsNullOrEmpty(transcripts) &&
+            (row.Name.StartsWith("Claude Factory Orchestrator") || row.Name.StartsWith("Factory ")))
             row.TranscriptPath = Path.Combine(transcripts, row.SessionId + ".jsonl");
         string status = String.IsNullOrEmpty(row.Status) ? row.State : row.Status;
         string pid = row.HasPid ? "\"pid\":4242," : "";

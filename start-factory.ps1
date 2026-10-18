@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Repository = (Get-Location).Path,
-    [string]$Name = "Claude Factory Orchestrator",
+    [string]$Name = "",
     [switch]$Resume,
     [switch]$Continue,
     [switch]$New,
@@ -23,6 +23,7 @@ $standaloneRoot = Join-Path $pluginRoot "standalone"
 . (Join-Path $pluginRoot "scripts\factory-common.ps1")
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
+. (Join-Path $pluginRoot "scripts\orchestrator-name.ps1")
 . (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
 . (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1")
 
@@ -59,6 +60,14 @@ if ($Model) {
 $contextJson = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $Repository -Initialize
 $context = $contextJson | ConvertFrom-Json
 $factoryConfig = Read-FactoryJson -Path ([string]$context.configPath)
+$orchestratorAlias = Get-FactoryOrchestratorAlias -Config $factoryConfig -Context $context -NameOverride $Name
+$sessionName = Get-FactoryOrchestratorDisplayName -Alias $orchestratorAlias
+if ($Name) {
+    $orchestratorConfig = Get-FactoryNestedValue -Target $factoryConfig -Name 'orchestrator'
+    if ($null -eq $orchestratorConfig) { $orchestratorConfig = [pscustomobject]@{} }
+    Set-FactoryProperty -Target $orchestratorConfig -Name 'name' -Value $orchestratorAlias
+    Set-FactoryProperty -Target $factoryConfig -Name 'orchestrator' -Value $orchestratorConfig
+}
 $selectedAgent = if ($Agent) { $Agent } else { "claude" }
 $resolvedCodexCommand = ""
 if ($selectedAgent -eq "codex") {
@@ -142,7 +151,6 @@ try {
     $storedSessionId = if (
         -not $startNewConversation -and $null -ne $identity -and
         [string]$identity.repositoryRoot -and [string]$identity.sessionId -and
-        [string]$identity.name -ceq $Name -and
         (Test-FactorySamePath -Left ([string]$identity.repositoryRoot) -Right ([string]$context.repositoryRoot))
     ) { [string]$identity.sessionId } else { "" }
 
@@ -150,7 +158,7 @@ try {
     $matchingRows = @(Get-FactoryMatchingOrchestratorRows `
         -Rows $agentRows `
         -RepositoryRoot ([string]$context.repositoryRoot) `
-        -Name $Name -SessionId $storedSessionId)
+        -Name $sessionName -SessionId $storedSessionId)
     $interactiveRows = @($matchingRows | Where-Object {
         [string]$_.kind -eq "interactive" -and -not (Test-FactoryTerminalAgentRow -Row $_)
     })
@@ -167,7 +175,7 @@ try {
         if ($New -or $Resume -or $Continue) {
             throw "An orchestrator launch is pending. Run 'factory start' without selection flags to recover it first."
         }
-        $background = Start-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Name $Name -Rotation $pendingRotation
+        $background = Start-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Name $sessionName -Rotation $pendingRotation
         $storedSessionId = [string]$background.sessionId
         $startNewConversation = $false
         $recoveredLaunch = $true
@@ -185,7 +193,7 @@ try {
         $conversation = Select-FactoryOrchestratorConversation -Rows $matchingRows -PreferredSessionId $storedSessionId -IdentityUpdatedAt (Get-FactoryNestedValue $identity 'updatedAt' $null)
         if ($null -ne $conversation) {
             $storedSessionId = [string]$conversation.sessionId
-            Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $context.repositoryRoot -Name $Name -SessionId $storedSessionId
+            Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $context.repositoryRoot -Name ([string]$conversation.name) -SessionId $storedSessionId
         }
         if ($storedSessionId) {
             Remove-FactoryObsoleteOrchestratorRows -Rows $matchingRows -RetainedSessionId $storedSessionId -ClaudeCommand $ClaudeCommand
@@ -200,9 +208,28 @@ try {
             [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq $storedSessionId -and
             [string](Get-FactoryNestedValue $_ 'id' '')
         } | Sort-Object { [long](Get-FactoryNestedValue $_ 'startedAt' 0) } -Descending)
-        if ($savedRows.Count -gt 0) {
+        $sameNameFamily = $savedRows.Count -gt 0 -and @(
+            Get-FactoryMatchingOrchestratorRows -Rows @($savedRows[0]) -RepositoryRoot $context.repositoryRoot -Name $sessionName
+        ).Count -eq 1
+        if ($sameNameFamily) {
             Write-Host "Restarting saved background orchestrator: $($savedRows[0].id)" -ForegroundColor Green
-            $background = Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Row $savedRows[0] -Name $Name
+            $background = Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Row $savedRows[0] -Name $sessionName
+        } elseif ($savedRows.Count -gt 0) {
+            $oldRow = $savedRows[0]
+            $freshRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand | Where-Object {
+                [string](Get-FactoryNestedValue $_ 'id' '') -eq [string]$oldRow.id -and
+                [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq $storedSessionId -and
+                (Test-FactorySamePath ([string](Get-FactoryNestedValue $_ 'cwd' '')) ([string]$context.repositoryRoot))
+            })
+            if ($freshRows.Count -ne 1 -or -not (Test-FactoryTerminalAgentRow $freshRows[0])) {
+                throw "Cannot rename orchestrator '$($oldRow.id)': its saved Agent View row is missing or still running. No new session was launched."
+            }
+            $null = Assert-FactoryClaudeOrchestratorTranscript -Row $freshRows[0] -Context $context
+            $removed = Remove-FactoryAgentSessionRow -ClaudeCommand $ClaudeCommand -BackgroundId ([string]$oldRow.id)
+            if (-not $removed.removed) {
+                throw "Cannot rename orchestrator '$($oldRow.id)': $($removed.warning). No new session was launched."
+            }
+            Write-Host "Reusing conversation $storedSessionId with name $sessionName" -ForegroundColor Green
         }
     }
 
@@ -226,9 +253,12 @@ try {
             Write-FactoryOrchestratorIdentity `
                 -Path $identityPath `
                 -RepositoryRoot ([string]$context.repositoryRoot) `
-                -Name $Name `
+                -Name ([string]$background.name) `
                 -SessionId $backgroundSessionId `
                 -BackgroundId $backgroundId
+        }
+        if ([string]$background.name -cne $sessionName) {
+            Write-Warning "This running conversation is named '$([string]$background.name)'. The configured name '$sessionName' will apply after factory restart."
         }
         Write-Host "Reusing background orchestrator: $backgroundId" -ForegroundColor Green
         Set-Location $context.repositoryRoot
@@ -241,8 +271,8 @@ try {
         "--plugin-dir", $pluginRoot,
         "--add-dir", $standaloneRoot,
         "--permission-mode", "auto",
-        "--name", $Name,
-        "--remote-control", $Name
+        "--name", $sessionName,
+        "--remote-control", $sessionName
     )
     if ($Model) {
         $claudeArguments += @("--model", $Model)
@@ -264,7 +294,7 @@ try {
         $env:CLAUDE_FACTORY_ORCHESTRATOR = "1"
         Write-Host "$(if ($storedSessionId) { "Resuming factory conversation in background: $storedSessionId" } else { 'Creating background factory conversation...' })" -ForegroundColor Green
         $launched = Start-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context `
-            -Name $Name -Arguments $claudeArguments -SessionId $storedSessionId -Rotation $pendingRotation
+            -Name $sessionName -Arguments $claudeArguments -SessionId $storedSessionId -Rotation $pendingRotation
         Write-Host "Attaching factory orchestrator: $($launched.id)" -ForegroundColor Green
         & $ClaudeCommand attach ([string]$launched.id)
         exit $LASTEXITCODE

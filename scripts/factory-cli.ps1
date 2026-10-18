@@ -10,6 +10,7 @@ param(
     [switch]$ResumeSession,
     [switch]$Continue,
     [string]$Model = "",
+    [string]$Name = "",
     [string]$Agent = "",
     [string]$File = "",
     [switch]$Auto,
@@ -27,6 +28,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "completed-archive.ps1")
 . (Join-Path $PSScriptRoot "orchestrator-session.ps1")
+. (Join-Path $PSScriptRoot "orchestrator-name.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "codex-orchestrator.ps1")
 . (Join-Path $PSScriptRoot "publication-ci.ps1")
@@ -1567,6 +1569,7 @@ function Start-CliFactory {
     if ($ResumeSession) { $arguments.Resume = $true }
     if ($Continue) { $arguments.Continue = $true }
     if ($Model) { $arguments.Model = $Model }
+    if ($Name) { $arguments.Name = $Name }
     if ($Agent) { $arguments.Agent = $Agent }
     & (Join-Path $pluginRoot "start-factory.ps1") @arguments
     $script:CliExitCode = $LASTEXITCODE
@@ -1585,6 +1588,9 @@ function Restart-CliFactoryOrchestrator {
     $config = Read-FactoryJson -Path ([string]$Context.configPath)
     $runtime = [string](Get-CliProperty -InputObject $config -Name "workerAgent" -Default "claude")
     if ($runtime -notin @("claude", "codex")) { throw "Unsupported orchestrator runtime '$runtime'." }
+
+    $desiredAlias = Get-FactoryOrchestratorAlias -Config $config -Context $Context
+    $desiredName = Get-FactoryOrchestratorDisplayName -Alias $desiredAlias
 
     $pendingRotation = Get-FactoryPendingOrchestratorRotation -Context $Context -Runtime $runtime
     if ($null -ne $pendingRotation) {
@@ -1605,7 +1611,7 @@ function Restart-CliFactoryOrchestrator {
             (Test-FactorySamePath `
                 -Left ([string](Get-CliProperty -InputObject $identity -Name "repositoryRoot")) `
                 -Right ([string]$Context.repositoryRoot))
-        ) { [string]$identity.name } else { "Claude Factory Orchestrator" }
+        ) { [string]$identity.name } else { $desiredName }
         $storedSessionId = if (
             $null -ne $identity -and
             [string](Get-CliProperty -InputObject $identity -Name "sessionId") -and
@@ -1673,7 +1679,6 @@ function Restart-CliFactoryOrchestrator {
         RuntimeHome = [string]$Context.runtimeHome
         Agent = $runtime
     }
-    if ($runtime -eq "claude") { $arguments.Name = $name }
     & (Join-Path $pluginRoot "start-factory.ps1") @arguments
     $script:CliExitCode = $LASTEXITCODE
 }
@@ -1965,8 +1970,9 @@ function Write-CliHelp {
         }
         "start" {
             @(
-                "factory start [-New|-Resume|-Continue] [-Model name] [-Agent claude|codex]",
+                "factory start [-New|-Resume|-Continue] [-Model name] [-Name short-name] [-Agent claude|codex]",
                 "Starts or reuses the repository's Factory Orchestrator and starts its native scheduler.",
+                "-Name saves a short project label; Claude displays Factory <middle dot> short-name.",
                 "Without -Agent, both orchestrator and new workers use Claude. '-Agent codex' selects Codex for both.",
                 "Existing worker attempts keep the runtime with which they were launched.",
                 "Run this from PowerShell, not from inside an already open orchestrator."
@@ -2125,7 +2131,7 @@ foreach ($value in @($Remaining)) {
     elseif ($value -eq "--no-open") { $NoOpen = $true }
     else { $remainingValues.Add([string]$value) }
 }
-$startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model -or $Agent)
+$startOptionsUsed = [bool]($New -or $ResumeSession -or $Continue -or $Model -or $Name -or $Agent)
 $anyDestructiveOptionsUsed = [bool]($Yes -or $Keep -or $Force)
 $fileOptionUsed = [bool]$File
 $autoOptionUsed = [bool]$Auto
@@ -2223,7 +2229,7 @@ if ($normalizedCommand -eq "doctor") {
 }
 
 if ($normalizedCommand -eq "start") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, -Model, -Agent, and -CodexCommand." }
+    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $fileOptionUsed) { throw "start accepts only -New, -Resume, -Continue, -Model, -Name, -Agent, and -CodexCommand." }
     if (@(@($New, $ResumeSession, $Continue) | Where-Object { $_ }).Count -gt 1) { throw "-New, -Resume, and -Continue are mutually exclusive." }
     Start-CliFactory -Context $context
     exit $script:CliExitCode

@@ -131,6 +131,7 @@ param(
     [switch]$ResumeSession,
     [switch]$Continue,
     [string]$Model = "",
+    [string]$Name = "",
     [ValidateSet("claude", "codex")][string]$Agent = "",
     [string]$File = "",
     [switch]$Auto,
@@ -160,6 +161,7 @@ try {
         -ResumeSession:$ResumeSession `
         -Continue:$Continue `
         -Model $Model `
+        -Name $Name `
         -Agent $Agent `
         -File $File `
         -Auto:$Auto `

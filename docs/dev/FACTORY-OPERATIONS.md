@@ -121,16 +121,22 @@ the current directory." That conversation may belong to a scheduled task,
 ordinary development work, or another session rather than the factory.
 
 Start the factory without flags for normal use; it resumes the stored
-orchestrator. Claude-generated numbered names such as `Claude Factory
-Orchestrator (2)` belong to the same orchestrator family only in the exact
-repository. A live matching conversation takes precedence over a stale saved
-UUID. A stopped numbered copy created after the saved identity is also
-recovered; older history cannot override a deliberately refreshed identity.
-Startup removes obsolete completed orchestrator rows from Agent View, keeping
-their conversation transcripts and all unrelated sessions. An existing
-background conversation keeps its native name; rename it in Agent View with
-`Ctrl+R` if an older numbered name remains. Factory does not fork a conversation
-just to change its label.
+orchestrator. Set `orchestrator.name` in the private project config to a short
+label such as `AwesomeHR`, or run `factory start -Name AwesomeHR` to save it.
+Claude displays `Factory · AwesomeHR`. With no label, Factory derives a short
+name from the repository directory plus part of its project key. An existing
+live conversation retains its current label until `factory restart`. Restart
+verifies the saved transcript, stops the old background row, removes only its
+Agent View entry, and resumes the exact UUID under the configured label. A
+failed UUID check prevents attachment to a copy.
+
+Claude-generated numbered names such as `Claude Factory Orchestrator (2)`
+belong to the same orchestrator family only in the exact repository. A live
+matching conversation takes precedence over a stale saved UUID. A stopped
+numbered copy created after the saved identity is also recovered; older
+history cannot override a deliberately refreshed identity. Startup removes
+obsolete completed orchestrator rows from Agent View, keeping their
+conversation transcripts and all unrelated sessions.
 
 For manual recovery of a legacy conversation that predates
 the stored identity, use:

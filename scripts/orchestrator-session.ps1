@@ -145,6 +145,34 @@ function Start-FactoryClaudeBackgroundOrchestrator {
     return $row
 }
 
+function Assert-FactoryClaudeOrchestratorTranscript {
+    param(
+        [Parameter(Mandatory = $true)]$Row,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $backgroundId = [string]$Row.id
+    $sessionId = [string]$Row.sessionId
+    $transcript = [string](Get-FactoryNestedValue $Row 'transcriptPath' '')
+    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf)) {
+        $claudeConfigRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
+        $nativeStatePath = Join-Path $claudeConfigRoot "jobs\$backgroundId\state.json"
+        if (Test-Path -LiteralPath $nativeStatePath -PathType Leaf) {
+            $nativeState = Read-FactoryJson $nativeStatePath
+            if ([string](Get-FactoryNestedValue $nativeState 'sessionId' '') -eq $sessionId -and
+                (Test-FactorySamePath ([string](Get-FactoryNestedValue $nativeState 'cwd' '')) ([string]$Context.repositoryRoot))) {
+                $transcript = [string](Get-FactoryNestedValue $nativeState 'linkScanPath' '')
+            }
+        }
+    }
+    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf) -or
+        [IO.Path]::GetFileNameWithoutExtension($transcript) -ne $sessionId -or
+        (Get-Item -LiteralPath $transcript).Length -eq 0) {
+        throw "Cannot resume orchestrator '$backgroundId': its saved transcript is missing or unverified. Original intent will not be replayed."
+    }
+    return $transcript
+}
+
 function Resume-FactoryClaudeBackgroundOrchestrator {
     param(
         [Parameter(Mandatory = $true)][string]$ClaudeCommand,
@@ -162,23 +190,7 @@ function Resume-FactoryClaudeBackgroundOrchestrator {
     }
     # respawn replays the original intent if the saved transcript disappeared.
     # Require history first, so a lifecycle operation cannot replay e.g. "go".
-    $transcript = [string](Get-FactoryNestedValue $Row 'transcriptPath' '')
-    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf)) {
-        $claudeConfigRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.claude' }
-        $nativeStatePath = Join-Path $claudeConfigRoot "jobs\$backgroundId\state.json"
-        if (Test-Path -LiteralPath $nativeStatePath -PathType Leaf) {
-            $nativeState = Read-FactoryJson $nativeStatePath
-            if ([string](Get-FactoryNestedValue $nativeState 'sessionId' '') -eq $sessionId -and
-                (Test-FactorySamePath ([string](Get-FactoryNestedValue $nativeState 'cwd' '')) ([string]$Context.repositoryRoot))) {
-                $transcript = [string](Get-FactoryNestedValue $nativeState 'linkScanPath' '')
-            }
-        }
-    }
-    if (-not $transcript -or -not (Test-Path -LiteralPath $transcript -PathType Leaf) -or
-        [IO.Path]::GetFileNameWithoutExtension($transcript) -ne $sessionId -or
-        (Get-Item -LiteralPath $transcript).Length -eq 0) {
-        throw "Cannot respawn orchestrator '$backgroundId': its saved transcript is missing or unverified. Original intent will not be replayed."
-    }
+    $null = Assert-FactoryClaudeOrchestratorTranscript -Row $Row -Context $Context
 
     $receiptPath = Join-Path ([string]$Context.projectData) 'orchestrator-launch.json'
     if (Test-Path -LiteralPath $receiptPath) { throw "An orchestrator launch is already pending: $receiptPath" }
