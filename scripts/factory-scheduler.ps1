@@ -686,27 +686,24 @@ function Invoke-SchedulerTick {
         $attention = $null
         $attentionConfig = Read-FactoryJson -Path ([string]$context.configPath)
         $attentionSettings = Get-CliSafeProperty -InputObject $attentionConfig -Name "orchestrator"
-        if (
-            [string](Get-CliSafeProperty -InputObject $attentionConfig -Name "workerAgent" -Default "claude") -eq "codex" -and
-            [bool](Get-CliSafeProperty -InputObject $attentionSettings -Name "attentionBridge" -Default $true)
-        ) {
-            try {
-                $attention = Invoke-SchedulerChildJson -ScriptName "orchestrator-attention.ps1" -Arguments @(
-                    "-Repository", [string]$context.repositoryRoot,
-                    "-Action", "dispatch"
-                )
-                if ($null -ne $attention -and [bool](Get-CliSafeProperty -InputObject $attention -Name "dispatched" -Default $false)) {
-                    Write-SchedulerLog -Stream stdout -Event "orchestrator-wake" -Values @{
-                        revision = [long](Get-CliSafeProperty -InputObject $attention -Name "revision" -Default 0)
-                        threadId = [string](Get-CliSafeProperty -InputObject $attention -Name "threadId" -Default "")
-                        turnId = [string](Get-CliSafeProperty -InputObject $attention -Name "turnId" -Default "")
-                    }
+        # Journal every runtime each tick. Only Codex uses the transport dispatcher.
+        try {
+            $attention = Invoke-SchedulerChildJson -ScriptName "orchestrator-attention.ps1" -Arguments @(
+                "-Repository", [string]$context.repositoryRoot,
+                "-Action", $(if ([string]$attentionConfig.workerAgent -eq "codex" -and
+                    [bool](Get-CliSafeProperty -InputObject $attentionSettings -Name "attentionBridge" -Default $true)) { "dispatch" } else { "scan" })
+            )
+            if ($null -ne $attention -and [bool](Get-CliSafeProperty -InputObject $attention -Name "dispatched" -Default $false)) {
+                Write-SchedulerLog -Stream stdout -Event "orchestrator-wake" -Values @{
+                    revision = [long](Get-CliSafeProperty -InputObject $attention -Name "revision" -Default 0)
+                    threadId = [string](Get-CliSafeProperty -InputObject $attention -Name "threadId" -Default "")
+                    turnId = [string](Get-CliSafeProperty -InputObject $attention -Name "turnId" -Default "")
                 }
-            } catch {
-                # AI notification must never stop native reconciliation, launch, or
-                # publication. The durable attention journal remains pending.
-                Write-SchedulerLog -Stream stderr -Event "orchestrator-wake-error" -Values @{ error = $_.Exception.Message }
             }
+        } catch {
+            # AI notification must never stop native reconciliation, launch, or
+            # publication. The durable attention journal remains pending.
+            Write-SchedulerLog -Stream stderr -Event "orchestrator-wake-error" -Values @{ error = $_.Exception.Message }
         }
         $tickResult = [ordered]@{
             skipped = $false

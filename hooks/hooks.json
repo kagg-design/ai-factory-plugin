@@ -17,6 +17,59 @@
           {
             "type": "command",
             "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/scripts/capture-worker-stop.ps1\""
+          },
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-attention-hook.ps1"
+            ],
+            "asyncRewake": true,
+            "timeout": 86400,
+            "rewakeMessage": "Factory attention delivery:",
+            "rewakeSummary": "Factory attention"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-attention-hook.ps1"
+            ],
+            "asyncRewake": true,
+            "timeout": 86400,
+            "rewakeMessage": "Factory attention delivery:",
+            "rewakeSummary": "Factory attention"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/capture-worker-reply.ps1"
+            ]
           }
         ]
       }

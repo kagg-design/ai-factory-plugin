@@ -304,6 +304,7 @@ try {
         verificationMode = "targeted"
         testLeaseScript = Join-Path ([string]$context.pluginRoot) "scripts\test-lease.ps1"
         syncScript = Join-Path ([string]$context.pluginRoot) "scripts\sync-task.ps1"
+        amendScript = Join-Path ([string]$context.pluginRoot) "scripts\amend-task-commit.ps1"
         testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
         existingCommit = if ($existingCommit) { $existingCommit } else { $null }
         reworkRequestedAt = if ($reworkRequestedAt) { $reworkRequestedAt } else { $null }
@@ -327,9 +328,12 @@ attach to this session and interrupt or redirect you at any time.
 @"
 
 REWORK_REQUEST
+If launchMode is interactive, obey the read-only plan stop first. Apply these
+findings only after the operator explicitly approves implementation.
 This retained worker branch already has validated commit '$existingCommit'. A
-previous review and approval were cleared. Amend the existing task commit (and
-its implementation) so the branch still contains exactly one task commit above
+previous review and approval were cleared. Stage the implementation changes and
+use amendScript -Repository -TaskId to amend the existing task commit. Never run
+git commit --amend directly or use reset --soft. Keep exactly one task commit above
 the configured development branch, rerun appropriate checks, and emit a fresh
 FACTORY_RESULT for the new HEAD. The operator findings below are authoritative
 requirements for this rework attempt:

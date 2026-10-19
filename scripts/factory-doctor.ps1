@@ -393,7 +393,13 @@ $nativeRunnableDetail = if ($nativeRunnableTasks.Count -eq 0) {
 }
 Add-DoctorCheck -Name "runnableNativeWork" -Passed $true -Severity "info" -Detail "$($nativeRunnableTasks.Count): $nativeRunnableDetail"
 
-$attentionEvents = @(Get-FactoryOperatorActionEvents -State $state -Config $config)
+$claudeHealth = Get-FactoryClaudeAttentionHealth -Context $context -Config $config
+if ($claudeHealth.enabled) {
+    $consumerDetail = if ($claudeHealth.alive) { $claudeHealth.consumer | ConvertTo-Json -Compress } else { "No live consumer. Start/restart the Claude orchestrator to re-arm delivery." }
+    Add-DoctorCheck -Name "claudeAttentionConsumer" -Passed (-not $claudeHealth.needsAction) -Severity "warning" -Detail $consumerDetail
+}
+
+$attentionEvents = @(Get-FactoryOperatorActionEvents -State $state -Config $config -Context $context)
 $aiActions = @($attentionEvents | Where-Object { [bool](Get-FactoryNestedValue -Target $_ -Name "aiActionable" -Default $false) })
 $humanDecisions = @($attentionEvents | Where-Object { [bool](Get-FactoryNestedValue -Target $_ -Name "humanDecision" -Default $false) })
 $aiDetail = if ($aiActions.Count -eq 0) { "none" } else {

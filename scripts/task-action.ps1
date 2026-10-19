@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet("go", "hold", "reject", "rework", "retry", "release")][string]$Action,
     [Parameter(Mandatory = $true)][string]$TaskId,
     [string]$Instructions = "",
+    [ValidateSet("auto", "interactive")][string]$Mode = "auto",
     [string]$ClaudeCommand = "",
     [string]$CodexCommand = ""
 )
@@ -140,6 +141,7 @@ try {
             Set-FactoryProperty -Target $task -Name "agentId" -Value $null
             Set-FactoryProperty -Target $task -Name "status" -Value "queued"
             Set-FactoryProperty -Target $task -Name "reworkRequestedAt" -Value $now
+            Set-FactoryProperty -Target $task -Name "startMode" -Value $Mode
             Set-FactoryProperty -Target $task -Name "pendingInstructions" -Value $deliveryInstructions
             Set-FactoryProperty -Target $task -Name "error" -Value $null
             Set-FactoryProperty -Target $task -Name "holdReason" -Value $null

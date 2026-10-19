@@ -10,48 +10,6 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 
-function Test-FactoryPathInsideRoot {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Root
-    )
-
-    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar,
-        [IO.Path]::AltDirectorySeparatorChar
-    )
-    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar,
-        [IO.Path]::AltDirectorySeparatorChar
-    )
-    return $fullPath.StartsWith(
-        $fullRoot + [IO.Path]::DirectorySeparatorChar,
-        [StringComparison]::OrdinalIgnoreCase
-    )
-}
-
-function Resolve-FactorySyncGit {
-    $candidate = ([string]$env:CLAUDE_FACTORY_REAL_GIT).Trim()
-    if ($candidate) {
-        $candidate = [IO.Path]::GetFullPath($candidate)
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-            throw "CLAUDE_FACTORY_REAL_GIT does not identify an existing file: $candidate"
-        }
-    } else {
-        $commandName = if ($env:OS -eq "Windows_NT") { "git.exe" } else { "git" }
-        $resolved = Get-Command $commandName -CommandType Application -ErrorAction Stop | Select-Object -First 1
-        $candidate = if ([string]$resolved.Source) { [string]$resolved.Source } else { [string]$resolved.Path }
-    }
-    if (-not $candidate -or ($env:OS -eq "Windows_NT" -and [IO.Path]::GetExtension($candidate) -ne ".exe")) {
-        throw "Authorized sync requires a real Git executable, not a command shim."
-    }
-    $version = Invoke-FactoryNativeProcess -Command $candidate -Arguments @("--version")
-    if ([int]$version.exitCode -ne 0 -or [string]$version.stdout -notmatch '^git version\s+') {
-        throw "Authorized sync could not verify the configured Git executable '$candidate'."
-    }
-    return [IO.Path]::GetFullPath($candidate)
-}
-
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
@@ -64,6 +22,9 @@ try {
     try {
         $state = Read-FactoryJson -Path $context.statePath
         $task = Get-FactoryTask -State $state -TaskId $TaskId
+        if ($Action -eq "prepare" -and (Resume-FactoryTaskFromInSessionReply -Context $context -Task $task -LookupSession)) {
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+        }
     } finally {
         Exit-FactoryMutex -Mutex $mutex
         $mutex = $null

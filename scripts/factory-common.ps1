@@ -371,6 +371,110 @@ function Test-FactoryTaskHasValidatedResult {
     )
 }
 
+function Resume-FactoryTaskFromInSessionReply {
+    # Caller owns the project state mutex. A runtime row alone is never input.
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Task,
+        $SessionRow = $null,
+        [switch]$LookupSession
+    )
+
+    $fromStatus = [string]$Task.status
+    if ($fromStatus -notin @("awaiting-input", "blocked") -or
+        (Test-FactoryTaskHasValidatedResult -Task $Task) -or
+        [string](Get-FactoryNestedValue -Target $Task -Name "pendingInstructions") -or
+        $null -ne (Get-FactoryNestedValue -Target $Task -Name "asanaQuestion")) { return $false }
+    $session = Get-FactoryNestedValue -Target $Task -Name "backgroundSession"
+    $sessionId = [string](Get-FactoryNestedValue -Target $session -Name "sessionId")
+    if (-not $sessionId) { return $false }
+    $directory = Join-Path ([string]$Context.eventsPath) (ConvertTo-FactoryTaskArtifactName -TaskId ([string]$Task.id))
+    $replyPath = Join-Path $directory "latest-reply.json"
+    if (-not (Test-Path -LiteralPath $replyPath -PathType Leaf)) { return $false }
+    $reply = Read-FactoryJson -Path $replyPath
+    if ([string]$reply.kind -ne "reply" -or [string]$reply.sessionId -ne $sessionId -or [string]$reply.taskId -ne [string]$Task.id) { return $false }
+    $replyTime = ConvertFrom-FactoryRoundtripTimestamp -Value $reply.capturedAt
+    if (-not $replyTime.success) { return $false }
+    $sessionStarted = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $session -Name "startedAt")
+    if (-not $sessionStarted.success -or $replyTime.value -le $sessionStarted.value) { return $false }
+    foreach ($boundary in @((Get-FactoryNestedValue -Target $session -Name "startedAt"), (Get-FactoryNestedValue -Target $Task -Name "reworkRequestedAt"))) {
+        if (-not $boundary) { continue }
+        $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $boundary
+        if (-not $parsed.success -or $replyTime.value -le $parsed.value) { return $false }
+    }
+
+    $waiting = Get-FactoryNestedValue -Target $Task -Name "inSessionWaiting"
+    if ($null -eq $waiting) {
+        # Older tasks predate inSessionWaiting; require a matching captured marker.
+        $file = if ($fromStatus -eq "blocked") { "latest-result.json" } else { "latest.json" }
+        $path = Join-Path $directory $file
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $candidate = Read-FactoryJson -Path $path
+            $kind = [string](Get-FactoryNestedValue -Target $candidate -Name "kind")
+            if (($fromStatus -eq "awaiting-input" -and $kind -in @("plan", "invalid-marker")) -or
+                ($fromStatus -eq "blocked" -and $kind -eq "result" -and [string]$candidate.payload.status -eq "blocked")) {
+                $waiting = $candidate
+            }
+        }
+    }
+    if ($null -eq $waiting -and $fromStatus -eq "blocked" -and
+        [string](Get-FactoryNestedValue -Target $Task -Name "holdReason") -like "Worker session remained blocked for at least *") {
+        $waiting = [pscustomobject]@{ sessionId = $sessionId; capturedAt = $Task.updatedAt; kind = "blocked-timeout" }
+    }
+    if ($null -eq $waiting -or [string]$waiting.sessionId -ne $sessionId) { return $false }
+    $waitingKind = [string](Get-FactoryNestedValue -Target $waiting -Name "kind")
+    if (($fromStatus -eq "awaiting-input" -and $waitingKind -notin @("plan", "invalid-marker", "message")) -or
+        ($fromStatus -eq "blocked" -and $waitingKind -notin @("result", "blocked-timeout"))) { return $false }
+    $waitingTime = ConvertFrom-FactoryRoundtripTimestamp -Value $waiting.capturedAt
+    if (-not $waitingTime.success -or $replyTime.value -le $waitingTime.value) { return $false }
+    foreach ($name in @("planRecordedAt", "markerErrorRecordedAt", "resultRecordedAt")) {
+        $boundary = Get-FactoryNestedValue -Target $Task -Name $name
+        if (-not $boundary) { continue }
+        $parsed = ConvertFrom-FactoryRoundtripTimestamp -Value $boundary
+        if (-not $parsed.success -or $replyTime.value -le $parsed.value) { return $false }
+    }
+    # Do not resurrect a reply already followed by another Stop.
+    $latestPath = Join-Path $directory "latest.json"
+    if (Test-Path -LiteralPath $latestPath -PathType Leaf) {
+        $latest = Read-FactoryJson -Path $latestPath
+        $latestTime = ConvertFrom-FactoryRoundtripTimestamp -Value $latest.capturedAt
+        if ([string]$latest.sessionId -eq $sessionId -and $latestTime.success -and $latestTime.value -gt $replyTime.value) { return $false }
+    }
+    if ($LookupSession) {
+        if ([string](Get-FactoryNestedValue -Target $session -Name "runtime") -eq "codex") {
+            if ($null -eq (Get-Command Get-FactoryCodexSessionSnapshot -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot "codex-runtime.ps1") }
+            $SessionRow = Get-FactoryCodexSessionSnapshot -Session $session
+        } else {
+            $claudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) { $env:CLAUDE_FACTORY_CLAUDE_COMMAND } else { "claude" }
+            try {
+                $SessionRow = @(Get-FactoryClaudeAgentRows -ClaudeCommand $claudeCommand | Where-Object {
+                    [string](Get-FactoryNestedValue -Target $_ -Name "id") -eq [string]$session.id -or
+                    [string](Get-FactoryNestedValue -Target $_ -Name "sessionId") -eq $sessionId
+                } | Select-Object -First 1) | Select-Object -First 1
+            } catch { return $false }
+        }
+    }
+    if ($null -eq $SessionRow) { return $false }
+    $rowId = [string](Get-FactoryNestedValue -Target $SessionRow -Name "id")
+    $rowSessionId = [string](Get-FactoryNestedValue -Target $SessionRow -Name "sessionId")
+    if (($rowId -ne [string]$session.id -and $rowSessionId -ne $sessionId) -or
+        ($rowSessionId -and $rowSessionId -ne $sessionId)) { return $false }
+    Set-FactoryProperty -Target $Task -Name "status" -Value "running"
+    Set-FactoryProperty -Target $Task -Name "inSessionReply" -Value ([pscustomobject]@{
+        sessionId = $sessionId; capturedAt = ConvertTo-FactoryRoundtripTimestamp -Value $reply.capturedAt; fromStatus = $fromStatus
+    })
+    Set-FactoryProperty -Target $Task -Name "error" -Value $null
+    Set-FactoryProperty -Target $Task -Name "holdReason" -Value $null
+    if ([string](Get-FactoryNestedValue -Target $session -Name "state") -eq "blocked") {
+        Set-FactoryProperty -Target $session -Name "blockedAt" -Value (ConvertTo-FactoryRoundtripTimestamp -Value $reply.capturedAt)
+    }
+    if ([string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Task -Name "workerResult") -Name "status") -eq "blocked") {
+        Set-FactoryProperty -Target $Task -Name "workerResult" -Value $null
+    }
+    Set-FactoryProperty -Target $Task -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
+    return $true
+}
+
 function Test-FactoryTaskHasActiveSession {
     param([Parameter(Mandatory = $true)]$Task)
 
@@ -461,7 +565,8 @@ function Get-FactoryOperatorActionEvents {
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$Config,
-        [DateTime]$NowUtc = [DateTime]::UtcNow
+        [DateTime]$NowUtc = [DateTime]::UtcNow,
+        $Context = $null
     )
 
     $events = New-Object Collections.Generic.List[object]
@@ -574,7 +679,81 @@ function Get-FactoryOperatorActionEvents {
             command = if ($paused) { "factory resume" } else { "factory scheduler start" }
         })
     }
+    if ($null -ne $Context) {
+        $health = Get-FactoryClaudeAttentionHealth -Context $Context -Config $Config -NowUtc $NowUtc
+        if ($health.needsAction) {
+            $events.Add([pscustomobject][ordered]@{
+                kind = "orchestrator-attention"; taskId = $null; title = "Claude attention consumer"; status = "stopped"
+                audience = "human"; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
+                reason = "Deliverable attention is older than 60 seconds and no live Claude consumer exists."
+                occurredAt = $health.oldestPendingAt; command = "factory restart"
+            })
+        }
+    }
     return @($events.ToArray())
+}
+
+function Get-FactoryClaudeAttentionHealth {
+    param($Context, $Config, [DateTime]$NowUtc = [DateTime]::UtcNow)
+    $health = [pscustomobject]@{ enabled = $false; alive = $false; consumer = $null; needsAction = $false; oldestPendingAt = $null }
+    if ([string](Get-FactoryNestedValue -Target $Config -Name "workerAgent" -Default "claude") -ne "claude" -or
+        -not [bool](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Config -Name "orchestrator") -Name "attentionBridge" -Default $true)) { return $health }
+    $health.enabled = $true
+    $path = Join-Path ([string]$Context.projectData) "orchestrator-attention.json"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $health }
+    $attention = Read-FactoryJson -Path $path
+    $health.consumer = Get-FactoryNestedValue -Target $attention -Name "claudeConsumer"
+    $health.alive = Test-FactoryClaudeAttentionConsumer -Consumer $health.consumer -NowUtc $NowUtc
+    $cursor = [long](Get-FactoryNestedValue -Target $attention -Name "orchestratorAcknowledgedRevision" -Default 0)
+    $active = @(Get-FactoryNestedValue -Target $attention -Name "activeKeys" -Default @())
+    $pending = @($attention.events | Where-Object {
+        [long]$_.revision -gt $cursor -and $active -contains [string]$_.key -and
+        ([bool]$_.aiActionable -or ([bool]$_.humanDecision -and [bool]$_.includeInDefaultWait))
+    })
+    $claim = Get-FactoryNestedValue -Target $attention -Name "claudeClaim"
+    if ($null -ne $claim -and [string]$claim.status -eq "delivered") { $pending += @($claim.events) }
+    foreach ($event in $pending) {
+        $detected = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $event -Name "detectedAt")
+        if (-not $detected.success) { continue }
+        if (-not $health.oldestPendingAt -or $detected.value -lt (ConvertTo-FactoryUtcDateTime $health.oldestPendingAt)) {
+            $health.oldestPendingAt = ConvertTo-FactoryRoundtripTimestamp -Value $detected.value
+        }
+        if (-not $health.alive -and ($NowUtc.ToUniversalTime() - $detected.value).TotalSeconds -ge 60) { $health.needsAction = $true }
+    }
+    return $health
+}
+
+function Test-FactoryClaudeAttentionConsumer {
+    param($Consumer, [DateTime]$NowUtc = [DateTime]::UtcNow)
+    if (-not (Test-FactoryRecordedProcess -ProcessRecord $Consumer)) { return $false }
+    $heartbeat = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $Consumer -Name "heartbeatAt")
+    if (-not $heartbeat.success -or ($NowUtc.ToUniversalTime() - $heartbeat.value).TotalSeconds -gt 30) { return $false }
+    $hostProcess = Get-FactoryNestedValue -Target $Consumer -Name "hostProcess"
+    return $null -eq $hostProcess -or (Test-FactoryRecordedProcess -ProcessRecord $hostProcess)
+}
+
+function Get-FactoryClaudeHookHostProcess {
+    # A rewake child can survive Claude's stop/respawn. Bind the lease to the
+    # owning Claude process as well as the child, without querying other chats.
+    try {
+        $ancestors = @{}
+        foreach ($row in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -ErrorAction Stop)) {
+            $ancestors[[int]$row.ProcessId] = $row
+        }
+    } catch { return $null }
+    $ancestorId = $PID
+    for ($depth = 0; $depth -lt 12 -and $ancestorId -gt 0; $depth++) {
+        try {
+            $ancestor = $ancestors[$ancestorId]
+            if ($null -eq $ancestor) { return $null }
+            if ([string]$ancestor.Name -ieq "claude.exe") {
+                $process = Get-Process -Id $ancestorId -ErrorAction Stop
+                return [pscustomobject]@{ pid = $ancestorId; processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString("o") }
+            }
+            $ancestorId = [int]$ancestor.ParentProcessId
+        } catch { return $null }
+    }
+    return $null
 }
 
 function Test-FactoryPersistentSchedulerFailure {
@@ -2093,4 +2272,46 @@ function Remove-FactoryTaskAgentSessions {
         removeFailures = @($removeFailures)
         warnings = @(@($stopFailures) + @($removeFailures) | ForEach-Object { [string]$_.warning })
     }
+}
+
+function Test-FactoryPathInsideRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    return $fullPath.StartsWith(
+        $fullRoot + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Resolve-FactorySyncGit {
+    $candidate = ([string]$env:CLAUDE_FACTORY_REAL_GIT).Trim()
+    if ($candidate) {
+        $candidate = [IO.Path]::GetFullPath($candidate)
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            throw "CLAUDE_FACTORY_REAL_GIT does not identify an existing file: $candidate"
+        }
+    } else {
+        $commandName = if ($env:OS -eq "Windows_NT") { "git.exe" } else { "git" }
+        $resolved = Get-Command $commandName -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        $candidate = if ([string]$resolved.Source) { [string]$resolved.Source } else { [string]$resolved.Path }
+    }
+    if (-not $candidate -or ($env:OS -eq "Windows_NT" -and [IO.Path]::GetExtension($candidate) -ne ".exe")) {
+        throw "Authorized sync requires a real Git executable, not a command shim."
+    }
+    $version = Invoke-FactoryNativeProcess -Command $candidate -Arguments @("--version")
+    if ([int]$version.exitCode -ne 0 -or [string]$version.stdout -notmatch '^git version\s+') {
+        throw "Authorized sync could not verify the configured Git executable '$candidate'."
+    }
+    return [IO.Path]::GetFullPath($candidate)
 }

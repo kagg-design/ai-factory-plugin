@@ -42,8 +42,9 @@ FACTORY_PLAN
 }
 ```
 
-Then stop. Operator answers are delivered in a later factory attempt through
-`FACTORY-DECISIONS.md`.
+Then stop. The operator can reply in this same worker chat. Factory records
+`inSessionReply` and resumes this session. A separate `factory answer` command
+delivers decisions in a replacement attempt through `FACTORY-DECISIONS.md`.
 
 ## Automatic launch
 
@@ -58,7 +59,8 @@ blocked result instead of guessing.
 - Make the smallest coherent fix and preserve compatibility unless requested.
 - Add or update a regression test whenever practical.
 - Run targeted tests freely while coding; they do not need the test lease.
-- Before emitting a completed result, create/amend the single task commit and
+- Before emitting a completed result, create the single task commit (or use
+  `amendScript -Repository -TaskId` after staging rework changes) and
   acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Wait
   for ownership; never infer availability from status alone. Keep acquire, sync
   and release in ONE long-lived PowerShell call, passing that call's
@@ -82,6 +84,10 @@ blocked result instead of guessing.
   worker relaunch instead of trusting inherited PHPUnit/database defaults.
 - Review the diff, create exactly one final task commit, and require a clean
   `git status --porcelain` afterward.
+- Amend only through the supplied `amendScript -Repository -TaskId`, optionally
+  with `-MessageFile` outside the worktree. Never run `git commit --amend`
+  directly, try other command forms, or use `reset --soft`. If the script is
+  refused, emit a blocked result with the exact refusal.
 - Record the branch, full SHA, absolute worktree, and exact test outcomes.
   Copy `commit` directly from `git rev-parse HEAD`; never type, shorten, or complete a SHA by hand.
   Factory derives the authoritative changed-file list from that commit.

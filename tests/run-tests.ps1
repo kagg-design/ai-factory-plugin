@@ -34,6 +34,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
     if ($LedgerOnly) { return }
     & (Join-Path $PSScriptRoot 'worker-result-followup.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'worker-chat-attention-amend.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
@@ -53,6 +54,7 @@ if (-not $RuntimeOnly) {
 . (Join-Path $pluginRoot "scripts\worker-launch.ps1")
 . (Join-Path $pluginRoot "scripts\orchestrator-session.ps1")
 . (Join-Path $pluginRoot "scripts\worker-event.ps1")
+. (Join-Path $pluginRoot "scripts\attention-state.ps1")
 . (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
 . (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1")
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
@@ -272,7 +274,7 @@ try {
     $launcherSource = Get-Content -LiteralPath (Join-Path $pluginRoot "start-factory.ps1") -Raw
     Assert-True ($launcherSource.Contains('[string]$Repository = (Get-Location).Path')) "Launcher does not default to the current directory."
     Assert-True ($launcherSource.Contains('Get-FactoryOrchestratorAlias') -and $launcherSource.Contains('Get-FactoryOrchestratorDisplayName')) "Launcher does not resolve the configured orchestrator name."
-    Assert-True ($launcherSource.Contains('"--name", $Name')) "Launcher does not set the Claude session display name."
+    Assert-True ($launcherSource.Contains('"--name", $sessionName')) "Launcher does not set the Claude session display name."
     Assert-True ($launcherSource.Contains('"--add-dir", $standaloneRoot')) "Launcher does not load the /factory standalone skill."
     Assert-True ($launcherSource.Contains('"-Action", "start"')) "Launcher does not start the native scheduler."
     $tickSkillSource = Get-Content -LiteralPath (Join-Path $pluginRoot "skills\tick\SKILL.md") -Raw
@@ -990,15 +992,17 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_SESSION_ID -ErrorAction SilentlyContinue
 
     $restartSessionId = "11111111-2222-4333-8444-555555555555"
+    $restartDisplayName = [string]$orchestratorIdentity.name
     Write-FactoryOrchestratorIdentity `
         -Path $orchestratorIdentityPath `
         -RepositoryRoot $repository `
-        -Name "Claude Factory Orchestrator" `
+        -Name $restartDisplayName `
         -SessionId $restartSessionId `
         -BackgroundId "test1234"
     [IO.File]::AppendAllText(
         $env:CLAUDE_FACTORY_TEST_SESSION_REGISTRY_FILE,
-        "launch`ttest1234`t$repository`tClaude Factory Orchestrator`tblocked" + [Environment]::NewLine +
+        "launch`ttest1234`t$repository`t$restartDisplayName`tblocked" + [Environment]::NewLine +
+        "launch`torchestrator-static`t$repository`t$restartDisplayName`tblocked" + [Environment]::NewLine +
         "launch`tother-orchestrator`t$repository-other`tClaude Factory Orchestrator`tworking" + [Environment]::NewLine,
         (New-Object Text.UTF8Encoding($false))
     )
@@ -1025,6 +1029,9 @@ try {
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RESPAWN_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_TEST_ORCHESTRATOR_TRANSCRIPTS -ErrorAction SilentlyContinue
 
+    # The separate legacy-name fixture must still veto replacing an interactive TUI.
+    Write-FactoryOrchestratorIdentity -Path $orchestratorIdentityPath -RepositoryRoot $repository `
+        -Name "Claude Factory Orchestrator" -SessionId $restartSessionId -BackgroundId "test1234"
     $env:CLAUDE_FACTORY_TEST_INTERACTIVE_ORCHESTRATOR = "1"
     $interactiveRestartStopCapture = Join-Path $testRoot "interactive-restart-stops.txt"
     $env:CLAUDE_FACTORY_TEST_STOP_FILE = $interactiveRestartStopCapture
@@ -1234,14 +1241,18 @@ try {
     $schedulerLockHolder = $null
     try {
         $previousLockTickAt = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "lastTickAt" -Default "")
+        $tickLogPath = Join-Path $context.projectData 'scheduler.stdout.log'
+        $previousTickLogLength = if (Test-Path -LiteralPath $tickLogPath) { [IO.File]::ReadAllText($tickLogPath).Length } else { 0 }
         $schedulerLockStart = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action start -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime -IntervalSeconds 30) | ConvertFrom-Json
         Assert-True ([bool]$schedulerLockStart.started) "State-lock contention scheduler fixture did not start."
-        $initialLockTickDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        $initialLockTickDeadline = [DateTime]::UtcNow.AddSeconds(20)
         do {
             Start-Sleep -Milliseconds 100
             $initialLockTickAt = [string](Get-FactoryNestedValue -Target (Read-FactoryJson -Path $context.statePath).scheduler -Name "lastTickAt" -Default "")
-        } while ($initialLockTickAt -eq $previousLockTickAt -and [DateTime]::UtcNow -lt $initialLockTickDeadline)
-        Assert-True ($initialLockTickAt -ne $previousLockTickAt) "State-lock contention fixture did not finish its initial scheduler tick."
+            $tickLog = [IO.File]::ReadAllText($tickLogPath)
+            $initialTickComplete = $tickLog.Length -gt $previousTickLogLength -and $tickLog.Substring($previousTickLogLength).Contains('"event":"tick"')
+        } while (($initialLockTickAt -eq $previousLockTickAt -or -not $initialTickComplete) -and [DateTime]::UtcNow -lt $initialLockTickDeadline)
+        Assert-True ($initialLockTickAt -ne $previousLockTickAt -and $initialTickComplete) "State-lock contention fixture did not finish its initial scheduler tick, including attention scanning."
 
         $holderArguments = @(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $schedulerLockHolderScript,
@@ -1361,6 +1372,12 @@ try {
         activityTaskTitle = $null; activitySince = $null; activityHeartbeatAt = $null; lastExitReason = $null
     }
     Write-FactoryTestState -Context $context -Value $waitState
+    # Earlier Claude scheduler fixtures now journal their edges too. Start this
+    # manual-wait scenario after that history without touching the AI cursor.
+    $null = Update-FactoryAttentionRecord -Context $context -Mutator {
+        param($record)
+        Set-FactoryProperty -Target $record -Name 'waitAcknowledgedRevision' -Value ([long]$record.revision)
+    }
     Assert-Equal 1 (Get-FactoryLaunchedWorkerCount -State $waitState) "An awaiting-review task released its slot before its worker session closed."
     $waitWhileClosing = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\wait-factory.ps1") `
         -Repository $repository -TimeoutSeconds 1 -PollMilliseconds 100) | ConvertFrom-Json
@@ -2769,6 +2786,7 @@ try {
     $reworkState = Read-FactoryJson -Path $context.statePath
     $reworkTask = New-FactoryTestTask -Id "rework-task" -Title "Deliver review findings" -Now (Get-FactoryUtcTimestamp)
     $reworkTask.status = "awaiting-review"
+    $reworkTask.startMode = "interactive"
     $reworkTask.attempts = 1
     $reworkTask.branch = $reworkBranch
     $reworkTask.commit = $reworkCommit
@@ -2801,6 +2819,7 @@ try {
     Assert-Equal "queued" ([string]$reworked.status) "Rework did not queue a deliverable worker attempt."
     $reworkedState = Read-FactoryJson -Path $context.statePath
     $reworkedTask = Get-FactoryTask -State $reworkedState -TaskId "rework-task"
+    Assert-Equal "auto" ([string]$reworkedTask.startMode) "Rework inherited an interactive start instead of defaulting to auto."
     Assert-Equal $reworkCommit ([string]$reworkedTask.commit) "Rework discarded the validated commit."
     Assert-Equal $reworkCommit ([string]$reworkedTask.workerResult.commit) "Rework discarded the prior worker result."
     Assert-True ($null -eq $reworkedTask.review -and $null -eq $reworkedTask.approval) "Rework retained review or approval."
@@ -2861,10 +2880,18 @@ try {
     Assert-True ($reworkPromptText.Contains($reworkFindings)) "Relaunched worker prompt omitted the review findings."
     Assert-True ($reworkPromptText.Contains($reworkCommit)) "Relaunched worker prompt omitted the retained commit."
     Assert-True ($reworkPromptText.Contains("exactly one task commit")) "Relaunched worker prompt omitted the amend/single-commit invariant."
+    Assert-True ($reworkPromptText.Contains("This is an automatic start.") -and $reworkPromptText.Contains('amendScript')) "Rework did not launch automatically with the sanctioned amend boundary."
     $reworkRows = @(Get-FactoryClaudeAgentRows -ClaudeCommand $fakeClaude)
     Assert-Equal 0 (@($reworkRows | Where-Object {
         $null -ne $_.PSObject.Properties["id"] -and [string]$_.id -eq "rework-old"
     }).Count) "Rework left the previous Agent View row alive."
+    $interactiveRework = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\task-action.ps1") -Repository $repository -Action rework -TaskId "rework-task" -Mode interactive -Instructions $reworkFindings -ClaudeCommand $fakeClaude) | ConvertFrom-Json
+    Assert-Equal "interactive" ([string](Get-FactoryTask -State (Read-FactoryJson $context.statePath) -TaskId "rework-task").startMode) "Explicit interactive rework was ignored."
+    try {
+        $env:CLAUDE_FACTORY_TEST_PROMPT_COPY = $reworkPromptCopy
+        $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+    } finally { $env:CLAUDE_FACTORY_TEST_PROMPT_COPY = $previousPromptCopy }
+    Assert-True ([IO.File]::ReadAllText($reworkPromptCopy).Contains("This is an interactive start.")) "Interactive rework did not request a plan stop."
     $reworkDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "rework-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-True ([bool]$reworkDiscard.removedFromState) "Rework fixture could not be discarded after relaunch."
 
@@ -3138,10 +3165,10 @@ try {
     Assert-Equal "done" ([string]$resumedCleanup.status) "Re-running an interrupted cleanup did not complete it."
     $cleanupArchivePath = Get-FactoryCompletedArchivePath $context
     Assert-Equal 1 (@((Read-FactoryCompletedArchive $context).rows | Where-Object { $_.id -eq 'interrupted-cleanup-task' }).Count) "Resumed cleanup did not append exactly one summary."
-    $cleanupArchiveHash = (Get-FileHash -LiteralPath $cleanupArchivePath).Hash
+    $cleanupArchiveHash = Get-FactoryFileSha256 -Path $cleanupArchivePath
     $repeatCleanup = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot 'scripts\cleanup-task.ps1') -Repository $repository -TaskId 'interrupted-cleanup-task' -ClaudeCommand $fakeClaude) | ConvertFrom-Json
     Assert-Equal 'done' ([string]$repeatCleanup.status) 'Repeated cleanup failed.'
-    Assert-Equal $cleanupArchiveHash ((Get-FileHash -LiteralPath $cleanupArchivePath).Hash) 'Repeated cleanup changed the archive.'
+    Assert-Equal $cleanupArchiveHash (Get-FactoryFileSha256 -Path $cleanupArchivePath) 'Repeated cleanup changed the archive.'
     $resumedCleanupTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId "interrupted-cleanup-task"
     Assert-Equal "done" ([string]$resumedCleanupTask.status) "Interrupted cleanup recovery was not persisted."
     Assert-Equal "completed" ([string]$resumedCleanupTask.cleanup.status) "Interrupted cleanup recovery retained a stale running audit."
@@ -4157,7 +4184,18 @@ $result = [ordered]@{
     Assert-True ($codexStatus.Contains("runtime codex") -and $codexStatus.Contains("factory chat codex-task")) "Factory status hid the selected Codex runtime or printed Claude prompt syntax."
     $codexChat = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") chat codex-task -NoReconcile -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex | Out-String)
     Assert-True ($codexChat.Contains("resume-codex-worker.ps1")) "Factory chat did not resolve the capture-aware Codex session command."
-    $codexResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\resume-codex-worker.ps1") -Repository $repository -TaskId "codex-task" -CodexCommand $fakeCodex) | ConvertFrom-Json
+    $env:CLAUDE_FACTORY_TEST_RESUME_STATE_PATH = $context.statePath
+    $env:CLAUDE_FACTORY_TEST_RESUME_STATE_CAPTURE = Join-Path $testRoot "codex-resume-state.json"
+    try {
+        $codexResume = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\resume-codex-worker.ps1") -Repository $repository -TaskId "codex-task" -CodexCommand $fakeCodex) | ConvertFrom-Json
+    } finally {
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_RESUME_STATE_PATH -ErrorAction SilentlyContinue
+        Remove-Item Env:\CLAUDE_FACTORY_TEST_RESUME_STATE_CAPTURE -ErrorAction SilentlyContinue
+    }
+    $resumingTask = Get-FactoryTask -State (Read-FactoryJson (Join-Path $testRoot "codex-resume-state.json")) -TaskId "codex-task"
+    Assert-Equal "running" ([string]$resumingTask.status) "Codex resume did not promote the waiting task before opening its thread."
+    Assert-Equal "awaiting-input" ([string]$resumingTask.inSessionReply.fromStatus) "Codex resume lost reply provenance."
+
     Assert-Equal "awaiting-input" ([string]$codexResume.status) "Capture-aware Codex resume changed a still-pending plan incorrectly."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t-C.*aaaaaaaa-' }).Count -eq 1) "Codex worker wrapper did not open the exact interactive thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^resume\t-C.*aaaaaaaa-' -and $_ -match '--approve-for-me' -and $_ -match '--sandbox' }).Count -eq 0) "Codex worker resume combined --approve-for-me with the conflicting --sandbox option."

@@ -25,6 +25,41 @@ Report useful progress, results, blockers, and operator decisions. This applies
 only to instructions: still reconcile sessions and read fresh native state when
 the command requires it.
 
+## Report Factory defects to its development repository
+
+Whenever you discover a malfunction in Factory itself (its plugin, CLI,
+scheduler, hooks, session handling, or orchestration protocol), create a task
+specification in the Factory source repository's `docs/tasks` directory. This
+is required even when an operational workaround lets the current task proceed.
+An application bug or expected worker failure alone is not a Factory defect;
+record the evidence that points to Factory.
+
+Resolve the Factory source root from `CLAUDE_FACTORY_PLUGIN_ROOT`, or from
+`${CLAUDE_SKILL_DIR}/../../../..` for this canonical skill, resolving junctions
+and symbolic links. Verify that it is the Factory code repository. The target
+application's `${CLAUDE_PROJECT_DIR}`, its worktrees, and private runtime are
+never the destination. If the loaded plugin is an installed copy rather than
+the source checkout, locate the known Factory development checkout first. If
+that location or write access is unavailable, report the blocker and ask Igor
+for the source checkout or access; do not fall back to the application repo.
+
+Check existing `docs/tasks/TASK-*.md` reports for the same defect. Create a
+descriptive `TASK-<factory-defect>.md`, or add new evidence to the matching
+report without discarding its existing content. Include the affected command
+and task/session identifiers, reproduction steps, observed and expected
+behavior, relevant timestamps and source/log references, impact, and concrete
+acceptance checks. Distinguish confirmed facts from hypotheses. Keep secrets
+out of the report and leave live runtime state intact.
+
+After saving, explicitly ask Igor to confirm starting this task in the Factory
+development chat. State that his confirmation is required, link the absolute
+task path, and supply the exact message to send there: `do <absolute task path>`.
+Make this a clear action request, not an optional offer to fix it later. Do not
+start the repair, call `factory new`/`add` for it, or assign a worker merely
+because you detected the defect or wrote its report. The repair starts only
+after Igor gives that instruction in the Factory development chat. Continue
+unaffected authorized work and use recoveries already allowed by this protocol.
+
 ## Load and migrate private context
 
 Run:
@@ -804,12 +839,13 @@ Run the appropriate action through:
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/../../../../scripts/task-action.ps1" -Repository "${CLAUDE_PROJECT_DIR}" -Action ACTION -TaskId TASK_ID
 ```
 
-For `rework`, pass the findings with `-Instructions`; when omitted, the script
+For `rework`, automatic implementation is the default (`-Mode auto`). Use
+`-Mode interactive` only for an explicit plan stop. Pass findings with `-Instructions`; when omitted, the script
 uses the recorded review summary and risk notes. The action stops and removes
 the previous worker session, preserves its branch, worktree, commit, and result,
 clears review and approval, and queues a new attempt. The launcher writes the
-findings verbatim into the durable worker prompt, tells the worker to amend the
-existing one task commit, and clears `pendingInstructions` only after that
+findings verbatim into the durable worker prompt, tells the worker to use the
+supplied guarded `amendScript` to amend the existing task commit, and clears `pendingInstructions` only after that
 replacement session is durably recorded. If launch fails before a session is
 saved, use the narrow `retry` recovery described below; it preserves the exact
 commit, result, worktree, and undelivered instructions. Resume the native scheduler after the action succeeds. Do not
@@ -881,7 +917,8 @@ This posts `ANSWER (Igor via terminal)` on the Asana child task and changes its
 Factory field from Question to Taken. Native Asana sync then imports all comments
 after the question, gives Igor's answer precedence, and requeues the worker.
 If Asana is already Taken, inspect the existing answer instead of overwriting it.
-Keep `factory wait` active between turns so new question edges reach this terminal.
+Claude receives new question edges through the plugin-owned attention consumer.
+Do not start a model-owned watcher while that consumer is live.
 
 For ordinary stopped, blocked, or awaiting-input workers without `asanaQuestion`,
 record decisions with the bundled script:
@@ -979,7 +1016,17 @@ current approved review that is waiting only for the human operator's `go`.
 That decision remains visible as `GO` in `factory status`. Native callers that
 explicitly need human-decision notifications may use the script's
 `-IncludeOperatorApproval` switch.
-Default waits acknowledge returned attention revisions and do not replay the
+Claude orchestrators receive default-wait edges natively through SessionStart/Stop
+async rewake hooks. AI edges request action; human input and Asana questions are
+notify-only. Stop acknowledges a delivered claim durably; a restart redelivers
+an unacknowledged claim. The plugin keeps one consumer alive and re-arms it
+before its configured daily timeout. Do not run a watcher or background
+`factory wait` while a consumer is live. `factory doctor` reports its lease;
+status reports pending attention older than 60 seconds without a live consumer.
+Replies in a waiting worker's own chat resume that same session without an
+answer file; `inSessionReply` records this provenance for review.
+
+Default waits advance only the manual wait cursor and do not replay the
 same active failure. A stateless consumer saves the returned cursor and passes
 it back with `--cursor`. For Codex, each new AI-actionable edge is forwarded
 once through the Factory-managed shared app-server to the saved orchestrator;

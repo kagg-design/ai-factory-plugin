@@ -29,7 +29,7 @@ or task-source quotations merely to match this setting.
   holding the test lease; that is the only permitted rebase path.
 - Cherry-pick and revert are allowed only inside the supplied worker worktree.
   Preserve the final one-task-commit invariant; prefer `--no-commit` followed
-  by amending the task commit when the branch already has one.
+  by using the supplied `amendScript` when the branch already has one.
 - Never switch to `develop`, `master`, `main`, or another shared branch.
 - Never remove a worktree or delete a branch.
 - Never update factory state, configuration, session metadata, or event files.
@@ -86,7 +86,8 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 ## Verify and commit
 
 - Run targeted tests freely while coding; they do not need the test lease.
-- Before emitting a completed result, create/amend the single task commit, then
+- Before emitting a completed result, create the single task commit (or amend
+  it using `amendScript -Repository -TaskId` after staging your changes), then
   acquire `testLeaseScript -Action acquire -Phase verify -OwnerPid $PID` for this task. Do not
   inspect the lane and decide for yourself whether it is busy: call acquire and
   wait for ownership.
@@ -125,8 +126,11 @@ grounded in the task, code, or tests, ask the user instead of guessing.
 - Create exactly one final task commit.
 - Suggested message: `fix(<task-id>): <task title>`.
 - Require clean `git status --porcelain` after the commit.
-- If the user requests rework before integration, amend the task commit so the
-  branch still contains one final task commit.
+- For rework, stage your changes and run the supplied `amendScript -Repository
+  -TaskId` (optionally `-MessageFile` outside the worktree). It validates the
+  retained worker and preserves one final task commit. Never run
+  `git commit --amend` directly, try other command forms, or use `reset --soft`.
+  If the script is refused, emit a blocked result with the exact refusal.
 - Capture the branch, full SHA, absolute worktree path, and exact test outcomes.
   Copy `commit` directly from `git rev-parse HEAD`; never type, shorten, or complete a SHA by hand.
   Factory derives the authoritative changed-file list from that commit.

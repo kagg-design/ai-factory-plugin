@@ -20,6 +20,12 @@ The plugin is loaded only for a dedicated factory session. It is never copied
 into the target repository and does not change the repository's `.claude`
 directory, `CLAUDE.md`, or `.gitignore`.
 
+When an orchestrator discovers a defect in Factory itself, it records the
+evidence and acceptance checks in `docs/tasks/TASK-*.md` in the Factory source
+checkout, then explicitly asks Igor to authorize the repair in the Factory
+development chat with `do <absolute task path>`. The report is never placed in
+the target application's repository, and creating it does not launch a repair.
+
 ## Requirements
 
 - Windows PowerShell 5.1 or PowerShell 7
@@ -756,6 +762,20 @@ shared app-server. Acknowledgement is persisted before the continuation is
 sent, preventing restart/retry loops. Input and GO decisions remain human-only.
 The private config may explicitly set
 `orchestrator.autoGoApprovedReviews=true`; it is `false` by default.
+
+Claude orchestrators receive attention through plugin-owned SessionStart/Stop
+async rewake hooks. AI edges request action; operator input and Asana questions
+are notify-only. GO remains human-owned unless `autoGoApprovedReviews` produces
+an `auto-go` event. Claims survive restarts and Stop acknowledges delivery.
+Do not run a background watcher or `factory wait` while the native consumer is
+live. The consumer re-arms about once per day before its configured hook timeout.
+`factory doctor` reports its lease, and status shows pending attention older than
+60 seconds without a live consumer under NEEDS YOUR ACTION.
+
+An operator reply in a waiting worker chat resumes the same session. Reviewers
+can inspect `inSessionReply` when there is no answer file. Rework uses automatic
+start by default; pass `-Mode interactive` to `task-action.ps1` for a plan stop.
+Workers amend their retained task commit only through the supplied `amendScript`.
 
 `sync` updates the existing clean worker worktree before review. It fetches the
 configured remote development branch, rebases the one task commit onto it,

@@ -39,6 +39,12 @@ integration, and output. Apply these Codex adaptations:
   plugin root: `standalone\.claude\skills\factory`.
 - `$CLAUDE_PROJECT_DIR` means `$env:CLAUDE_FACTORY_REPOSITORY`; if it is empty,
   use the current working directory.
+- Every discovered Factory malfunction requires a report under `docs/tasks`
+  in the resolved Factory source checkout, following the canonical defect
+  workflow. Never save it in the target application or private runtime.
+  Explicitly ask Igor to authorize the repair in the Factory development chat
+  and provide `do <absolute task path>` to send there. Writing the report does
+  not authorize a repair or a `factory new`/`add` handoff.
 - A user prompt beginning with `factory ` is equivalent to the canonical
   `/factory ` form. Known command-only prompts such as `status`, `review <id>`,
   and `go <id>` are also valid when the conversation is clearly about Factory.
@@ -56,6 +62,16 @@ integration, and output. Apply these Codex adaptations:
 - `rework` is a queued redelivery, not text for the operator to paste into an
   old chat. `release` is the explicit stale-session escape hatch; use the
   canonical `task-action.ps1 -Action release` flow and never edit state JSON.
+  Rework defaults to `-Mode auto`; use `-Mode interactive` for an explicit plan
+  stop. Retry inherits its prior mode, and answer keeps its explicit mode.
+  Workers amend only through their supplied guarded `amendScript`.
+- An operator reply in a waiting worker chat resumes that same session.
+  Review `inSessionReply` for provenance when no answer file was written.
+- Claude attention is delivered by the plugin's SessionStart/Stop consumer.
+  Human edges are notify-only; GO is delivered only as an explicit `auto-go`.
+  Stop acknowledges claims, and restart redelivers unacknowledged claims.
+  Do not run a watcher while a native consumer is live; doctor reports its
+  lease and status exposes a dead consumer with pending attention.
 - `factory wait` is the native orchestrator notification boundary. It waits on
   the durable attention journal, not logs; a review is actionable only after its worker session
   closes, and a current approved review waiting only for the human operator's

@@ -21,6 +21,8 @@ function New-FactoryAttentionState {
         waitAcknowledgedRevision = 0
         orchestratorAcknowledgedRevision = 0
         dispatch = $null
+        claudeConsumer = $null
+        claudeClaim = $null
         lastScanAt = $null
         updatedAt = $null
     }
@@ -103,6 +105,32 @@ function Sync-FactoryAttentionState {
     } finally {
         Exit-FactoryMutex -Mutex $mutex
     }
+}
+
+function Get-FactoryClaudeDeliverableEvents {
+    param([Parameter(Mandatory = $true)]$Attention)
+    $cursor = [long]$Attention.orchestratorAcknowledgedRevision
+    $active = @($Attention.activeKeys)
+    return @($Attention.events | Where-Object {
+        [long]$_.revision -gt $cursor -and $active -contains [string]$_.key -and
+        ([bool]$_.aiActionable -or ([bool]$_.humanDecision -and [bool]$_.includeInDefaultWait))
+    })
+}
+
+function Get-FactoryClaudeAttentionPrompt {
+    param([Parameter(Mandatory = $true)]$Claim)
+    $lines = @($Claim.events | ForEach-Object {
+        $mode = if ([bool]$_.humanDecision) { "notify-only: ask the operator; do not decide" } else { "AI action" }
+        "- revision $([long]$_.revision): $([string]$_.kind) / $([string]$_.taskId) / $([string]$_.title) ($mode)`n  Reason: $([string]$_.reason)`n  Suggested command: $([string]$_.command)"
+    })
+    return @"
+Factory attention bridge detected state through revision $($Claim.throughRevision). Claim: $($Claim.token). Redelivered: $($Claim.redelivered).
+Load the factory skill, reconcile current native state, and handle AI actions within the canonical protocol. Human edges are notify-only: explain the decision and wait for the operator. Do not approve an awaiting-review task unless the persisted policy produced an auto-go event.
+
+$($lines -join [Environment]::NewLine)
+
+The plugin owns delivery and acknowledgement. Do not create a watcher, manually acknowledge, or edit private state. Stop normally after handling this batch so the plugin can acknowledge it and re-arm delivery.
+"@.Trim()
 }
 
 function Update-FactoryAttentionRecord {

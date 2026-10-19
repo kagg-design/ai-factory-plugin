@@ -606,7 +606,7 @@ function Write-CliStatus {
     $schedulerFailureAt = ConvertTo-CliLine -Value (Get-CliProperty -InputObject $schedulerState -Name "lastFailureAt")
     $schedulerAlive = Test-FactoryRecordedProcess -ProcessRecord $schedulerState
     $schedulerTickProblem = $schedulerAlive -and -not $paused -and (Test-FactoryPersistentSchedulerFailure -Scheduler $schedulerState)
-    $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + @(Get-FactoryCiAttentionEvents -Context $Context)
+    $attentionEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config -Context $Context) + @(Get-FactoryCiAttentionEvents -Context $Context)
     $aiActions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "aiActionable" -Default $false) })
     $humanDecisions = @($attentionEvents | Where-Object { [bool](Get-CliProperty -InputObject $_ -Name "humanDecision" -Default $false) })
     $blockedTaskCount = @($allTasks | Where-Object { [string]$_.status -eq "blocked" }).Count
@@ -689,9 +689,13 @@ function Write-CliStatus {
         $groupTasks = @($selected | Where-Object { (Get-CliGroup -Status (Get-CliEffectiveStatus -Task $_)) -eq $group.Key })
         $schedulerRows = if (($group.Key -eq "Needs your action" -and $schedulerProblem) -or
             ($group.Key -eq "Problems" -and $schedulerTickProblem)) { 1 } else { 0 }
-        $groupCount = $groupTasks.Count + $schedulerRows
+        $consumerRows = @($attentionEvents | Where-Object { [string]$_.kind -eq "orchestrator-attention" -and $group.Key -eq "Needs your action" })
+        $groupCount = $groupTasks.Count + $schedulerRows + $consumerRows.Count
         if ($groupCount -eq 0) { continue }
         $lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) $($group.Name) $($script:Tree.Horizontal) $groupCount")
+        foreach ($consumerEvent in $consumerRows) {
+            Add-CliWrappedLine -Lines $lines -FirstPrefix "$($script:Tree.Vertical)  $($script:Tree.Branch)$($script:Tree.Horizontal) " -ContinuationPrefix "$($script:Tree.Vertical)     " -Text "ORCHESTRATOR ATTENTION: $($consumerEvent.reason) Next: $($consumerEvent.command)"
+        }
         if ($schedulerRows -gt 0) {
             $schedulerProblemStatus = if ($paused) { "paused" } else { $schedulerStatus }
             $schedulerConnector = if ($groupTasks.Count -eq 0) { $script:Tree.Last } else { $script:Tree.Branch }

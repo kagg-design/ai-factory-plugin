@@ -128,6 +128,33 @@ function ConvertFrom-FactoryWorkerMarkerMessage {
     }
 }
 
+function Publish-FactoryWorkerReply {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$SessionId,
+        [AllowEmptyString()][string]$Prompt = "",
+        [string]$Source = "UserPromptSubmit"
+    )
+
+    if ($Prompt.TrimStart() -match '^FACTORY_PROMPT_FILE=') { return }
+    $directory = Join-Path ([string]$Context.eventsPath) (ConvertTo-FactoryTaskArtifactName -TaskId ([string]$Task.id))
+    $history = Join-Path $directory "history"
+    New-Item -ItemType Directory -Path $history -Force | Out-Null
+    $capturedAt = Get-FactoryUtcTimestamp
+    $event = [pscustomobject][ordered]@{
+        version = 1; taskId = [string]$Task.id; kind = "reply"
+        sessionId = $SessionId; capturedAt = $capturedAt; source = $Source
+        promptSha256 = Get-FactoryTextSha256 -Value $Prompt
+        promptPreview = $Prompt.Substring(0, [Math]::Min(240, $Prompt.Length))
+    }
+    $name = "$($capturedAt -replace '[:.]', '-')-reply-$([Guid]::NewGuid().ToString('N').Substring(0, 8)).json"
+    Write-FactoryJsonAtomic -Path (Join-Path $history $name) -Value $event
+    # Stop envelopes remain authoritative for result/follow-up detection.
+    Write-FactoryJsonAtomic -Path (Join-Path $directory "latest-reply.json") -Value $event
+    return $event
+}
+
 function Publish-FactoryWorkerEvent {
     param(
         [Parameter(Mandatory = $true)]$Context,

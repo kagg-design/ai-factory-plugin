@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
+. (Join-Path $PSScriptRoot "worker-event.ps1")
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) | ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
@@ -39,6 +40,18 @@ try {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, "Process")
     }
 
+    $replyMutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+    try {
+        $replyState = Read-FactoryJson -Path $context.statePath
+        $replyTask = Get-FactoryTask -State $replyState -TaskId $TaskId
+        if ([string]$replyTask.backgroundSession.sessionId -ne $threadId) { throw "Worker session changed before resume." }
+        $null = Publish-FactoryWorkerReply -Context $context -Task $replyTask -SessionId $threadId -Source "codex-resume"
+        $resumeRow = [pscustomobject]@{ id = [string]$replyTask.backgroundSession.id; sessionId = $threadId }
+        if (Resume-FactoryTaskFromInSessionReply -Context $context -Task $replyTask -SessionRow $resumeRow) {
+            Write-FactoryJsonAtomic -Path $context.statePath -Value $replyState
+        }
+    } finally { Exit-FactoryMutex -Mutex $replyMutex }
+
     & $CodexCommand resume -C $worktree --approve-for-me $threadId
     $interactiveExit = $LASTEXITCODE
     if ($interactiveExit -ne 0) { throw "Codex interactive resume exited with code $interactiveExit." }
@@ -69,6 +82,15 @@ if ([string]$session.transcriptPath -and [string]$capture.stdout) {
         [string]$capture.stdout + [Environment]::NewLine,
         (New-Object Text.UTF8Encoding($false))
     )
+}
+
+# A completed interactive/capture turn is a new Stop even when its text equals
+# the previous plan. Hash deduplication alone would leave that reply running.
+$snapshot = Get-FactoryCodexSessionSnapshot -Session $session
+if ([string]$snapshot.lastAssistantMessage) {
+    $null = Publish-FactoryWorkerEvent -Context $context -Task $task -SessionId $threadId `
+        -Worktree $worktree -Message ([string]$snapshot.lastAssistantMessage) `
+        -TranscriptPath ([string]$session.transcriptPath) -EventName "CodexResumeStop"
 }
 
 $reconciled = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "reconcile-worker-sessions.ps1") -Repository ([string]$context.repositoryRoot) -CodexCommand $CodexCommand | Out-String).Trim()

@@ -97,7 +97,7 @@ try {
         # state, its final event has been consumed. Retained session metadata is
         # useful for inspection, but reopening its transcript cannot produce a
         # valid transition and used to force a state rewrite on every status.
-        if ($recordedSessionState -in @("stopped", "done", "failed") -and $before -in $settledTaskStates) { continue }
+        if ($recordedSessionState -in @("stopped", "done", "failed") -and $before -in $settledTaskStates -and $before -ne "blocked") { continue }
         if (-not (Test-FactoryTaskHasRecordedSession -Task $task)) {
             if ($before -in @("starting", "planning")) {
                 $launchStartedAt = Get-FactoryNestedValue -Target $task -Name "launchStartedAt"
@@ -553,6 +553,9 @@ try {
                     Set-FactoryProperty -Target $task -Name "status" -Value "blocked"
                     Set-FactoryProperty -Target $task -Name "holdReason" -Value $holdReason
                     Set-FactoryProperty -Target $task -Name "error" -Value $holdReason
+                    Set-FactoryProperty -Target $task -Name "inSessionWaiting" -Value ([pscustomobject]@{
+                        sessionId = $expectedEventSessionId; capturedAt = Get-FactoryUtcTimestamp; kind = "blocked-timeout"
+                    })
                 }
             } elseif ($sessionState -eq "failed" -and [string]$task.status -in @("starting", "planning", "running")) {
                 Set-FactoryProperty -Target $task -Name "status" -Value "failed"
@@ -573,6 +576,27 @@ try {
                     Set-FactoryProperty -Target $task -Name "error" -Value "Worker ended without a captured FACTORY_RESULT."
                 }
             }
+        }
+
+        if ([string]$task.status -in @("awaiting-input", "blocked") -and $latestEventIsCurrent) {
+            $waitingKind = [string]$latestEvent.kind
+            if ($waitingKind -in @("plan", "invalid-marker") -or
+                ($waitingKind -eq "result" -and [string]$latestEvent.payload.status -eq "blocked")) {
+                Set-FactoryProperty -Target $task -Name "inSessionWaiting" -Value ([pscustomobject]@{
+                    sessionId = $expectedEventSessionId; capturedAt = $latestEvent.capturedAt; kind = $waitingKind
+                })
+            }
+        }
+        if (Resume-FactoryTaskFromInSessionReply -Context $context -Task $task -SessionRow $sessionRow) { $metadataChanged = $true }
+        $inSessionReply = Get-FactoryNestedValue -Target $task -Name "inSessionReply"
+        if ([string]$task.status -eq "running" -and $latestEventIsCurrent -and
+            [string]$latestEvent.kind -eq "message" -and $null -ne $inSessionReply -and
+            [string]$inSessionReply.sessionId -eq $expectedEventSessionId -and
+            (ConvertTo-FactoryUtcDateTime -Value $latestEvent.capturedAt) -gt (ConvertTo-FactoryUtcDateTime -Value $inSessionReply.capturedAt)) {
+            Set-FactoryProperty -Target $task -Name "status" -Value "awaiting-input"
+            Set-FactoryProperty -Target $task -Name "inSessionWaiting" -Value ([pscustomobject]@{
+                sessionId = $expectedEventSessionId; capturedAt = $latestEvent.capturedAt; kind = "message"
+            })
         }
 
         $after = [string]$task.status

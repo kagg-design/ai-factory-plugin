@@ -221,6 +221,10 @@ public static class FakeCodex
         }
         if (args.Length > 0 && (args[0] == "archive" || args[0] == "delete"))
             return 0;
+        var resumeStatePath = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_RESUME_STATE_PATH");
+        var resumeStateCapture = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_RESUME_STATE_CAPTURE");
+        if (args.Length > 0 && args[0] == "resume" && !String.IsNullOrEmpty(resumeStatePath) && !String.IsNullOrEmpty(resumeStateCapture))
+            File.WriteAllText(resumeStateCapture, File.ReadAllText(resumeStatePath), new UTF8Encoding(false));
         if (args.Length == 0 || args[0] != "exec")
             return 0;
 
