@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot 'asana-common.ps1')
 
 $repoInput = (Resolve-Path $Repository).Path
 $currentWorktree = (& git -C $repoInput rev-parse --show-toplevel 2>$null).Trim()
@@ -74,6 +75,8 @@ if ($Initialize) {
     New-Item -ItemType Directory -Path $eventsPath -Force | Out-Null
     New-Item -ItemType Directory -Path $worktreeRoot -Force | Out-Null
 
+    $routingConfig = if (Test-Path -LiteralPath $configPath) { Read-FactoryJson -Path $configPath } else { Read-FactoryJson -Path (Join-Path $pluginRoot 'config.default.json') }
+    $detectedRepo = if (-not [string](Get-FactoryNestedValue $routingConfig 'repo')) { Get-FactoryOwnRepo -Config $routingConfig -Repository $repoRoot } else { [string]$routingConfig.repo }
     $initializeMutex = Enter-FactoryMutex -ProjectKey $projectKey
     try {
         if (-not (Test-Path -LiteralPath $configPath)) {
@@ -91,6 +94,12 @@ if ($Initialize) {
             }
             Add-MissingFactoryProperties -Target $config -Defaults $configDefaults
             Set-FactoryProperty -Target $config -Name "version" -Value $configDefaults.version
+            Write-FactoryJsonAtomic -Path $configPath -Value $config
+        }
+
+        $config = Read-FactoryJson -Path $configPath
+        if (-not [string]$config.repo) {
+            Set-FactoryProperty -Target $config -Name 'repo' -Value $detectedRepo
             Write-FactoryJsonAtomic -Path $configPath -Value $config
         }
 

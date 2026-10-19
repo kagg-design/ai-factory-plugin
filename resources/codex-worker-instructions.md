@@ -13,6 +13,13 @@ Do not translate commands, identifiers, code, logs, paths, or source quotes.
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
+- After tests, run the supplied `securityScript -Repository -TaskId`. Fix a
+  nonzero finding within scope or fail with summary lines only. Never add a
+  baseline or suppress a finding without asking `QUESTION (factory):` and
+  waiting for the owner or Igor. Finish every rebase/amend before the final
+  result, re-read HEAD, and emit a fresh result after any later history change.
+- When filing an escaped Bug, include `Escaped-from: <Done task gids>`,
+  `Found-in: verification|ci|stage|prod|external`, and optional `Regression: yes`.
 - Never merge, cherry-pick, run `git rebase` directly, or modify shared
   branches. The supplied `syncScript`, called under the final test lease, is
   the only permitted rebase path.

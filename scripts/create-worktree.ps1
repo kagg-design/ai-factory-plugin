@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot 'quality-gates.ps1')
 $inputJson = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $name = [string]$inputJson.name
 $cwd = [string]$inputJson.cwd
@@ -41,6 +42,7 @@ foreach ($relative in @($config.copyIgnoredFiles)) {
     $parent = Split-Path $destination -Parent
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     Copy-Item $source $destination -Recurse -Force
+    if ((Split-Path -Leaf $destination) -like '.env*') { Protect-FactoryEnvironmentFile -Config $config -Path $destination }
 }
 
 $null = @(Sync-FactoryWorktreeDependencies -Worktree $target)

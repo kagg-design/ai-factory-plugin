@@ -15,7 +15,7 @@ function Get-AsanaPriorityRank {
     if ($null -eq $customFields) { return 3 }
     foreach ($field in @($customFields.Value)) {
         if ($null -eq $field) { continue }
-        if ([string]$field.name -ne 'Priority') { continue }
+        if ([string](Get-FactoryNestedValue -Target $field -Name 'name' -Default '') -ne 'Priority') { continue }
         $enumValue = $field.PSObject.Properties['enum_value']
         $textValue = $field.PSObject.Properties['text_value']
         $value = if ($null -ne $enumValue -and $null -ne $enumValue.Value) { [string]$enumValue.Value.name } elseif ($null -ne $textValue) { [string]$textValue.Value } else { '' }
@@ -35,9 +35,9 @@ function Get-ReadyTasks {
     $fields = 'gid,name,permalink_url,custom_fields.gid,custom_fields.name,custom_fields.enum_value.gid,custom_fields.enum_value.name,custom_fields.text_value,created_at,completed'
     $query = "/workspaces/$($asana.workspace)/tasks/search?projects.any=$($asana.project)&completed=false&custom_fields.$($asana.fields.factory).value=$($asana.fields.ready)&opt_fields=$fields"
     try {
-        $tasks = @(Get-FactoryAsanaPages -Config $Config -Path $query)
+        $tasks = @(Get-FactoryAsanaSearchTasks -Config $Config -Path $query -FallbackPath "/projects/$($asana.project)/tasks?limit=100&completed_since=1970-01-01T00:00:00Z&opt_fields=$fields")
     } catch {
-        $fallback = "/projects/$($asana.project)/tasks?completed_since=now&opt_fields=$fields"
+        $fallback = "/projects/$($asana.project)/tasks?limit=100&completed_since=now&opt_fields=$fields"
         $tasks = @(Get-FactoryAsanaPages -Config $Config -Path $fallback)
     }
     return @($tasks | Where-Object {
@@ -87,23 +87,20 @@ try {
     $capacity = [Math]::Max(0, [int]$config.poll.maxParallelWorkers - $held)
     $ready = @(Get-ReadyTasks -Config $config)
     $selected = New-Object Collections.Generic.List[object]
-    $repositorySlug = ''
+    $repositorySlug = Get-FactoryOwnRepo -Config $config -Repository ([string]$context.repositoryRoot)
     foreach ($task in $ready) {
         if ($selected.Count -ge $capacity) { break }
         $gid = [string]$task.gid
         if (-not $gid) { continue }
         $existing = @($state.tasks | Where-Object { [string]$_.id -eq $gid })
-        if ($existing.Count -and (-not [bool]$existing[0].asanaMode -or [string]$existing[0].status -ne 'failed')) { continue }
+        if ($existing.Count -and -not (Test-FactoryAsanaRunCanRestart -Task $existing[0])) { continue }
         $fresh = Get-FactoryAsanaTask -Config $config -Gid $gid
         if ([bool]$fresh.completed -or
             (Get-FactoryAsanaField -Task $fresh -Gid ([string]$config.asana.fields.factory)) -ne [string]$config.asana.fields.ready) {
             continue
         }
-        $targetRepo = Get-FactoryAsanaTaskRepo -Notes ([string]$fresh.notes)
-        if ($targetRepo) {
-            if (-not $repositorySlug) { $repositorySlug = Get-FactoryRepositorySlug -Repository ([string]$context.repositoryRoot) -Remote ([string]$config.remote) }
-            if ($targetRepo -ne $repositorySlug) { continue }
-        }
+        $targetRepo = Resolve-FactoryTaskRepo -Config $config -Notes ([string]$fresh.notes)
+        if ($targetRepo -ne $repositorySlug) { Write-Debug "Skipping $gid for repo $targetRepo (own repo $repositorySlug)."; continue }
         $selected.Add($fresh)
     }
     if ($DryRun) {
@@ -119,14 +116,14 @@ try {
         $worktreeName = "worker-$safeName-a1"
         $existing = @($state.tasks | Where-Object { [string]$_.id -eq $gid })
         if ($existing.Count -and [string]$existing[0].worktree) {
-            $worktreeName = Split-Path ([string]$existing[0].worktree) -Leaf
+            $worktreeName = "worker-$safeName-a$([int]$existing[0].attempts + 1)"
         }
         $phase = 'claim'
         try {
             $latestState = Read-FactoryJson -Path $context.statePath
             if ([bool]$latestState.paused) { continue }
             $existing = @($latestState.tasks | Where-Object { [string]$_.id -eq $gid })
-            if ($existing.Count -and (-not [bool]$existing[0].asanaMode -or [string]$existing[0].status -ne 'failed')) { continue }
+            if ($existing.Count -and -not (Test-FactoryAsanaRunCanRestart -Task $existing[0])) { continue }
             $heldNow = @($latestState.tasks | Where-Object {
                 [bool](Get-FactoryNestedValue -Target $_ -Name 'asanaMode' -Default $false) -and
                 [string]$_.status -notin @('done', 'failed', 'rejected')
@@ -138,12 +135,9 @@ try {
                 (Get-FactoryAsanaField -Task $fresh -Gid ([string]$config.asana.fields.factory)) -ne [string]$config.asana.fields.ready) {
                 continue
             }
-            $targetRepo = Get-FactoryAsanaTaskRepo -Notes ([string]$fresh.notes)
-            if ($targetRepo) {
-                if (-not $repositorySlug) { $repositorySlug = Get-FactoryRepositorySlug -Repository ([string]$context.repositoryRoot) -Remote ([string]$config.remote) }
-                if ($targetRepo -ne $repositorySlug) { continue }
-            }
-            Set-FactoryAsanaField -Config $config -Gid $gid -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.taken)
+            $targetRepo = Resolve-FactoryTaskRepo -Config $config -Notes ([string]$fresh.notes)
+            if ($targetRepo -ne $repositorySlug) { Write-Debug "Skipping $gid for repo $targetRepo (own repo $repositorySlug)."; continue }
+            Confirm-FactoryAsanaClaim -Config $config -Gid $gid
             $phase = 'move'
             Move-FactoryAsanaTask -Config $config -Gid $gid -Section ([string]$config.asana.sections.inProgress)
             $phase = 'comment'
@@ -151,19 +145,7 @@ try {
             Write-FactoryAsanaTransition -Context $context -Gid $gid -From 'Ready' -To 'Taken' -WorkerId $gid
             $phase = 'enqueue'
             if ($existing.Count) {
-                $retry = & (Join-Path $PSScriptRoot 'task-action.ps1') -Repository $context.repositoryRoot -Action retry -TaskId $gid | ConvertFrom-Json
-                if ([string]$retry.status -ne 'queued') { throw "Factory could not retry re-groomed task $gid." }
-                $stateMutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
-                try {
-                    $latest = Read-FactoryJson -Path $context.statePath
-                    $savedTask = Get-FactoryTask -State $latest -TaskId $gid
-                    Set-FactoryProperty -Target $savedTask -Name 'title' -Value ([string]$fresh.name)
-                    Set-FactoryProperty -Target $savedTask -Name 'brief' -Value ([string]$fresh.notes)
-                    Set-FactoryProperty -Target $savedTask -Name 'asanaState' -Value 'Taken'
-                    Set-FactoryProperty -Target $savedTask -Name 'asanaQuestion' -Value $null
-                    Set-FactoryProperty -Target $savedTask -Name 'asanaSyncedState' -Value $null
-                    Write-FactoryJsonAtomic -Path $context.statePath -Value $latest
-                } finally { Exit-FactoryMutex -Mutex $stateMutex }
+                Reset-FactoryAsanaRun -Context $context -Fresh $fresh
                 Write-Output "Claimed again: $gid | $($fresh.name)"
                 continue
             }
@@ -190,6 +172,8 @@ try {
             Write-Output "Claimed: $gid | $($fresh.name)"
         } catch {
             $reason = "Could not finish Asana claim during $phase`: $($_.Exception.Message)"
+            # A lost claim belongs to whoever changed the field. Do not overwrite it.
+            if ($phase -eq 'claim') { Write-Warning $reason; continue }
             try {
                 $null = Add-FactoryAsanaComment -Config $config -Gid $gid -Text "FAILED (factory):`nReason: $reason`nTried: claim and enqueue.`nNext: inspect and re-groom this task.`nWorktree: $worktreeName"
                 Set-FactoryAsanaField -Config $config -Gid $gid -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.failed)

@@ -1,5 +1,14 @@
 {
-  "version": 10,
+  "version": 11,
+  "repo": "",
+  "defaultRepo": "awesomehr",
+  "stallHours": 2,
+  "metricsTaskGid": "1219642983524480",
+  "blankEnvKeys": ["ASANA_ACCESS_TOKEN", "ACCESS_*", "BILLING_*", "GITHUB_APP_*", "GCS_KEY_FILE", "*_TOKEN", "*_SECRET", "*_API_KEY"],
+  "repos": {
+    "awesomehr": { "securityCommand": "composer security", "securityPresentWhen": "composer.json has scripts.security" },
+    "cloud-infrastructure-auditors": { "securityCommand": null }
+  },
   "remote": "origin",
   "developmentBranch": "develop",
   "productionBranch": "master",
@@ -118,6 +127,9 @@
     "project": "1215506997644941",
     "fields": {
       "factory": "1219588322328561",
+      "type": "1215172784016194",
+      "reporter": "1215172784016216",
+      "priority": "888632492263633",
       "ready": "1219588322328562",
       "taken": "1219588322328563",
       "question": "1219588322328564",

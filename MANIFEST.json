@@ -111,6 +111,15 @@
     "tests/scheduler-ledger.tests.ps1",
     "docs/state-ledger-safety.md",
     "docs/completed-task-archive.md",
-    "uninstall-rock-cycle-task.ps1"
+    "uninstall-rock-cycle-task.ps1",
+    "factory-metrics.ps1",
+    "install-factory-metrics-task.ps1",
+    "scripts/add-asana-task.ps1",
+    "scripts/confirm-merge-gate.ps1",
+    "scripts/metrics-common.ps1",
+    "scripts/quality-gates.ps1",
+    "scripts/security-check.ps1",
+    "scripts/amend-task-commit.ps1",
+    "tests/quality-gates.tests.ps1"
   ]
 }

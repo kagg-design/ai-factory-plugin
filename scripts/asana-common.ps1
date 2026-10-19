@@ -19,7 +19,8 @@ function Invoke-FactoryAsana {
     }
     try { return Invoke-RestMethod @parameters } catch {
         # Web exceptions sometimes embed request details. Only expose status and route.
-        $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'network' }
+        $responseProperty = $_.Exception.PSObject.Properties['Response']
+        $status = if ($null -ne $responseProperty -and $null -ne $responseProperty.Value) { [int]$responseProperty.Value.StatusCode } else { 'network' }
         throw "Asana $Method $($Path.Split('?')[0]) failed ($status)."
     }
 }
@@ -96,7 +97,7 @@ function Set-FactoryAsanaDone {
 function Get-FactoryAsanaComments {
     param($Config, [string]$Gid)
     $fields = 'gid,created_at,created_by.gid,resource_subtype,text'
-    return @(Get-FactoryAsanaPages -Config $Config -Path "/tasks/$Gid/stories?opt_fields=$fields" |
+    return @(Get-FactoryAsanaPages -Config $Config -Path "/tasks/$Gid/stories?limit=100&opt_fields=$fields" |
         Where-Object { [string]$_.resource_subtype -eq 'comment_added' } |
         Sort-Object created_at, gid)
 }
@@ -106,7 +107,7 @@ function Get-FactoryAsanaCommentActor {
     if ($Text -match '^\s*(?:\[access-orchestrator\]|ANSWER \(access-orchestrator\):)') { return 'access-orchestrator' }
     if ($Text -match '^\s*(?:\[billing-orchestrator\]|ANSWER \(billing-orchestrator\):)') { return 'billing-orchestrator' }
     if ($Text -match '^\s*ANSWER \(Igor via terminal\):') { return 'Igor' }
-    if ($Text -match '^\s*(?:TAKEN|QUESTION|DONE|FAILED) \(factory\):') { return 'factory' }
+    if ($Text -match '^\s*(?:TAKEN|QUESTION|DONE|FAILED|MERGE GATE) \(factory\):' -or $Text -match '^\s*\[[^\]\r\n]+\]') { return 'factory' }
     return 'Igor'
 }
 
@@ -124,6 +125,112 @@ function Get-FactoryRepositorySlug {
     if ($LASTEXITCODE -ne 0 -or -not $remoteUrl) { throw "Could not read Git remote '$Remote' for Asana repo routing." }
     if ([string]$remoteUrl -notmatch '[/:]([^/:]+/[^/:]+?)(?:\.git)?/?$') { throw "Could not identify owner/repo from Git remote '$Remote'." }
     return $Matches[1].ToLowerInvariant()
+}
+
+function Get-FactoryRepoName {
+    param([string]$Value)
+    return (($Value -split '/')[-1] -replace '\.git$', '').ToLowerInvariant()
+}
+
+function Get-FactoryOwnRepo {
+    param($Config, [string]$Repository)
+    $repo = [string](Get-FactoryNestedValue -Target $Config -Name 'repo' -Default '')
+    if (-not $repo) {
+        try { $repo = Get-FactoryRepositorySlug -Repository $Repository -Remote ([string]$Config.remote) }
+        catch { $repo = Split-Path -Leaf $Repository }
+    }
+    return Get-FactoryRepoName $repo
+}
+
+function Get-FactoryAsanaSearchTasks {
+    param($Config, [string]$Path, [string]$FallbackPath)
+    # Search has no next_page. Use the documented created_at cursor with an
+    # overlapping millisecond and deduplication. If a timestamp bucket fills a
+    # page, use the strongly paginated project listing to avoid dropping ties.
+    $rows = @{}; $cursor = ''
+    while ($true) {
+        $query = $Path + '&limit=100&sort_by=created_at&sort_ascending=true'
+        if ($cursor) { $query += '&created_at.after=' + [Uri]::EscapeDataString($cursor) }
+        $page = @(Get-FactoryAsanaPages -Config $Config -Path $query)
+        $newCount = 0
+        foreach ($task in $page) {
+            if (-not $rows.ContainsKey([string]$task.gid)) { $newCount++; $rows[[string]$task.gid] = $task }
+        }
+        if ($page.Count -lt 100) { break }
+        if ($newCount -eq 0) {
+            foreach ($task in @(Get-FactoryAsanaPages -Config $Config -Path $FallbackPath)) { $rows[[string]$task.gid] = $task }
+            break
+        }
+        $last = @($page | Sort-Object created_at)[-1]
+        $cursor = (ConvertTo-FactoryUtcDateTime $last.created_at).AddMilliseconds(-1).ToString('o')
+    }
+    return @($rows.Values)
+}
+
+function Resolve-FactoryTaskRepo {
+    param($Config, [string]$Notes)
+    $repo = Get-FactoryAsanaTaskRepo -Notes $Notes
+    if (-not $repo) { $repo = [string](Get-FactoryNestedValue -Target $Config -Name 'defaultRepo' -Default 'awesomehr') }
+    return Get-FactoryRepoName $repo
+}
+
+function Assert-FactoryTaskRepo {
+    param($Config, [string]$Repository, [string]$Notes, [switch]$Force)
+    $own = Get-FactoryOwnRepo -Config $Config -Repository $Repository
+    $target = Resolve-FactoryTaskRepo -Config $Config -Notes $Notes
+    if ($own -ne $target -and -not $Force) { throw "Task belongs to repo '$target'; this factory is '$own'. Use --force to import it explicitly." }
+}
+
+function Confirm-FactoryAsanaClaim {
+    param($Config, [string]$Gid)
+    Set-FactoryAsanaField -Config $Config -Gid $Gid -Field ([string]$Config.asana.fields.factory) -Value ([string]$Config.asana.fields.taken)
+    $readBack = Get-FactoryAsanaTask -Config $Config -Gid $Gid
+    if ((Get-FactoryAsanaField -Task $readBack -Gid ([string]$Config.asana.fields.factory)) -ne [string]$Config.asana.fields.taken) {
+        throw 'Claim aborted: Factory read-back is not Taken.'
+    }
+}
+
+function Reset-FactoryAsanaRun {
+    param($Context, $Fresh)
+    $lock = Enter-FactoryMutex -ProjectKey ([string]$Context.projectKey)
+    try {
+        $state = Read-FactoryJson -Path $Context.statePath
+        $task = Get-FactoryTask -State $state -TaskId ([string]$Fresh.gid)
+        if ([string]$task.status -in @('starting', 'planning', 'running', 'integrating', 'production', 'cleaning') -or
+            (Test-FactoryTaskHasLiveSession -Task $task)) { throw 'Previous run is still active; release it before reclaiming Ready.' }
+        $history = @(Get-FactoryNestedValue -Target $task -Name 'previousRuns' -Default @())
+        $snapshot = $task | ConvertTo-Json -Depth 80 | ConvertFrom-Json
+        $snapshot.PSObject.Properties.Remove('previousRuns')
+        Set-FactoryProperty -Target $task -Name 'previousRuns' -Value @($history + @($snapshot))
+        foreach ($name in @('commit', 'branch', 'worktree', 'workerResult', 'resultRecordedAt', 'resultInvalidatedAt', 'plan', 'planRecordedAt',
+            'review', 'approval', 'integration', 'production', 'cleanup', 'backgroundSession', 'syncPreparation',
+            'pendingInstructions', 'reworkRequestedAt', 'holdReason', 'heldFromStatus', 'error', 'asanaQuestion',
+            'asanaSyncedState', 'asanaSpecPath', 'security', 'mergeGate', 'launchStartedAt', 'launchCompletedAt',
+            'launchFailedAt', 'launchProcessId', 'launchProcessStartTimeUtc', 'completedAt', 'testDatabase')) {
+            Set-FactoryProperty -Target $task -Name $name -Value $null
+        }
+        Set-FactoryProperty -Target $task -Name 'title' -Value ([string]$Fresh.name)
+        Set-FactoryProperty -Target $task -Name 'brief' -Value ([string]$Fresh.notes)
+        Set-FactoryProperty -Target $task -Name 'acceptanceCriteria' -Value @()
+        Set-FactoryProperty -Target $task -Name 'sourceNotes' -Value @('Fresh run from the latest Ready description.')
+        Set-FactoryProperty -Target $task -Name 'runId' -Value ([Guid]::NewGuid().ToString('N'))
+        Set-FactoryProperty -Target $task -Name 'readyClaimedAt' -Value (Get-FactoryUtcTimestamp)
+        Set-FactoryProperty -Target $task -Name 'attemptPrepared' -Value $false
+        Set-FactoryProperty -Target $task -Name 'status' -Value 'queued'
+        Set-FactoryProperty -Target $task -Name 'asanaState' -Value 'Taken'
+        Set-FactoryProperty -Target $task -Name 'asanaMode' -Value $true
+        Set-FactoryProperty -Target $task -Name 'startMode' -Value 'auto'
+        Set-FactoryProperty -Target $task -Name 'updatedAt' -Value (Get-FactoryUtcTimestamp)
+        Write-FactoryJsonAtomic -Path $Context.statePath -Value $state
+    } finally { Exit-FactoryMutex -Mutex $lock }
+}
+
+function Test-FactoryAsanaRunCanRestart {
+    param($Task)
+    $source = Get-FactoryNestedValue $Task 'source'
+    $asana = [bool](Get-FactoryNestedValue $Task 'asanaMode' $false) -or [string](Get-FactoryNestedValue $source 'adapter') -eq 'asana'
+    return $asana -and [string]$Task.status -notin @('queued', 'starting', 'planning', 'running', 'integrating', 'production', 'cleaning') -and
+        -not (Test-FactoryTaskHasLiveSession -Task $Task)
 }
 
 function Move-FactoryAsanaTask {

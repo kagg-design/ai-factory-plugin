@@ -42,6 +42,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'asana-integration.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'quality-gates.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'worker-environment-guard.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'timestamp-normalization.tests.ps1') -PluginRoot $pluginRoot
@@ -647,7 +648,7 @@ try {
     Assert-True ([bool]$runtimeMigration.migrated -and [bool]$runtimeMigration.verified) "Synthetic runtime migration did not copy and verify the project."
     Assert-True ([bool]$runtimeMigration.sourceRetained -and (Test-Path -LiteralPath ([string]$context.projectData))) "Runtime migration removed its source copy."
     Assert-True (Test-Path -LiteralPath (Join-Path ([string]$runtimeMigration.destination) "runtime-migration.json")) "Runtime migration omitted its receipt."
-    Assert-Equal 10 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
+    Assert-Equal 11 ((Read-FactoryJson -Path $context.configPath).version) "Config migration failed."
     Assert-Equal 9 ((Read-FactoryJson -Path $context.statePath).version) "State migration failed."
     $initialFactoryConfig = Read-FactoryJson -Path $context.configPath
     Assert-Equal 8 ([int]$initialFactoryConfig.codingConcurrency) "A fresh factory did not default to eight coding slots."
@@ -1454,7 +1455,7 @@ try {
     Write-FactoryJsonAtomic -Path $context.configPath -Value $legacyConfig
     $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\project-context.ps1") -Repository $repository -Initialize) | ConvertFrom-Json
     $migratedConfig = Read-FactoryJson -Path $context.configPath
-    Assert-Equal 10 ([int]$migratedConfig.version) "Legacy config version was not migrated."
+    Assert-Equal 11 ([int]$migratedConfig.version) "Legacy config version was not migrated."
     Assert-Equal 3 ([int]$migratedConfig.codingConcurrency) "The deprecated concurrency alias was not migrated into codingConcurrency."
     Assert-True ((Get-FactoryCodingConcurrencySource -Config $migratedConfig) -match "deprecated concurrency is present but ignored") "Config diagnostics do not identify the retained deprecated alias."
     Assert-Equal 20 ([int]$migratedConfig.maxConcurrency) "Missing config defaults were not added."
@@ -1549,7 +1550,7 @@ try {
     Assert-Equal "asana" ([string]$intakeDraft.source.adapter) "Native intake draft lost its source adapter."
     Assert-Equal $intakeTaskId ([string]$intakeDraft.source.id) "Native intake draft lost its immutable source ID."
     $intakeDraft.title = "Native intake task"
-    $intakeDraft.brief = "Verify native URL handling, deduplication, queue mutation, and scheduler wakeup."
+    $intakeDraft.brief = "Repo: fixture/$((Read-FactoryJson $context.configPath).repo)`nVerify native URL handling, deduplication, queue mutation, and scheduler wakeup."
     $intakeDraft.acceptanceCriteria = @("The task is launched once.")
     $intakeDraft.sourceNotes = @("Normalized by the synthetic test.")
     Write-FactoryJsonAtomic -Path ([string]$preparedIntake.normalizationPath) -Value $intakeDraft
@@ -3310,6 +3311,10 @@ try {
     $directApprovedState = Read-FactoryJson -Path $context.statePath
     $directApprovedTask = @($directApprovedState.tasks | Where-Object { [string]$_.id -eq "pipeline-task" })[0]
     Assert-True ([string]$directApprovedTask.review.summary -match "skipped") "Direct approval did not preserve its review warning."
+    # The dedicated publication fixture exercises the new native merge gate.
+    # This fixture continues to isolate failed-plan and artifact-cleanup behavior.
+    Set-FactoryProperty -Target $directApprovedTask -Name 'mergeGate' -Value $null
+    Set-FactoryProperty -Target $directApprovedTask -Name 'sourceNotes' -Value @()
 
     $directApprovedTask.status = "awaiting-review"
     $directApprovedTask.approval = $null

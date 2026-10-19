@@ -218,6 +218,20 @@ try {
     $amend = $amended.stdout | ConvertFrom-Json
     Assert-Chat ($amend.oldCommit -eq $originalCommit -and $amend.commit -ne $originalCommit -and $amend.parent -eq $parent -and -not (& git -C $worktree status --porcelain)) 'Amend broke parent, SHA, or clean-tree postconditions.'
     Assert-Chat ($null -eq (Read-FactoryJson $context.statePath).tasks[0].commit) 'Amend wrote a commit into Factory state.'
+    $invalidated = (Read-FactoryJson $context.statePath).tasks[0].resultInvalidatedAt
+    Assert-Chat ([bool]$invalidated) 'Amend did not invalidate earlier result events.'
+    $oldPayload = [pscustomobject]@{ taskId = 'chat-task'; status = 'completed'; branch = 'factory-worker/chat-task'; commit = $originalCommit; worktree = $worktree
+        tests = @([pscustomobject]@{ command = 'git diff --check'; status = 'passed'; summary = 'Fixture' }) }
+    $oldEvent = [pscustomobject]@{ sessionId = $sessionId; capturedAt = (ConvertTo-FactoryUtcDateTime $invalidated).AddSeconds(-1).ToString('o'); kind = 'result'; payload = $oldPayload }
+    Write-FactoryJsonAtomic (Join-Path $eventDirectory 'latest-result.json') $oldEvent
+    $null = Invoke-ChatScript 'reconcile-worker-sessions.ps1' @('-Repository',$repository,'-ClaudeCommand',$fakeClaude)
+    $afterOld = (Read-FactoryJson $context.statePath).tasks[0]
+    Assert-Chat ($afterOld.status -ne 'failed' -and $null -eq $afterOld.commit) 'An older result caused a HEAD mismatch after guarded amend.'
+    $oldPayload.commit = $amend.commit
+    $null = Publish-FactoryWorkerEvent -Context $context -Task $afterOld -SessionId $sessionId -Worktree $worktree -Message ("FACTORY_RESULT`n" + ($oldPayload | ConvertTo-Json -Depth 10))
+    $null = Invoke-ChatScript 'reconcile-worker-sessions.ps1' @('-Repository',$repository,'-ClaudeCommand',$fakeClaude)
+    $afterFinal = (Read-FactoryJson $context.statePath).tasks[0]
+    Assert-Chat ($afterFinal.commit -eq $amend.commit -and $afterFinal.workerResult.commit -eq $amend.commit) 'The final amended HEAD was not recorded from a fresh result.'
     foreach ($guard in @('review','held','wrong-branch','outside','unstaged','untracked','cherry-pick','two-commits','merge-commit','development-head','detached','shim','empty','message-inside')) {
         $task = New-ChatWaitingTask; $task.status = 'running'
         $args = @('-Repository',$repository,'-TaskId','chat-task')

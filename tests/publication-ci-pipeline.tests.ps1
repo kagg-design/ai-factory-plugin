@@ -130,6 +130,43 @@ try {
     Assert-PipelineCi ($savedTask.status -eq 'approved' -and $savedTask.integration.status -eq 'validated') 'Pre-push block lost the locally validated approval.'
     $lease = Invoke-CiScript 'test-lease.ps1' @('-Action', 'status')
     Assert-PipelineCi ($null -eq $lease.holder) 'Pre-push CI block retained the test lease.'
+
+    # Native security gates must prevent publication independently of worker
+    # instructions, including after the operator explicitly approves a result.
+    $null = Invoke-CiScript 'task-action.ps1' @('-TaskId', 'ci-during-checks', '-Action', 'hold')
+    $journal = Read-FactoryCiJournal $context
+    $null = Confirm-FactoryCiFailure -Context $context -Sha $journal.entries[0].sha -Reason 'Synthetic fixture authorizes the next publication.'
+    $config.ciMonitoring.enabled = $false; $config.repo = 'awesomehr'
+    $config.repos.awesomehr.securityPresentWhen = ''
+    $config.repos.awesomehr.securityCommand = "Write-Output 'raw-scanner-data-do-not-relay'; Write-Output 'Summary: vulnerable dependency'; exit 1"
+    Write-FactoryJsonAtomic $context.configPath $config
+    $task = New-CiApprovedTask 'security-red'
+    $before = Invoke-CiGit $remote @('rev-parse', 'refs/heads/develop')
+    $red = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $PluginRoot 'scripts/integrate-task.ps1'), '-Repository', $repository, '-TaskId', $task.id, '-ClaudeCommand', $fakeClaude)
+    $savedTask = Get-FactoryTask -State (Read-FactoryJson $context.statePath) -TaskId $task.id
+    Assert-PipelineCi ($red.exitCode -ne 0 -and $savedTask.status -eq 'failed' -and $savedTask.security.summary -eq 'Summary: vulnerable dependency') 'Native pipeline accepted a vulnerable result.'
+    Assert-PipelineCi (-not $red.output.Contains('raw-scanner-data-do-not-relay') -and (Invoke-CiGit $remote @('rev-parse', 'refs/heads/develop')) -eq $before) 'Security failure leaked raw output or pushed.'
+
+    $config.repos.awesomehr.securityCommand = "Write-Output 'Summary: clean'; exit 0"
+    Write-FactoryJsonAtomic $context.configPath $config
+    $task = New-CiApprovedTask 'merge-confirmation'
+    $mutex = Enter-FactoryMutex $context.projectKey
+    try {
+        $state = Read-FactoryJson $context.statePath
+        (Get-FactoryTask $state $task.id).brief = 'Merge gate: ask Igor before merging'
+        Write-FactoryJsonAtomic $context.statePath $state
+    } finally { Exit-FactoryMutex $mutex }
+    $pending = Invoke-CiScript 'integrate-task.ps1' @('-TaskId', $task.id, '-ClaudeCommand', $fakeClaude)
+    Assert-PipelineCi ($pending.status -eq 'merge-gate' -and (Invoke-CiGit $remote @('rev-parse', 'refs/heads/develop')) -eq $before) 'Merge gate allowed an unconfirmed publication.'
+    $tick = Invoke-CiScript 'factory-scheduler.ps1' @('-Action', 'tick', '-ClaudeCommand', $fakeClaude)
+    Assert-PipelineCi ($tick.integratedCount -eq 0 -and @($tick.errors).Count -eq 0) 'Scheduler counted a pending merge gate as a publication or failure.'
+    $confirmed = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $PluginRoot 'factory.ps1'), 'merge', $task.id, '-Yes', '-Repository', $repository)
+    Assert-PipelineCi ($confirmed.exitCode -eq 0) "Terminal confirmation failed: $($confirmed.output)"
+    $result = Invoke-CiScript 'integrate-task.ps1' @('-TaskId', $task.id, '-ClaudeCommand', $fakeClaude)
+    $savedTask = Get-FactoryTask -State (Read-FactoryJson $context.statePath) -TaskId $task.id
+    Assert-PipelineCi ($result.status -eq 'done' -and $savedTask.mergeGate.via -eq 'terminal' -and $savedTask.security.summary -eq 'Summary: clean') 'Confirmed clean result was not published with gate evidence.'
 } finally {
     if ($null -eq $previousRuntime) { Remove-Item Env:CLAUDE_FACTORY_HOME -ErrorAction SilentlyContinue }
     else { $env:CLAUDE_FACTORY_HOME = $previousRuntime }
@@ -144,4 +181,4 @@ try {
         catch { if ($attempt -eq 39) { throw }; Start-Sleep -Milliseconds 250 }
     }
 }
-Write-Output 'Publication CI native pipeline regressions passed (pending -> publish; red -> block; acknowledgement -> repair; pre-push race).'
+Write-Output 'Publication CI and quality gates passed (CI block/repair, pre-push race, security failure, merge wait and terminal confirmation).'

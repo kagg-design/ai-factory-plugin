@@ -77,5 +77,16 @@ try {
     if ($afterParents.Count -ne 2 -or $afterParents[1] -ne $parent -or
         (Invoke-AmendGit @("branch", "--show-current")) -ne $branch -or
         (Invoke-AmendGit @("status", "--porcelain"))) { throw "Amend postconditions failed: parent/branch changed or worktree is dirty." }
-    [ordered]@{ oldCommit = $oldCommit; commit = $commit; parent = $parent } | ConvertTo-Json
+    $stateMutex = Enter-FactoryMutex -ProjectKey $context.projectKey
+    try {
+        $state = Read-FactoryJson -Path $context.statePath
+        $current = Get-FactoryTask -State $state -TaskId $TaskId
+        if ([string]$current.status -notin @('starting', 'planning', 'running') -or
+            -not (Test-FactorySamePath -Left ([string]$current.worktree) -Right $worktree) -or
+            [string](Get-FactoryNestedValue $current 'runId') -ne [string](Get-FactoryNestedValue $task 'runId')) { throw 'Task changed while amending; the retained checkout requires inspection.' }
+        foreach ($field in @('commit', 'workerResult', 'review', 'approval', 'mergeGate', 'security')) { Set-FactoryProperty -Target $current -Name $field -Value $null }
+        Set-FactoryProperty -Target $current -Name 'resultInvalidatedAt' -Value (Get-FactoryUtcTimestamp)
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    } finally { Exit-FactoryMutex -Mutex $stateMutex }
+    [ordered]@{ oldCommit = $oldCommit; commit = $commit; parent = $parent; next = 'Emit a fresh FACTORY_RESULT using this final HEAD.' } | ConvertTo-Json
 } finally { Exit-FactoryMutex -Mutex $operationMutex }

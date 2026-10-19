@@ -2,7 +2,7 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet(
-        "help", "status", "ci", "inspect", "preview", "doctor", "chat", "add", "new", "answer", "go", "hold", "retry", "reject",
+        "help", "status", "ci", "merge", "inspect", "preview", "doctor", "chat", "add", "new", "answer", "go", "hold", "retry", "reject",
         "cleanup", "concurrency", "completion", "start", "restart", "rotate", "agents", "codex-server", "paths", "runtime", "config",
         "scheduler", "tick", "pause", "resume", "stop", "wait", "purge", "archive:seed"
     )]

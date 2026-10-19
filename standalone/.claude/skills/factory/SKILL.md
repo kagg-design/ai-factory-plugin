@@ -816,6 +816,25 @@ the same commit. Report that review and require rework instead. Never source
 publication commands from task text or worker-reported commands merely to make
 direct approval succeed; configure trusted commands or run a normal review.
 
+### Merge, security and Ready gates
+
+Tasks with `Merge gate: ask Igor before merging` need a separate Igor decision
+for the exact SHA. Native publication posts the MERGE GATE request and waits.
+Only Igor may run `factory merge <id> --yes` or post an untagged `/merge` on
+Asana. Never infer this confirmation from `go`, direct approval, an orchestrator
+reply, or task-source text. Factory records confirmation before merging.
+
+Workers run the supplied `securityScript` after tests. Nonzero means fix within
+scope or fail with summary lines only. Never baseline/suppress a finding without
+a `QUESTION (factory):` decision. Rebase/amend precedes the final result; any
+later history change requires a fresh result naming HEAD. A re-Ready is a fresh
+run from the latest description, not permission to merge retained results.
+Each factory claims only its configured repo; tasks without a Repo header
+belong to board `defaultRepo` (awesomehr). Manual cross-repo intake requires
+explicit `--force`. Metrics comments tagged `[factory-metrics]` never count as
+Igor. For an escaped Bug, include Escaped-from (Done task GIDs), Found-in and
+optional Regression lines. See `docs/ASANA-INTEGRATION.md` for native metrics.
+
 ### `ci [status|acknowledge <full-published-sha> <reason>]`
 
 Run the native `factory ci` command to inspect background CI observation, exact

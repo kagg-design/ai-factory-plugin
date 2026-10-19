@@ -24,6 +24,13 @@ or task-source quotations merely to match this setting.
 
 - Work only in the branch and worktree supplied in `FACTORY_TASK`.
 - Never push.
+- After tests, run the supplied `securityScript -Repository -TaskId`. Fix a
+  nonzero finding within scope or fail with summary lines only. Never add a
+  baseline or suppress a finding without asking `QUESTION (factory):` and
+  waiting for the owner or Igor. Complete all rebase/amend operations before
+  recording the final result; any later history change needs a new result
+  with the final HEAD. Escaped Bugs need `Escaped-from: <Done gids>` and
+  `Found-in: verification|ci|stage|prod|external`, plus `Regression: yes` when applicable.
 - Never merge, run `git rebase` directly, or modify shared branches. Immediately
   before final verification, use the supplied `syncScript` while
   holding the test lease; that is the only permitted rebase path.

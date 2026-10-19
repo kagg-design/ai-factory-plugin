@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot 'quality-gates.ps1')
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) { $env:CLAUDE_FACTORY_CLAUDE_COMMAND } else { "claude" }
 }
@@ -43,6 +44,7 @@ function Copy-PipelineIgnoredFiles {
         $parent = Split-Path -Parent $target
         if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
+        if ((Split-Path -Leaf $target) -like '.env*') { Protect-FactoryEnvironmentFile -Config $Config -Path $target }
     }
 }
 
@@ -346,6 +348,15 @@ try {
     if ($workerHead -ne $taskCommit -or $workerBranch -ne [string]$task.branch -or $workerDirty) {
         throw "Worker checkout no longer matches the approved commit and branch."
     }
+    if (-not (Test-FactoryMergeGate -Context $context -Config $config -Task $task)) {
+        [ordered]@{ taskId = $TaskId; status = 'merge-gate'; commit = $taskCommit; next = "factory merge $TaskId --yes" } | ConvertTo-Json
+        return
+    }
+    $currentStage = 'security'
+    $security = Invoke-FactorySecurityCheck -Config $config -Repository ([string]$context.repositoryRoot) -Worktree ([string]$task.worktree)
+    Save-FactoryGateProperty -Context $context -Task $task -Name 'security' -Value $security
+    if ($security.exitCode -ne 0) { $currentStage = 'security'; throw "Security: $($security.summary)" }
+    $currentStage = 'validation'
 
     $leaseRun = Invoke-FactoryNativeProcess -Command "powershell" -Arguments @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "test-lease.ps1"),
@@ -449,6 +460,13 @@ try {
         $failureMessage = [string]$releaseCheckSet.failure
         throw $failureMessage
     }
+    # Enforce the security gate again after native tests, immediately before
+    # publication. Neither scan saves or relays raw scanner output.
+    $currentStage = 'security'
+    $security = Invoke-FactorySecurityCheck -Config $config -Repository ([string]$context.repositoryRoot) -Worktree ([string]$task.worktree)
+    Save-FactoryGateProperty -Context $context -Task $task -Name 'security' -Value $security
+    if ($security.exitCode -ne 0) { throw "Security: $($security.summary)" }
+    $currentStage = 'integration'
     if (-not $developmentOnly) {
         $productionAudit = [pscustomobject]@{
             status = "validated"
@@ -480,6 +498,11 @@ try {
 
     # Checks may have taken minutes. Refresh failure evidence, but never wait
     # for a workflow to finish. Preserve approval when a prior push has gone red.
+    if (-not (Test-FactoryMergeGate -Context $context -Config $config -Task $task)) {
+        Update-PipelineTask -Status 'approved' -ErrorText '' -IntegrationValue $integrationAudit -ProductionValue $productionAudit
+        [ordered]@{ taskId = $TaskId; status = 'merge-gate'; next = "factory merge $TaskId --yes" } | ConvertTo-Json
+        return
+    }
     $ci = Sync-FactoryPublicationCi -Context $context
     if ($ci.blocked) {
         Update-PipelineTask -Status "approved" -ErrorText "Publication waits for a CI failure decision: factory ci" -IntegrationValue $integrationAudit -ProductionValue $productionAudit
@@ -489,6 +512,11 @@ try {
     }
     $currentStage = "integration"
     $script:LastCheckResults = @($integrationTests)
+    $publicationTask = Get-FactoryTask -State (Read-FactoryJson -Path $context.statePath) -TaskId $TaskId
+    if ([string]$publicationTask.commit -ne $taskCommit -or [string](Get-FactoryNestedValue $publicationTask 'runId') -ne [string](Get-FactoryNestedValue $task 'runId') -or
+        (Invoke-PipelineGit -WorkingDirectory ([string]$task.worktree) -Arguments @('rev-parse', 'HEAD') -Failure 'Cannot verify final worker HEAD') -ne $taskCommit) {
+        throw 'Task run or final HEAD changed before publication; a fresh result and review are required.'
+    }
     $null = Invoke-PipelineGit -WorkingDirectory $integrator -Arguments @("push", $remote, "HEAD:$developmentBranch") -Failure "Development push was rejected"
     $developmentPublished = $true
     Register-FactoryCiPublication -Context $context -Task $task -Slug $ciRepository -Branch $developmentBranch -Sha $integrationMerge
@@ -522,6 +550,7 @@ try {
         }
         $ci = Sync-FactoryPublicationCi -Context $context
         if ($ci.blocked) { throw "Development was pushed; production is blocked by a known CI failure. Inspect: factory ci" }
+        if (-not (Test-FactoryMergeGate -Context $context -Config $config -Task $task)) { throw 'Production waits for the recorded merge-gate confirmation.' }
         $null = Invoke-PipelineGit -WorkingDirectory $release -Arguments @("push", $remote, "HEAD:$productionBranch") -Failure "Production push was rejected"
         Register-FactoryCiPublication -Context $context -Task $task -Slug $ciRepository -Branch $productionBranch -Sha $releaseMerge
         $null = Invoke-PipelineGit -WorkingDirectory $repositoryRoot -Arguments @("fetch", $remote, $productionBranch) -Failure "Could not verify production push"
@@ -587,7 +616,7 @@ try {
             } elseif ($currentStage -eq "production") {
                 Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $integrationAudit -ProductionValue $failureAudit -ClearApproval $true
             } else {
-                Update-PipelineTask -Status $(if ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $failureAudit -ProductionValue $null -ClearApproval $true
+                Update-PipelineTask -Status $(if ($currentStage -eq 'security') { 'failed' } elseif ($developmentPublished) { "blocked" } else { "awaiting-review" }) -ErrorText $failure -IntegrationValue $failureAudit -ProductionValue $null -ClearApproval $true
             }
         }
     } catch {

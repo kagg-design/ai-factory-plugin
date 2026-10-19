@@ -10,6 +10,7 @@ param(
     [Parameter(ParameterSetName = "LocalFile")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
     [switch]$NoResume,
     [switch]$AsanaMode,
+    [switch]$Force,
     [string]$ClaudeCommand = ""
 )
 
@@ -230,6 +231,11 @@ foreach ($requiredProperty in $allowedProperties) {
 if ([int]$normalized.version -ne 1) { throw "Unsupported normalized intake version '$($normalized.version)'." }
 if ([string]$normalized.startMode -notin @("interactive", "auto")) { throw "Invalid intake start mode." }
 $identity = Resolve-NormalizedSource -Source $normalized.source
+if ([string]$identity.adapter -eq 'asana') {
+    . (Join-Path $PSScriptRoot 'asana-common.ps1')
+    $intakeConfig = Read-FactoryJson -Path $context.configPath
+    Assert-FactoryTaskRepo -Config $intakeConfig -Repository ([string]$context.repositoryRoot) -Notes ([string]$normalized.brief) -Force:$Force
+}
 if ($AsanaMode -and [string]$identity.adapter -ne 'asana') { throw 'AsanaMode requires an Asana source.' }
 if ([string]$identity.adapter -eq "local" -and -not $isLocalIntake) {
     throw "The local source adapter is reserved for native 'factory new' tasks."
@@ -288,6 +294,9 @@ try {
                 normalizedAt = $now
             }
             asanaMode = [bool]$AsanaMode
+            repoForce = [bool]$Force
+            runId = [Guid]::NewGuid().ToString('N')
+            readyClaimedAt = Get-FactoryUtcTimestamp
             asanaState = if ($AsanaMode) { 'Taken' } else { $null }
             asanaQuestion = $null
             asanaSyncedState = $null

@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "asana-common.ps1")
+. (Join-Path $PSScriptRoot 'quality-gates.ps1')
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -122,6 +123,48 @@ $existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -
 }
 
 try {
+    $sourceAdapter = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'source') -Name 'adapter' -Default '')
+    $asanaMode = [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false)
+    $asanaNotes = ''
+    if ($asanaMode) { $null = Get-FactoryAsanaToken -Config $config }
+    if ($sourceAdapter -eq 'asana' -and [Environment]::GetEnvironmentVariable([string]$config.asana.tokenEnv)) {
+        $freshAsanaRead = $false
+        try {
+            $asanaTask = Get-FactoryAsanaTask -Config $config -Gid $TaskId
+            $freshAsanaRead = $true
+            Assert-FactoryTaskRepo -Config $config -Repository ([string]$context.repositoryRoot) -Notes ([string]$asanaTask.notes) -Force:([bool](Get-FactoryNestedValue -Target $task -Name 'repoForce' -Default $false))
+            $factoryValue = Get-FactoryAsanaField -Task $asanaTask -Gid ([string]$config.asana.fields.factory)
+            if ($factoryValue) {
+                if ($asanaMode -and $factoryValue -eq [string]$config.asana.fields.ready) { throw 'Ready changed after this run was claimed. The poller must prepare a fresh run from the current description.' }
+                if (-not $asanaMode -and $factoryValue -ne [string]$config.asana.fields.ready) { throw 'Only Factory = Ready can be claimed by a new manual worker.' }
+                $asanaMode = $true
+                $asanaNotes = [string]$asanaTask.notes
+                if ($factoryValue -notin @([string]$config.asana.fields.ready, [string]$config.asana.fields.taken, [string]$config.asana.fields.question)) { throw 'Asana task is not Ready or owned by an active Taken/Question run.' }
+                if ($factoryValue -eq [string]$config.asana.fields.ready) {
+                    Confirm-FactoryAsanaClaim -Config $config -Gid $TaskId
+                    Move-FactoryAsanaTask -Config $config -Gid $TaskId -Section ([string]$config.asana.sections.inProgress)
+                    $null = Add-FactoryAsanaComment -Config $config -Gid $TaskId -Text "TAKEN (factory): worker $TaskId, worktree $(Split-Path $worktree -Leaf)."
+                    Write-FactoryAsanaTransition -Context $context -Gid $TaskId -From 'Ready' -To 'Taken' -WorkerId $TaskId
+                    $factoryValue = [string]$config.asana.fields.taken
+                }
+                $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+                try {
+                    $state = Read-FactoryJson -Path $context.statePath
+                    $savedTask = Get-FactoryTask -State $state -TaskId $TaskId
+                    Set-FactoryProperty -Target $savedTask -Name 'asanaMode' -Value $true
+                    Set-FactoryProperty -Target $savedTask -Name 'asanaState' -Value $(if ($factoryValue -eq [string]$config.asana.fields.question) { 'Question' } else { 'Taken' })
+                    Set-FactoryProperty -Target $savedTask -Name 'brief' -Value $asanaNotes
+                    Set-FactoryProperty -Target $savedTask -Name 'title' -Value ([string]$asanaTask.name)
+                    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+                } finally { Exit-FactoryMutex -Mutex $mutex }
+                Set-FactoryProperty -Target $task -Name 'brief' -Value $asanaNotes
+                Set-FactoryProperty -Target $task -Name 'title' -Value ([string]$asanaTask.name)
+            }
+        } catch {
+            if ($asanaMode -or $freshAsanaRead) { throw }
+            # Manual add/new must continue in terminal mode when Asana is unavailable.
+        }
+    }
     if ($workerRuntime -eq "claude") {
         $versionResult = Invoke-FactoryNativeProcess -Command $ClaudeCommand -Arguments @("--version")
         $versionText = ([string]$versionResult.output).Trim()
@@ -165,9 +208,11 @@ try {
     $remote = if ([string]$config.remote) { [string]$config.remote } else { "origin" }
     $development = if ([string]$config.developmentBranch) { [string]$config.developmentBranch } else { "develop" }
     $baseRef = "$remote/$development"
+    $startCommit = [regex]::Match([string]$task.brief, '(?im)^\s*(?:Start[- ]from(?: commit)?|Base commit)\s*:?\s*`?([a-f0-9]{7,40})`?\.?\s*$')
 
     & git -C $context.repositoryRoot fetch $remote $development 1> $null
     if ($LASTEXITCODE -ne 0) { throw "Failed to fetch $baseRef." }
+    if ($startCommit.Success) { $baseRef = $startCommit.Groups[1].Value }
 
     & git -C $context.repositoryRoot rev-parse --verify "$baseRef^{commit}" *> $null
     if ($LASTEXITCODE -ne 0) { throw "Base branch not found: $baseRef" }
@@ -214,6 +259,7 @@ try {
             New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
         }
         Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
+        if ((Split-Path -Leaf $destination) -like '.env*') { Protect-FactoryEnvironmentFile -Config $config -Path $destination }
     }
 
     $null = @(Sync-FactoryWorktreeDependencies -Worktree $worktree -Task $task)
@@ -232,38 +278,6 @@ try {
 
     New-Item -ItemType Directory -Path $eventDirectory -Force | Out-Null
 
-    $sourceAdapter = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'source') -Name 'adapter' -Default '')
-    $asanaMode = [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false)
-    $asanaNotes = ''
-    if ($asanaMode) { $null = Get-FactoryAsanaToken -Config $config }
-    if ($sourceAdapter -eq 'asana' -and [Environment]::GetEnvironmentVariable([string]$config.asana.tokenEnv)) {
-        try {
-            $asanaTask = Get-FactoryAsanaTask -Config $config -Gid $TaskId
-            $factoryValue = Get-FactoryAsanaField -Task $asanaTask -Gid ([string]$config.asana.fields.factory)
-            if ($factoryValue) {
-                $asanaMode = $true
-                $asanaNotes = [string]$asanaTask.notes
-                if ($factoryValue -eq [string]$config.asana.fields.ready) {
-                    Set-FactoryAsanaField -Config $config -Gid $TaskId -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.taken)
-                    Move-FactoryAsanaTask -Config $config -Gid $TaskId -Section ([string]$config.asana.sections.inProgress)
-                    $null = Add-FactoryAsanaComment -Config $config -Gid $TaskId -Text "TAKEN (factory): worker $TaskId, worktree $(Split-Path $worktree -Leaf)."
-                    Write-FactoryAsanaTransition -Context $context -Gid $TaskId -From 'Ready' -To 'Taken' -WorkerId $TaskId
-                    $factoryValue = [string]$config.asana.fields.taken
-                }
-                $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
-                try {
-                    $state = Read-FactoryJson -Path $context.statePath
-                    $savedTask = Get-FactoryTask -State $state -TaskId $TaskId
-                    Set-FactoryProperty -Target $savedTask -Name 'asanaMode' -Value $true
-                    Set-FactoryProperty -Target $savedTask -Name 'asanaState' -Value $(if ($factoryValue -eq [string]$config.asana.fields.question) { 'Question' } else { 'Taken' })
-                    Write-FactoryJsonAtomic -Path $context.statePath -Value $state
-                } finally { Exit-FactoryMutex -Mutex $mutex }
-            }
-        } catch {
-            if ($asanaMode) { throw }
-            # Manual add/new must continue in terminal mode when Asana is unavailable.
-        }
-    }
     $specPath = ''
     if ($asanaMode -and $asanaNotes -match '(?i)docs/tasks/(TASK-[A-Z0-9-]+-\d{3}-[a-z0-9-]+\.md)') {
         $specPath = 'docs/tasks/' + $Matches[1]
@@ -305,6 +319,7 @@ try {
         testLeaseScript = Join-Path ([string]$context.pluginRoot) "scripts\test-lease.ps1"
         syncScript = Join-Path ([string]$context.pluginRoot) "scripts\sync-task.ps1"
         amendScript = Join-Path ([string]$context.pluginRoot) "scripts\amend-task-commit.ps1"
+        securityScript = Join-Path ([string]$context.pluginRoot) 'scripts\security-check.ps1'
         testDatabase = if ($testDatabase.enabled) { [string]$testDatabase.name } else { $null }
         existingCommit = if ($existingCommit) { $existingCommit } else { $null }
         reworkRequestedAt = if ($reworkRequestedAt) { $reworkRequestedAt } else { $null }
@@ -378,6 +393,15 @@ FACTORY_TASK
 $payloadJson
 $reworkInstruction
 $asanaInstruction
+
+After tests pass, run securityScript with -Repository and -TaskId. A nonzero
+security check is a failing test: fix it within scope or report failed with its
+summary. Relay only Security:/Summary:/[security-summary] lines. Never add a
+baseline or suppress a finding yourself; ask QUESTION (factory) and wait.
+Complete every rebase or guarded amend before FACTORY_RESULT. Resolve HEAD
+again for its commit. Any later history change requires a new FACTORY_RESULT.
+When filing an escaped Bug, include Escaped-from: <Done task gids>, Found-in:
+verification|ci|stage|prod|external, and Regression: yes when applicable.
 "@
 
     if ($workerRuntime -eq "codex") {

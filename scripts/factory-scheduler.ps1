@@ -602,22 +602,25 @@ function Invoke-SchedulerTick {
         }
         if ([bool]$state.active -and -not [bool]$state.paused) {
             $approved = @($state.tasks | Where-Object { [string]$_.status -eq "approved" } | Sort-Object createdAt, id)
-            if ($approved.Count -gt 0) {
+            foreach ($approvedTask in $approved) {
                 if ($Action -eq "run") {
                     Set-SchedulerActivity `
                         -Activity integrating `
-                        -TaskId ([string]$approved[0].id) `
-                        -TaskTitle ([string](Get-CliSafeProperty -InputObject $approved[0] -Name "title" -Default "Untitled task"))
+                        -TaskId ([string]$approvedTask.id) `
+                        -TaskTitle ([string](Get-CliSafeProperty -InputObject $approvedTask -Name "title" -Default "Untitled task"))
                 }
                 try {
                     $pipeline = Invoke-SchedulerChildJson -ScriptName "integrate-task.ps1" -Arguments @(
                         "-Repository", [string]$context.repositoryRoot,
-                        "-TaskId", [string]$approved[0].id,
+                        "-TaskId", [string]$approvedTask.id,
                         "-ClaudeCommand", $ClaudeCommand
                     )
+                    if ([string]$pipeline.status -eq 'merge-gate') { continue }
                     if ([string]$pipeline.status -ne 'ci-blocked') { $integrated.Add($pipeline) }
+                    break
                 } catch {
                     $errors.Add($_.Exception.Message)
+                    break
                 }
             }
         }

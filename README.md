@@ -16,6 +16,12 @@ so a normalized envelope from a manual or future adapter can enter through
 An operator can also create a native local task directly with `factory new`,
 without Asana, AI normalization, or an intermediate JSON file.
 
+Optional [Asana quality gates and metrics](docs/ASANA-INTEGRATION.md) add
+repository routing, security checks before publication, exact-SHA merge
+confirmation, redacted worktree environment copies, stall handling,
+and per-project escaped-defect reports. Native `factory add <asana-link>` uses
+the environment PAT; `factory-metrics.ps1 -DryRun` previews metrics safely.
+
 The plugin is loaded only for a dedicated factory session. It is never copied
 into the target repository and does not change the repository's `.claude`
 directory, `CLAUDE.md`, or `.gitignore`.

@@ -561,6 +561,13 @@ function Test-FactoryRecordedProcess {
     }
 }
 
+function Test-FactoryTaskMergeGatePending {
+    param($Task)
+    $gate = Get-FactoryNestedValue -Target $Task -Name 'mergeGate'
+    return $null -ne $gate -and [string](Get-FactoryNestedValue $gate 'commit') -eq [string](Get-FactoryNestedValue $Task 'commit') -and
+        -not (Get-FactoryNestedValue $gate 'confirmedAt') -and [string](Get-FactoryNestedValue $Task 'status') -eq 'approved'
+}
+
 function Get-FactoryOperatorActionEvents {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -576,6 +583,16 @@ function Get-FactoryOperatorActionEvents {
         $taskId = [string](Get-FactoryNestedValue -Target $task -Name "id" -Default "")
         $title = [string](Get-FactoryNestedValue -Target $task -Name "title" -Default "Untitled task")
         $occurredAt = [string](Get-FactoryNestedValue -Target $task -Name "updatedAt" -Default "")
+        if (Test-FactoryTaskMergeGatePending -Task $task) {
+            $gate = Get-FactoryNestedValue $task 'mergeGate'
+            $events.Add([pscustomobject][ordered]@{
+                kind = 'merge-gate'; taskId = $taskId; title = $title; status = $status; identity = [string]$gate.commit
+                audience = 'human'; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
+                reason = 'Merge gate waits for Igor: confirm in the terminal or comment /merge on Asana.'
+                occurredAt = [string]$gate.requestedAt; command = "factory merge $taskId --yes"
+            })
+            continue
+        }
         $stall = Get-FactoryLaunchStallInfo -Task $task -TimeoutSeconds $launchTimeout -NowUtc $NowUtc
         if ([bool]$stall.stalled) {
             $events.Add([pscustomobject][ordered]@{

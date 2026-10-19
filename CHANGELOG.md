@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add native per-repository security gates and summary-only DONE reporting,
+  escaped-defect metrics and a Monday 09:00 installer. Verify Taken claims,
+  isolate default-board repo routing, start fresh on re-Ready, require recorded
+  Igor merge confirmation for each SHA, invalidate results after guarded amend,
+  stop stalled workers, and redact credentials from copied worktree environments.
+
 - Normalize JSON-backed timestamps before comparison or process-identity
   checks, so PowerShell 7 `DateTime` deserialization and non-US cultures cannot
   block publication CI or misclassify live scheduler, preview, and Codex

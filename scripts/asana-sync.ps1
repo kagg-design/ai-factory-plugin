@@ -109,7 +109,8 @@ foreach ($task in @($state.tasks | Where-Object {
             $spec = [string](Get-FactoryNestedValue -Target $task -Name 'asanaSpecPath' -Default '')
             $checks = @(Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'workerResult') -Name 'tests' -Default @())
             $testText = Format-FactoryAsanaTestSummary -Checks $checks
-            $message = "DONE (factory):`nMerged: $($config.developmentBranch) $developmentSha, $($config.productionBranch) $productionSha`nSpec: $spec`nTests: $testText`nNotes: Verify the published change."
+            $securityText = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'security') -Name 'summary' -Default 'not configured for this repo')
+            $message = "DONE (factory):`nHEAD: $($task.commit)`nMerged: $($config.developmentBranch) $developmentSha, $($config.productionBranch) $productionSha`nSpec: $spec`nTests: $testText`nSecurity: $securityText`nNotes: Verify the published change."
             $comments = @(Get-FactoryAsanaComments -Config $config -Gid $gid)
             if (-not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
                 $null = Add-FactoryAsanaComment -Config $config -Gid $gid -Text $message
@@ -125,7 +126,7 @@ foreach ($task in @($state.tasks | Where-Object {
             $reason = [string](Get-FactoryNestedValue -Target $task -Name 'error' -Default 'Worker could not finish.')
             $worktree = [string](Get-FactoryNestedValue -Target $task -Name 'worktree' -Default '')
             $branch = [string](Get-FactoryNestedValue -Target $task -Name 'branch' -Default '')
-            $message = "FAILED (factory):`nReason: $reason`nTried: worker implementation and checks.`nNext: inspect the retained worktree and re-groom or retry.`nWorktree: $worktree`nBranch: $branch"
+            $message = "FAILED (factory): $reason`nTried: worker implementation and checks.`nNext: inspect the retained worktree and re-groom or retry.`nWorktree: $worktree`nBranch: $branch"
             $comments = @(Get-FactoryAsanaComments -Config $config -Gid $gid)
             if (-not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
                 $null = Add-FactoryAsanaComment -Config $config -Gid $gid -Text $message

@@ -179,6 +179,7 @@ function Invoke-CliReconcile {
 
 function Get-CliTaskReason {
     param($Task)
+    if (Test-FactoryTaskMergeGatePending -Task $Task) { return 'Waiting for Igor: confirm in the terminal or comment /merge on Asana.' }
 
     $asanaQuestion = Get-CliProperty -InputObject $Task -Name "asanaQuestion"
     if ($null -ne $asanaQuestion -and [string](Get-CliProperty -InputObject $Task -Name "status") -in @("blocked", "held", "awaiting-input")) {
@@ -213,6 +214,7 @@ function Get-CliEffectiveStatus {
     param($Task)
 
     $status = [string](Get-CliProperty -InputObject $Task -Name "status")
+    if (Test-FactoryTaskMergeGatePending -Task $Task) { return 'merge-gate' }
     $session = Get-CliProperty -InputObject $Task -Name "backgroundSession"
     $sessionState = [string](Get-CliProperty -InputObject $session -Name "state")
     if ($sessionState -eq "blocked" -and $status -in @("starting", "planning", "running")) {
@@ -295,6 +297,7 @@ function Get-CliStateText {
         "review-session-active" { "validated result captured; worker session is still closing" }
         "awaiting-approval" { "approved review is waiting for your go decision" }
         "approved" { "approved commit is queued for integration" }
+        'merge-gate' { 'waiting for Igor to confirm the exact SHA' }
         "integrating" { "integration into development is running" }
         "production" { "production promotion is running" }
         "cleaning" { "published artifacts are being removed" }
@@ -317,6 +320,7 @@ function Get-CliStateLabel {
         "awaiting-review" { "REVIEW" }
         "review-session-active" { "FINISHING" }
         "awaiting-approval" { "GO" }
+        'merge-gate' { 'MERGE GATE' }
         "awaiting-input" { "INPUT" }
         "syncing" { "SYNC" }
         "integrating" { "INTEGRATING" }
@@ -332,7 +336,7 @@ function Get-CliStateLabel {
 function Get-CliGroup {
     param([string]$Status)
 
-    if ($Status -in @("awaiting-input", "syncing", "awaiting-review", "awaiting-approval", "held", "rejected")) { return "Needs your action" }
+    if ($Status -in @('merge-gate', "awaiting-input", "syncing", "awaiting-review", "awaiting-approval", "held", "rejected")) { return "Needs your action" }
     if ($Status -in @("starting", "planning", "running", "approved", "integrating", "production", "cleaning")) { return "Working" }
     if ($Status -in @("queued", "review-session-active")) { return "Waiting" }
     if ($Status -in @("blocked", "failed", "session-blocked", "cleanup-interrupted")) { return "Problems" }
@@ -414,6 +418,7 @@ function Get-CliNextAction {
     }
 
     $alternative = ""
+    if (Test-FactoryTaskMergeGatePending -Task $Task) { return [pscustomobject]@{ Primary = "factory merge $id --yes"; Alternative = ''; Prompt = $prompt } }
     if ($null -ne $asanaQuestion -and $status -in @("blocked", "held", "awaiting-input")) { $alternative = "" }
     elseif ($status -eq "awaiting-input") { $alternative = "$prompt answer $id --text `"...`"" }
     elseif ($status -eq "awaiting-review" -and -not $reviewSessionActive) {
@@ -1051,11 +1056,13 @@ function Write-CliAdd {
     param($Context, [string]$Path)
 
     if (-not $Path) { throw "add requires a normalized intake file: factory add --file <task.json>" }
-    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments @(
+    $addArguments = @(
         "-Repository", [string]$Context.repositoryRoot,
         "-IntakePath", $Path,
         "-ClaudeCommand", $ClaudeCommand
     )
+    if ($Force) { $addArguments += '-Force' }
+    $result = Invoke-CliJsonScript -ScriptName "enqueue-task.ps1" -Arguments $addArguments
     $heading = if ([bool]$result.duplicate) { "Already saved" } elseif ([string]$result.status -eq "blocked") { "Saved as blocked" } else { "Added" }
     Write-Output "$($script:Tree.Top)$($script:Tree.Horizontal) $heading $($script:Tree.Horizontal) $([string]$result.taskId) $($script:Tree.Horizontal) $([string]$result.title)"
     Write-Output "$($script:Tree.Branch)$($script:Tree.Horizontal) Source: $([string]$result.sourceAdapter) / $([string]$result.sourceId)"
@@ -1850,6 +1857,11 @@ function Write-CliHelp {
     }
 
     switch ($topicKey) {
+        'merge' {
+            @('factory merge <task-id> --yes',
+              'Igor confirms the requested merge gate for its exact SHA; Factory records confirmation on Asana before merging.',
+              'An untagged /merge comment after the gate request also confirms it. A new SHA needs fresh confirmation.') | Write-Output
+        }
         "ci" {
             @(
                 'factory ci',
@@ -2142,7 +2154,7 @@ $autoOptionUsed = [bool]$Auto
 $directOptionUsed = [bool]$Direct
 $noOpenOptionUsed = [bool]$NoOpen
 
-if ($autoOptionUsed -and $normalizedCommand -ne "new") {
+if ($autoOptionUsed -and $normalizedCommand -notin @("new", "add")) {
     throw "--auto is accepted only by: factory new [--auto] <file> [title] | factory new [--auto] [text]"
 }
 if ($directOptionUsed -and $normalizedCommand -ne "go") {
@@ -2270,8 +2282,18 @@ if ($normalizedCommand -eq "config") {
 }
 
 if ($normalizedCommand -eq "add") {
-    if ($Target -or $remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "add accepts only --file <task.json>." }
+    if ($remainingValues.Count -gt 0 -or $Yes -or $Keep -or $startOptionsUsed) { throw 'Use: factory add <asana-link> [--force] [--auto] | --file <task.json> [--force]' }
+    if ($Target) {
+        if ($File) { throw 'Choose an Asana URL or --file.' }
+        & (Join-Path $PSScriptRoot 'add-asana-task.ps1') -Repository $context.repositoryRoot -Url $Target -Force:$Force -Auto:$Auto
+        exit 0
+    }
     Write-CliAdd -Context $context -Path $File
+    exit 0
+}
+if ($normalizedCommand -eq 'merge') {
+    if (-not $Target -or $remainingValues.Count -or $Keep -or $Force -or $startOptionsUsed -or $fileOptionUsed) { throw 'Use: factory merge <id> --yes' }
+    & (Join-Path $PSScriptRoot 'confirm-merge-gate.ps1') -Repository $context.repositoryRoot -TaskId $Target -Yes:$Yes
     exit 0
 }
 if ($normalizedCommand -eq "new") {

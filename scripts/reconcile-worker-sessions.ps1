@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "worker-event.ps1")
+. (Join-Path $PSScriptRoot 'quality-gates.ps1')
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -83,6 +84,7 @@ $mutex = $null
 $changes = New-Object System.Collections.Generic.List[object]
 $metadataChanged = $false
 $codexSessionsSeen = 0
+$stalledWorkers = New-Object Collections.Generic.List[object]
 $settledTaskStates = @("awaiting-review", "approved", "integrating", "production", "cleaning", "held", "rejected", "blocked", "failed", "done")
 try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
@@ -314,6 +316,28 @@ try {
             Set-FactoryProperty -Target $task.backgroundSession -Name "transcriptPath" -Value ([string]$latestEvent.transcriptPath)
             Set-FactoryProperty -Target $task.backgroundSession -Name "lastAssistantMessage" -Value ([string]$latestEvent.lastAssistantMessage)
         }
+        if ($before -in @('starting', 'planning', 'running', 'awaiting-review') -and
+            [string](Get-FactoryNestedValue $task.backgroundSession 'state') -in @('working', 'blocked')) {
+            $activity = Get-FactoryWorkerActivity -Task $task -SessionRow $sessionRow -Event $(if ($latestEventIsCurrent) { $latestEvent } else { $null })
+            if ($null -eq $activity) { $activity = [DateTime]::UtcNow; $metadataChanged = $true }
+            if ($null -ne $activity) {
+                $savedActivity = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue $task.backgroundSession 'lastActivityAt')
+                if (-not $savedActivity.success -or $savedActivity.value -ne $activity) {
+                    Set-FactoryProperty -Target $task.backgroundSession -Name 'lastActivityAt' -Value ($activity.ToUniversalTime().ToString('o'))
+                    $metadataChanged = $true
+                }
+                $hours = [Math]::Max(0.01, [double](Get-FactoryNestedValue $config 'stallHours' 2))
+                if (([DateTime]::UtcNow - $activity.ToUniversalTime()).TotalHours -ge $hours) {
+                    $reason = "stalled, no activity since $($activity.ToUniversalTime().ToString('o'))"
+                    Set-FactoryProperty -Target $task -Name 'status' -Value 'failed'
+                    Set-FactoryProperty -Target $task -Name 'error' -Value $reason
+                    Set-FactoryProperty -Target $task -Name 'updatedAt' -Value (Get-FactoryUtcTimestamp)
+                    $changes.Add([pscustomobject]@{ taskId = $taskId; from = $before; to = 'failed'; reason = $reason })
+                    $stalledWorkers.Add($task)
+                    continue
+                }
+            }
+        }
 
         $planEvent = if (Test-Path -LiteralPath $planPath) {
             Read-FactoryJson -Path $planPath
@@ -366,6 +390,10 @@ try {
         if ($resultIsForSession -and $reworkRequestedAt) {
             $resultIsForSession = (ConvertTo-FactoryUtcDateTime -Value $resultEvent.capturedAt) -gt
                 (ConvertTo-FactoryUtcDateTime -Value $reworkRequestedAt)
+        }
+        $invalidatedAt = Get-FactoryNestedValue -Target $task -Name 'resultInvalidatedAt'
+        if ($resultIsForSession -and $invalidatedAt) {
+            $resultIsForSession = (ConvertTo-FactoryUtcDateTime $resultEvent.capturedAt) -gt (ConvertTo-FactoryUtcDateTime $invalidatedAt)
         }
         $resultIsCurrent = $resultIsForSession
         $recordedAt = Get-FactoryNestedValue -Target $task -Name "resultRecordedAt" -Default $null
@@ -636,4 +664,24 @@ try {
     } | ConvertTo-Json -Depth 20
 } finally {
     Exit-FactoryMutex -Mutex $mutex
+    # Stop exact stalled sessions outside the ledger lock. Retain their checkout,
+    # branch and transcript, and release capacity only after a verified stop.
+    foreach ($stalledTask in $stalledWorkers) {
+        try {
+            if ([string](Get-FactoryNestedValue $stalledTask.backgroundSession 'runtime') -eq 'codex') {
+                $null = Stop-FactoryCodexWorkerProcess -Session $stalledTask.backgroundSession
+            } else {
+                Stop-FactoryClaudeSessionAndWait -ClaudeCommand $ClaudeCommand -BackgroundId ([string]$stalledTask.backgroundSession.id)
+            }
+            $stopLock = Enter-FactoryMutex -ProjectKey $context.projectKey
+            try {
+                $stoppedState = Read-FactoryJson -Path $context.statePath
+                $stoppedTask = Get-FactoryTask -State $stoppedState -TaskId ([string]$stalledTask.id)
+                if ([string]$stoppedTask.backgroundSession.id -eq [string]$stalledTask.backgroundSession.id) {
+                    Set-FactoryProperty -Target $stoppedTask.backgroundSession -Name 'state' -Value 'stopped'
+                    Write-FactoryJsonAtomic -Path $context.statePath -Value $stoppedState
+                }
+            } finally { Exit-FactoryMutex -Mutex $stopLock }
+        } catch { [Console]::Error.WriteLine("Could not stop stalled worker $($stalledTask.id): $($_.Exception.Message)") }
+    }
 }
