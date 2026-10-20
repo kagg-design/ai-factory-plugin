@@ -9,9 +9,10 @@ function Get-FactoryOrchestratorAlias {
 
     $configured = Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Config -Name 'orchestrator') -Name 'name' -Default ''
     $alias = if ($NameOverride) { $NameOverride.Trim() } else { ([string]$configured).Trim() }
+    # The old default is not a project label. Give old configs the same stable
+    # repository-derived owner as configs with no explicit alias.
+    if ($alias -ceq 'Claude Factory Orchestrator') { $alias = '' }
     if ($alias) {
-        # Existing callers may have supplied the former full display name.
-        if ($alias -ceq 'Claude Factory Orchestrator') { return $alias }
         if ($alias -cnotmatch '^[A-Za-z][A-Za-z0-9_-]{0,31}$') {
             throw "Orchestrator name must start with a letter and contain only letters, digits, hyphens or underscores (max 32 characters): '$alias'."
         }
@@ -35,6 +36,5 @@ function Get-FactoryOrchestratorAlias {
 
 function Get-FactoryOrchestratorDisplayName {
     param([Parameter(Mandatory = $true)][string]$Alias)
-    if ($Alias -ceq 'Claude Factory Orchestrator') { return $Alias }
-    return ('Factory ' + [char]0x00B7 + ' ' + $Alias)
+    return 'Factory ' + $Alias
 }

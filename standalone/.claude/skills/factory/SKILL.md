@@ -956,6 +956,21 @@ transcripts remain on disk. Repeating the same answer is idempotent. Run
 An answer is also accepted for a post-commit task while an explicit rework
 request is active; stray answers for otherwise finished tasks remain rejected.
 
+### Session names
+
+The orchestrator is named `Factory <alias>`; its workers are named
+`<alias> · <task-id> · <title>`, for example `Factory AwesomeHR` and
+`AwesomeHR · c068b7ec · access-sync`. The alias comes from `orchestrator.name`
+or the stable repository-derived fallback. Do not add worker/orchestrator
+role words. New Claude and Codex workers use this same convention.
+
+Existing live Claude sessions keep their names. An explicit orchestrator
+`factory restart` can update its label while retaining the exact conversation
+UUID; it does not rename or relaunch workers. Let old worker labels age out
+through the normal task lifecycle. Never restart or edit private session
+registries merely to apply a cosmetic rename. Reconciliation and cleanup
+recognize legacy rows using verified session identities and worktree paths.
+
 ### `cleanup <task-id>`
 
 Reconcile first, then run:

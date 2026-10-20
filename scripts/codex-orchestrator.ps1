@@ -681,7 +681,8 @@ function Test-FactoryCodexAppThread {
         [Parameter(Mandatory = $true)][string]$ThreadId,
         [hashtable]$Environment = @{},
         [string]$TranscriptPath = "",
-        [string]$Endpoint = ""
+        [string]$Endpoint = "",
+        [string]$SessionName = ""
     )
 
     $client = $null
@@ -693,7 +694,14 @@ function Test-FactoryCodexAppThread {
             includeTurns = $false
         })
         $result = Receive-FactoryCodexAppServerResponse -Client $client -RequestId $requestId
-        return [bool]([string](Get-FactoryNestedValue -Target $result.thread -Name "id" -Default "") -eq $ThreadId)
+        $verified = [bool]([string](Get-FactoryNestedValue -Target $result.thread -Name "id" -Default "") -eq $ThreadId)
+        if ($verified -and $SessionName) {
+            # Reuse the validation connection: a title update needs no second
+            # thread/read, resume, or model turn.
+            $nameId = Send-FactoryCodexAppServerRequest -Client $client -Method 'thread/name/set' -Params @{ threadId = $ThreadId; name = $SessionName }
+            $null = Receive-FactoryCodexAppServerResponse -Client $client -RequestId $nameId
+        }
+        return $verified
     } finally {
         Stop-FactoryCodexAppServerClient -Client $client
     }
@@ -738,6 +746,27 @@ function Start-FactoryCodexContinuationTurn {
     }
 }
 
+function Set-FactoryCodexThreadName {
+    param(
+        [Parameter(Mandatory = $true)][string]$CodexCommand,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$ThreadId,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Endpoint = ''
+    )
+
+    $client = $null
+    try {
+        $client = Start-FactoryCodexAppServerClient -CodexCommand $CodexCommand -WorkingDirectory $WorkingDirectory -Endpoint $Endpoint
+        Initialize-FactoryCodexAppServerClient -Client $client
+        $readId = Send-FactoryCodexAppServerRequest -Client $client -Method 'thread/read' -Params @{ threadId = $ThreadId; includeTurns = $false }
+        $read = Receive-FactoryCodexAppServerResponse -Client $client -RequestId $readId -TimeoutSeconds 10
+        if ([string](Get-FactoryNestedValue $read.thread 'id' '') -cne $ThreadId) { throw 'Codex returned a different thread while setting its name.' }
+        $nameId = Send-FactoryCodexAppServerRequest -Client $client -Method 'thread/name/set' -Params @{ threadId = $ThreadId; name = $Name }
+        $null = Receive-FactoryCodexAppServerResponse -Client $client -RequestId $nameId -TimeoutSeconds 10
+    } finally { Stop-FactoryCodexAppServerClient -Client $client }
+}
+
 function New-FactoryCodexAppThread {
     param(
         [Parameter(Mandatory = $true)][string]$CodexCommand,
@@ -747,7 +776,8 @@ function New-FactoryCodexAppThread {
         [string]$Model = "",
         [hashtable]$Environment = @{},
         [string]$TranscriptPath = "",
-        [string]$Endpoint = ""
+        [string]$Endpoint = "",
+        [Parameter(Mandatory = $true)][string]$SessionName
     )
 
     $client = $null
@@ -789,8 +819,7 @@ You are the Factory Orchestrator for '$repositoryRoot'. Before the first operati
         if (-not $turnId) { throw "Codex app-server created no bootstrap turn ID." }
         $null = Wait-FactoryCodexAppServerTurn -Client $client -ThreadId $threadId -TurnId $turnId
 
-        $repositoryName = Split-Path -Leaf $repositoryRoot
-        $title = "Factory Orchestrator - $repositoryName"
+        $title = $SessionName
         $nameRequestId = Send-FactoryCodexAppServerRequest -Client $client -Method "thread/name/set" -Params ([ordered]@{
             threadId = $threadId
             name = $title
@@ -838,10 +867,15 @@ function Start-FactoryCodexOrchestrator {
         [switch]$Resume,
         [switch]$Continue,
         [string]$Model = "",
+        [string]$SessionName = "",
         $Rotation = $null,
         [Parameter(Mandatory = $true)][string]$ExitCodeVariableName
     )
 
+    if (-not $SessionName) {
+        $nameConfig = Read-FactoryJson -Path ([string]$Context.configPath)
+        $SessionName = Get-FactoryOrchestratorDisplayName -Alias (Get-FactoryOrchestratorAlias -Config $nameConfig -Context $Context)
+    }
     $skillLink = Install-FactoryCodexSkillLink -PluginRoot $PluginRoot
     if ([bool]$skillLink.created) {
         Write-Host "Codex skill linked: $($skillLink.target)" -ForegroundColor Green
@@ -910,7 +944,8 @@ function Start-FactoryCodexOrchestrator {
             -ThreadId $storedSessionId `
             -Environment $environment `
             -TranscriptPath $appServerTranscriptPath `
-            -Endpoint ([string]$sharedServer.endpoint)
+            -Endpoint ([string]$sharedServer.endpoint) `
+            -SessionName $SessionName
         if (-not $available) {
             throw "Stored app-backed Codex orchestrator '$storedSessionId' is unavailable. Run 'factory start -Agent codex -New' to create a replacement."
         }
@@ -943,7 +978,8 @@ You are the Factory Orchestrator for this repository. This bootstrap turn only e
             -Model $Model `
             -Environment $environment `
             -TranscriptPath $appServerTranscriptPath `
-            -Endpoint ([string]$sharedServer.endpoint)
+            -Endpoint ([string]$sharedServer.endpoint) `
+            -SessionName $SessionName
         $storedSessionId = [string]$created.threadId
         Write-FactoryCodexOrchestratorIdentity `
             -Path $identityPath `

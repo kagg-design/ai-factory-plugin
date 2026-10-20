@@ -111,10 +111,10 @@ try {
     $config = Read-FactoryJson $context.configPath
     $config.nativeScheduler.enabled = $false
     $config.nativeScheduler.startWithOrchestrator = $false
-    Set-FactoryProperty -Target $config.orchestrator -Name 'name' -Value 'Claude Factory Orchestrator'
+    Set-FactoryProperty -Target $config.orchestrator -Name 'name' -Value 'Fixture'
     Write-FactoryJsonAtomic $context.configPath $config
     $identityPath = Join-Path $context.projectData 'orchestrator-session.json'
-    Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $repository -Name 'Claude Factory Orchestrator' -SessionId $sessionId -BackgroundId 'test1234'
+    Write-FactoryOrchestratorIdentity -Path $identityPath -RepositoryRoot $repository -Name 'Factory Fixture' -SessionId $sessionId -BackgroundId 'test1234'
     $fixtureState = Read-FactoryJson $context.statePath
     $fixtureState.active = $true
     $fixtureState.tasks = @([pscustomobject]@{
@@ -129,8 +129,8 @@ try {
     $null = & (Join-Path $PluginRoot 'scripts\project-context.ps1') -Repository $repository -Initialize
     $beforeState = [IO.File]::ReadAllText($context.statePath)
     [IO.File]::WriteAllText($registryPath, (
-        "launch`ttest1234`t$repository`tClaude Factory Orchestrator`tworking`n" +
-        "launch`tforeign-orchestrator`t$repository-other`tClaude Factory Orchestrator`tworking`n" +
+        "launch`ttest1234`t$repository`tFactory Fixture`tworking`n" +
+        "launch`tforeign-orchestrator`t$repository-other`tFactory Fixture`tworking`n" +
         "launch`tunrelated-worker`t$repository`tfactory-worker-unrelated`tworking`n"
     ), $script:FactoryUtf8NoBom)
 
@@ -179,13 +179,13 @@ try {
     $transcriptPath = Join-Path $transcriptsPath "$sessionId.jsonl"
     Remove-Item -LiteralPath $transcriptPath
     $missingHistory = ''
-    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Claude Factory Orchestrator' }
+    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Factory Fixture' }
     catch { $missingHistory = $_.Exception.Message }
     Assert-Lifecycle ($missingHistory -match 'saved transcript is missing' -and [IO.File]::ReadAllLines($respawnPath).Count -eq 1) 'Missing history was allowed to replay the original intent.'
     [IO.File]::WriteAllText($transcriptPath, '{"type":"user","message":"Do not replay me"}')
     $env:CLAUDE_FACTORY_TEST_RESPAWN_FAIL = '1'
     $failedRespawn = ''
-    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Claude Factory Orchestrator' }
+    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Factory Fixture' }
     catch { $failedRespawn = $_.Exception.Message }
     Assert-Lifecycle ($failedRespawn -match 'could not respawn' -and -not (Test-Path $backgroundArgvPath)) 'Failed respawn launched a replacement.'
     Remove-Item Env:\CLAUDE_FACTORY_TEST_RESPAWN_FAIL
@@ -193,12 +193,12 @@ try {
     $respawnReceipt = Join-Path $context.projectData 'orchestrator-launch.json'
     Remove-Item -LiteralPath $respawnReceipt
     $lateRespawn = ''
-    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Claude Factory Orchestrator' -TimeoutMilliseconds 1 }
+    try { Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $fakeClaude -Context $context -Row $savedRow -Name 'Factory Fixture' -TimeoutMilliseconds 1 }
     catch { $lateRespawn = $_.Exception.Message }
     Assert-Lifecycle ($lateRespawn -match 'did not confirm' -and (Read-FactoryJson $respawnReceipt).operation -eq 'respawn') 'Transient UUID was accepted or pending respawn was forgotten.'
     $respawnsBeforeRecovery = [IO.File]::ReadAllText($respawnPath)
     $lateRespawnRecovery = Invoke-LifecycleCommand 'start'
-    Assert-Lifecycle ($lateRespawnRecovery.exitCode -eq 0 -and [IO.File]::ReadAllText($respawnPath) -ceq $respawnsBeforeRecovery) 'Late respawn recovery restarted the process again.'
+    Assert-Lifecycle ($lateRespawnRecovery.exitCode -eq 0 -and [IO.File]::ReadAllText($respawnPath) -ceq $respawnsBeforeRecovery) "Late respawn recovery restarted the process again: $($lateRespawnRecovery.output)"
     Assert-Lifecycle ((Read-FactoryJson $identityPath).sessionId -eq $sessionId -and -not (Test-Path $respawnReceipt)) 'Late respawn recovery lost the original conversation.'
     # Reproduce a stale saved UUID plus a newer numbered Claude copy, first
     # with both stopped and then with the numbered copy still resident.
@@ -206,13 +206,13 @@ try {
     foreach ($residentCopy in @($false, $true)) {
         $env:CLAUDE_FACTORY_TEST_LIVE_TERMINAL_ID = if ($residentCopy) { 'test1234' } else { '' }
         [IO.File]::WriteAllText($registryPath, (
-            "launch`torchestrator-static`t$repository`tClaude Factory Orchestrator`tdone`t$oldSessionId`t1000`n" +
-            "launch`ttest1234`t$repository`tClaude Factory Orchestrator (2)`tworking`t$sessionId`t3000`n" +
+            "launch`torchestrator-static`t$repository`tFactory Fixture`tdone`t$oldSessionId`t1000`n" +
+            "launch`ttest1234`t$repository`tFactory Fixture (2)`tworking`t$sessionId`t3000`n" +
             $(if (-not $residentCopy) { "stop`ttest1234`n" } else { '' }) +
-            "launch`tforeign-orchestrator`t$repository-other`tClaude Factory Orchestrator (2)`tdone`n" +
+            "launch`tforeign-orchestrator`t$repository-other`tFactory Fixture (2)`tdone`n" +
             "launch`tunrelated-worker`t$repository`tfactory-worker-unrelated`tdone`n"
         ), $script:FactoryUtf8NoBom)
-        Write-FactoryJsonAtomic $identityPath ([ordered]@{ version = 1; repositoryRoot = $repository; name = 'Claude Factory Orchestrator'; sessionId = $oldSessionId; backgroundId = $null; updatedAt = '1970-01-01T00:00:02.000Z' })
+        Write-FactoryJsonAtomic $identityPath ([ordered]@{ version = 1; repositoryRoot = $repository; name = 'Factory Fixture'; sessionId = $oldSessionId; backgroundId = $null; updatedAt = '1970-01-01T00:00:02.000Z' })
         $action = if ($residentCopy) { 'restart' } else { 'start' }
         $recovery = Invoke-LifecycleCommand $action
         Assert-Lifecycle ($recovery.exitCode -eq 0) "Numbered $action failed: $($recovery.output)"
@@ -250,7 +250,7 @@ try {
     $receiptPath = Join-Path $context.projectData 'orchestrator-launch.json'
     foreach ($mode in @('failure', 'no-id', 'fork', 'wrong-repository', 'stopped', 'invisible')) {
         [IO.File]::WriteAllText($registryPath, "rm`torchestrator-static`n", $script:FactoryUtf8NoBom)
-        Write-FactoryOrchestratorIdentity $identityPath $repository 'Claude Factory Orchestrator' $sessionId
+        Write-FactoryOrchestratorIdentity $identityPath $repository 'Factory Fixture' $sessionId
         $identityBeforeFailure = [IO.File]::ReadAllText($identityPath)
         $env:CLAUDE_FACTORY_TEST_ORCHESTRATOR_LAUNCH_MODE = $mode
         $failed = Invoke-LifecycleCommand 'start'
@@ -266,7 +266,7 @@ try {
         Assert-Lifecycle ([IO.File]::ReadAllText($identityPath) -ceq $identityBeforeFailure) "Restart of '$mode' adopted an unverified conversation."
         if ($mode -eq 'invisible') {
             $receipt = Read-FactoryJson $receiptPath
-            [IO.File]::AppendAllText($registryPath, "launch`t$($receipt.backgroundId)`t$repository`tClaude Factory Orchestrator`tblocked`t$sessionId`n", $script:FactoryUtf8NoBom)
+            [IO.File]::AppendAllText($registryPath, "launch`t$($receipt.backgroundId)`t$repository`tFactory Fixture`tblocked`t$sessionId`n", $script:FactoryUtf8NoBom)
             $lateRecovery = Invoke-LifecycleCommand 'start'
             Assert-Lifecycle ($lateRecovery.exitCode -eq 0 -and [IO.File]::ReadAllText($launchCountPath) -ceq $countBeforeRetry) 'Late visibility recovery relaunched the orchestrator.'
             Assert-Lifecycle (-not (Test-Path -LiteralPath $receiptPath)) 'Verified recovery retained the pending receipt.'
@@ -313,10 +313,13 @@ try {
     $renamedConfig = Read-FactoryJson $context.configPath
     Set-FactoryProperty -Target $renamedConfig.orchestrator -Name 'name' -Value 'AwesomeHR'
     Write-FactoryJsonAtomic $context.configPath $renamedConfig
+    $legacyAliasName = 'Factory ' + [char]0x00B7 + ' AwesomeHR'
+    [IO.File]::AppendAllText($registryPath, "launch`t$($beforeRename.backgroundId)`t$repository`t$legacyAliasName`tworking`t$($beforeRename.sessionId)`t4000`n", $script:FactoryUtf8NoBom)
+    Write-FactoryOrchestratorIdentity $identityPath $repository $legacyAliasName $beforeRename.sessionId $beforeRename.backgroundId
     $renamed = Invoke-LifecycleCommand 'restart'
     Assert-Lifecycle ($renamed.exitCode -eq 0) "Named restart failed: $($renamed.output)"
     $afterRename = Read-FactoryJson $identityPath
-    $expectedName = 'Factory ' + [char]0x00B7 + ' AwesomeHR'
+    $expectedName = 'Factory AwesomeHR'
     Assert-Lifecycle ($afterRename.sessionId -eq $beforeRename.sessionId -and $afterRename.name -ceq $expectedName) 'Named restart changed the conversation UUID or kept the old label.'
     $namedArgs = [IO.File]::ReadAllLines($backgroundArgvPath)
     Assert-Lifecycle ($namedArgs -contains $expectedName -and $namedArgs -contains '--resume' -and $namedArgs -contains $beforeRename.sessionId) 'Named restart did not pass the label and exact UUID to Claude.'

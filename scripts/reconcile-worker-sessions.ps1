@@ -161,6 +161,10 @@ try {
         $expectedName = [string](Get-FactoryNestedValue -Target $task.backgroundSession -Name "name" -Default "")
         if ($sessionRuntime -eq "codex") {
             $sessionRow = Get-FactoryCodexSessionSnapshot -Session $task.backgroundSession
+            if ([string]$sessionRow.nameWarning -ne [string](Get-FactoryNestedValue $task.backgroundSession 'nameWarning' '')) {
+                Set-FactoryProperty $task.backgroundSession 'nameWarning' ([string]$sessionRow.nameWarning)
+                $metadataChanged = $true
+            }
             $codexSessionsSeen++
         } else {
             if ($null -eq $claudeListing) {

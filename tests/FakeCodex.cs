@@ -30,6 +30,9 @@ public static class FakeCodex
             File.AppendAllText(log, "app-server-request\t" + line + Environment.NewLine, new UTF8Encoding(false));
         var method = Extract(line, "\\\"method\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
         var requestId = Extract(line, "\\\"id\\\"\\s*:\\s*(\\d+)");
+        int nameDelay;
+        if (method == "thread/name/set" && Int32.TryParse(Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_NAME_DELAY_MS"), out nameDelay) && nameDelay > 0)
+            System.Threading.Thread.Sleep(nameDelay);
         if (method == "initialized" || String.IsNullOrEmpty(requestId))
             return;
         var failMethod = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_APP_SERVER_FAIL_METHOD");
@@ -57,7 +60,12 @@ public static class FakeCodex
         else if (method == "thread/name/set" || method == "thread/archive")
             write("{\"id\":" + requestId + ",\"result\":{}}");
         else if (method == "thread/read")
-            write("{\"id\":" + requestId + ",\"result\":{\"thread\":{\"id\":\"" + Escape(threadId) + "\"}}}");
+        {
+            var readThreadId = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_READ_THREAD_ID");
+            if (String.IsNullOrEmpty(readThreadId))
+                readThreadId = Extract(line, "\\\"threadId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", threadId);
+            write("{\"id\":" + requestId + ",\"result\":{\"thread\":{\"id\":\"" + Escape(readThreadId) + "\"}}}");
+        }
         else
             write("{\"id\":" + requestId + ",\"error\":{\"code\":-32601,\"message\":\"unsupported fake method\"}}");
     }

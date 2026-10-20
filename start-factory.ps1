@@ -139,6 +139,7 @@ try {
             -Resume:$Resume `
             -Continue:$Continue `
             -Model $Model `
+            -SessionName $sessionName `
             -Rotation $pendingRotation `
             -ExitCodeVariableName "factoryCodexExitCode"
         exit $factoryCodexExitCode
@@ -208,9 +209,11 @@ try {
             [string](Get-FactoryNestedValue $_ 'sessionId' '') -eq $storedSessionId -and
             [string](Get-FactoryNestedValue $_ 'id' '')
         } | Sort-Object { [long](Get-FactoryNestedValue $_ 'startedAt' 0) } -Descending)
-        $sameNameFamily = $savedRows.Count -gt 0 -and @(
-            Get-FactoryMatchingOrchestratorRows -Rows @($savedRows[0]) -RepositoryRoot $context.repositoryRoot -Name $sessionName
-        ).Count -eq 1
+        # Discovery accepts old labels, but native respawn keeps the old name.
+        # A stopped row with a changed label must use verified rm + exact UUID
+        # resume instead, just as an explicitly changed configured alias does.
+        $currentNamePattern = '^' + [regex]::Escape($sessionName) + '(?: \([1-9][0-9]*\))?$'
+        $sameNameFamily = $savedRows.Count -gt 0 -and [string]$savedRows[0].name -cmatch $currentNamePattern
         if ($sameNameFamily) {
             Write-Host "Restarting saved background orchestrator: $($savedRows[0].id)" -ForegroundColor Green
             $background = Resume-FactoryClaudeBackgroundOrchestrator -ClaudeCommand $ClaudeCommand -Context $context -Row $savedRows[0] -Name $sessionName

@@ -57,7 +57,10 @@ try {
     Assert-LocalIntake ($task.source.adapter -eq 'local' -and -not $task.agentId) 'File intake did not use the native local task path.'
     Assert-LocalIntake ($result.stdout -notmatch 'The worker will ask what') 'A file task was reported as an empty worker.'
     $shortCode = ($task.id -split '-')[-1]
-    Assert-LocalIntake ((Get-FactoryWorkerSessionName -TaskId $task.id -Title $task.title) -ceq "factory-local-$shortCode-task-reports-ui-011") 'File intake did not produce the expected readable worker name.'
+    $separator = ' ' + [char]0x00B7 + ' '
+    $label = Get-FactoryOrchestratorAlias -Config $config -Context $context
+    $workerPrefix = $label + $separator
+    Assert-LocalIntake ((Get-FactoryWorkerSessionName -TaskId $task.id -Title $task.title -Config $config -Context $context) -ceq ($workerPrefix + $shortCode + $separator + 'task-reports-ui-011')) 'File intake did not produce the expected project-labelled worker name.'
 
     $customTitle = "$unicode reports UI"
     $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @($specPath, $customTitle))
@@ -76,8 +79,8 @@ try {
     $longNamePath = Join-Path $inputDirectory "$longStem.md"
     [IO.File]::WriteAllText($longNamePath, $spec, $script:FactoryUtf8NoBom)
     $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @($longNamePath))
-    $workerName = Get-FactoryWorkerSessionName -TaskId $task.id -Title $task.title
-    Assert-LocalIntake ($task.title -ceq $longStem -and $workerName -match '^factory-local-[0-9a-f]{8}-.{1,28}$') 'A long filename escaped the compact worker-name cap.'
+    $workerName = Get-FactoryWorkerSessionName -TaskId $task.id -Title $task.title -Config $config -Context $context
+    Assert-LocalIntake ($task.title -ceq $longStem -and $workerName.StartsWith($workerPrefix) -and $workerName.Length -le 64) 'A long filename escaped the compact worker-name cap.'
 
     $task = Get-AddedLocalTask (Invoke-LocalNew -Tokens @('--auto', $specPath, 'Immediate work'))
     Assert-LocalIntake ($task.startMode -eq 'auto' -and $task.title -eq 'Immediate work' -and $task.brief -ceq $spec) 'File-first --auto intake failed.'

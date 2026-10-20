@@ -16,7 +16,7 @@ $context = [pscustomobject]@{
 $config = [pscustomobject]@{ orchestrator = [pscustomobject]@{ name = 'Auditors' } }
 $alias = Get-FactoryOrchestratorAlias -Config $config -Context $context
 Assert-Name ($alias -ceq 'Auditors') 'Configured short name was ignored.'
-Assert-Name ((Get-FactoryOrchestratorDisplayName $alias) -ceq ('Factory ' + [char]0x00B7 + ' Auditors')) 'Display name format changed.'
+Assert-Name ((Get-FactoryOrchestratorDisplayName $alias) -ceq 'Factory Auditors') 'Orchestrator label must use the compact Factory prefix.'
 Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context -NameOverride 'AwesomeHR') -ceq 'AwesomeHR') '-Name did not override config.'
 
 $config.orchestrator = [pscustomobject]@{}
@@ -29,7 +29,7 @@ try { $null = Get-FactoryOrchestratorAlias -Config $config -Context $context } c
 Assert-Name ($errorText -match 'contain only') 'A configured name containing dots was accepted.'
 
 $config.orchestrator.name = 'Claude Factory Orchestrator'
-Assert-Name ((Get-FactoryOrchestratorDisplayName (Get-FactoryOrchestratorAlias -Config $config -Context $context)) -ceq 'Claude Factory Orchestrator') 'Legacy explicit name was changed.'
+Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context) -ceq 'CloudInfra-8ce0') 'The legacy generic name did not acquire a project owner.'
 $oldRow = [pscustomobject]@{ name = 'Claude Factory Orchestrator'; sessionId = 'recorded-session'; cwd = $context.repositoryRoot }
 $matched = @(Get-FactoryMatchingOrchestratorRows -Rows @($oldRow) -RepositoryRoot $context.repositoryRoot -Name ('Factory ' + [char]0x00B7 + ' Auditors') -SessionId 'recorded-session')
 Assert-Name ($matched.Count -eq 1) 'Renaming lost the stored conversation identity.'

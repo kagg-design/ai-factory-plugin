@@ -72,7 +72,7 @@ the receipt path for diagnosis. Do not delete the receipt or use `-New` to
 bypass an unresolved launch. Failed terminal attachment is retried by attaching
 the already-verified session, not by creating another conversation.
 
-The Codex form creates or reuses `Factory Orchestrator - <repository>` as an
+The Codex form creates or reuses `Factory <alias>` as an
 app-backed Codex task, starts or reuses the Factory-managed app-server, enables
 Remote, and attaches the terminal with `codex --remote`. Desktop, phone, the
 terminal, and `factory agents` therefore address the same server-owned thread
@@ -123,12 +123,40 @@ ordinary development work, or another session rather than the factory.
 Start the factory without flags for normal use; it resumes the stored
 orchestrator. Set `orchestrator.name` in the private project config to a short
 label such as `AwesomeHR`, or run `factory start -Name AwesomeHR` to save it.
-Claude displays `Factory · AwesomeHR`. With no label, Factory derives a short
-name from the repository directory plus part of its project key. An existing
-live conversation retains its current label until `factory restart`. Restart
+Both runtimes use `Factory AwesomeHR` for the orchestrator and
+`AwesomeHR · <task-id> · <title>` for its workers. For local tasks the ID is
+the eight-character task code; Asana tasks retain their full GID. There are
+no `worker` or `orchestrator` suffixes. Names stay within 64 characters by
+shortening the title first, preserving the complete factory label and normal
+task IDs. With no label, Factory derives a short name from the repository
+directory plus part of its project key. The old generic configured value
+`Claude Factory Orchestrator` also uses this repository-derived fallback.
+
+An existing live Claude conversation retains its current label until an
+explicit `factory restart` from PowerShell after exiting the TUI. Restart
 verifies the saved transcript, stops the old background row, removes only its
 Agent View entry, and resumes the exact UUID under the configured label. A
-failed UUID check prevents attachment to a copy.
+failed UUID check prevents attachment to a copy. A saved conversation whose
+process has already exited can receive the new label on its next normal
+start, after the same transcript/UUID checks. Pending launches from the old
+label format are recovered before attempting another launch.
+
+Restarting the orchestrator does not rename, stop, or relaunch its workers.
+Existing Claude worker rows retain their names through same-session replies;
+new attempts launched through the normal task lifecycle use the new naming
+format. Do not retry or interrupt working tasks just to change their labels.
+The native Claude background CLI has no separate rename command; Factory does
+not edit its private session registry to simulate one. Legacy names remain
+supported by reconciliation and cleanup, using the exact worktree or recorded
+session identity rather than treating a display name as ownership proof.
+
+Codex orchestrator startup updates its native title through `thread/name/set`
+on the verified saved thread, without starting an extra turn. For a new Codex
+worker, a detached launch helper observes that process's `thread.started` event
+and applies the same title through the native API. Its status is recorded next
+to the attempt artifacts in `*-codex-name.json`; a failure is exposed as a
+`Session name warning` in inspection and cannot stop the worker or change its
+result. No existing worker conversation is renamed by a source update alone.
 
 Claude-generated numbered names such as `Claude Factory Orchestrator (2)`
 belong to the same orchestrator family only in the exact repository. A live

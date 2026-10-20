@@ -1,4 +1,5 @@
 Set-StrictMode -Version 2.0
+. (Join-Path $PSScriptRoot 'orchestrator-name.ps1')
 
 # Keep ownership across repeated dot-sourcing; nested acquisitions are counted.
 if (-not (Get-Variable -Name FactoryStateMutexOwnership -Scope Global -ErrorAction SilentlyContinue)) {
@@ -1595,34 +1596,36 @@ function ConvertTo-FactoryTaskArtifactName {
 function Get-FactoryWorkerSessionName {
     param(
         [Parameter(Mandatory = $true)][string]$TaskId,
-        [Parameter(Mandatory = $true)][string]$Title
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$Context
     )
 
+    $alias = Get-FactoryOrchestratorAlias -Config $Config -Context $Context
+    $separator = ' ' + [char]0x00B7 + ' '
+    $prefix = $alias + $separator
     $localMatch = [regex]::Match($TaskId, '^local:(\d{8})-(\d{6})-([0-9a-f]{8})$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (-not $localMatch.Success) {
-        $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
-        $titleSlug = ConvertTo-FactorySafeName -Value $Title -Fallback "task"
-        if ($titleSlug.Length -gt 28) { $titleSlug = $titleSlug.Substring(0, 28).TrimEnd("-") }
-        $legacyName = "factory-$safeTaskId-$titleSlug"
-        if ($legacyName.Length -gt 64) { $legacyName = $legacyName.Substring(0, 64).TrimEnd("-") }
-        return $legacyName
+    $identity = if ($localMatch.Success) {
+        $localMatch.Groups[3].Value.ToLowerInvariant()
+    } else {
+        ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
     }
-
-    # The random nonce is the task's stable short code. The timestamp and the
-    # separate filesystem artifact hash add no useful Agent View identity and
-    # leave less room for the operator-supplied title.
-    $sessionIdentity = "local-$($localMatch.Groups[3].Value.ToLowerInvariant())"
+    # Keep the full owner label and task identity; shorten the title first.
+    # Only unusually long nonstandard task IDs need compacting.
+    $identityBudget = 64 - $prefix.Length
+    if ($identity.Length -gt $identityBudget) {
+        $identity = '~' + $identity.Substring($identity.Length - ($identityBudget - 1))
+    }
+    $name = $prefix + $identity
     $titleSlug = ($Title.ToLowerInvariant() -replace '[^\p{L}\p{Nd}._-]', '-')
     $titleSlug = ($titleSlug -replace '-+', '-').Trim('-', '.')
     if (-not $titleSlug) { $titleSlug = "task" }
-    $prefix = "factory-$sessionIdentity-"
-    $maximumTitleLength = [Math]::Min(28, 64 - $prefix.Length)
-    if ($maximumTitleLength -lt 1) { throw "Local factory session identity is too long: $TaskId" }
-    if ($titleSlug.Length -gt $maximumTitleLength) {
-        $titleSlug = $titleSlug.Substring(0, $maximumTitleLength).TrimEnd("-")
+    $titleBudget = [Math]::Min(28, 64 - $name.Length - $separator.Length)
+    if ($titleBudget -gt 0) {
+        if ($titleSlug.Length -gt $titleBudget) { $titleSlug = $titleSlug.Substring(0, $titleBudget).TrimEnd('-', '.') }
+        if ($titleSlug) { $name += $separator + $titleSlug }
     }
-    if (-not $titleSlug) { $titleSlug = "task" }
-    return "$prefix$titleSlug"
+    return $name
 }
 
 function Get-FactoryNestedValue {
@@ -2226,11 +2229,18 @@ function Remove-FactoryTaskAgentSessions {
         [Parameter(Mandatory = $true)][string]$ClaudeCommand,
         [Parameter(Mandatory = $true)][string]$TaskId,
         [string]$Worktree = "",
-        [string]$KeepId = ""
+        [string]$KeepId = "",
+        [AllowNull()]$Session = $null
     )
 
+    $recordedId = [string](Get-FactoryNestedValue $Session 'id' '')
+    $recordedSessionId = [string](Get-FactoryNestedValue $Session 'sessionId' '')
     $safeTaskId = ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
-    $sessionNamePrefix = "factory-$safeTaskId-"
+    $attemptLeafPattern = '^worker-' + [regex]::Escape($safeTaskId) + '-a[1-9][0-9]*$'
+    $worktreeParent = if ($Worktree) { [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Worktree).TrimEnd('\', '/')) } else { '' }
+    $separator = ' ' + [char]0x00B7 + ' '
+    $orchestratorPattern = '^(?:Claude Factory Orchestrator|Factory(?: |' + [regex]::Escape($separator) +
+        ')[A-Za-z][A-Za-z0-9_-]{0,31})(?: \([1-9][0-9]*\))?$'
     $candidates = @()
     foreach ($row in @(Get-FactoryClaudeAgentRows -ClaudeCommand $ClaudeCommand)) {
         $kind = if ($null -ne $row.PSObject.Properties["kind"]) { [string]$row.kind } else { "" }
@@ -2240,11 +2250,25 @@ function Remove-FactoryTaskAgentSessions {
         $rowId = [string]$row.id
         if ($KeepId -and $rowId -eq $KeepId) { continue }
         $rowName = if ($null -ne $row.PSObject.Properties["name"]) { [string]$row.name } else { "" }
-        if ($rowName -ceq "Claude Factory Orchestrator") { continue }
+        if ($rowName -cmatch $orchestratorPattern) { continue }
         $rowCwd = if ($null -ne $row.PSObject.Properties["cwd"]) { [string]$row.cwd } else { "" }
         $matchesWorktree = [bool]($Worktree -and $rowCwd -and (Test-FactorySamePath -Left $rowCwd -Right $Worktree))
-        $matchesName = $rowName.StartsWith($sessionNamePrefix, [StringComparison]::OrdinalIgnoreCase)
-        if ($matchesWorktree -or $matchesName) { $candidates += $row }
+        $matchesPreviousAttempt = $false
+        if ($worktreeParent -and $rowCwd -and -not $matchesWorktree) {
+            $rowPath = [IO.Path]::GetFullPath($rowCwd).TrimEnd('\', '/')
+            $rowParent = [IO.Path]::GetDirectoryName($rowPath)
+            $matchesPreviousAttempt = $rowParent -and
+                (Test-FactorySamePath -Left $rowParent -Right $worktreeParent) -and
+                [IO.Path]::GetFileName($rowPath) -cmatch $attemptLeafPattern
+        }
+        $rowSessionId = [string](Get-FactoryNestedValue $row 'sessionId' '')
+        $matchesIdentity = ($recordedId -and $rowId -eq $recordedId) -or
+            ($recordedSessionId -and $rowSessionId -eq $recordedSessionId)
+        # Labels and task IDs can repeat across factories. A display-name
+        # match alone must never authorize stopping a different repository's
+        # worker. Path comparison works even after the worktree is removed.
+        if ($Worktree -and $rowCwd -and -not $matchesWorktree -and -not $matchesPreviousAttempt) { continue }
+        if ($matchesWorktree -or $matchesPreviousAttempt -or $matchesIdentity) { $candidates += $row }
     }
 
     $stopped = @()

@@ -170,6 +170,7 @@ function Start-FactoryCodexWorkerProcess {
     Write-FactoryJsonAtomic $launchRequest ([ordered]@{
         executable = $executable; arguments = $argumentLine; worktree = [IO.Path]::GetFullPath($Worktree)
         promptPath = $PromptPath; stdoutPath = $jsonlPath; stderrPath = $stderrPath; resultPath = $launchResult
+        sessionName = $SessionName; nameStatusPath = "$ArtifactPrefix-codex-name.json"
     })
     try {
         if (-not ('ClaudeFactory.DetachedWorkerProcess' -as [type])) {
@@ -178,7 +179,7 @@ function Start-FactoryCodexWorkerProcess {
         $launcherExe = (Get-Command powershell -ErrorAction Stop).Source
         $launcherArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'start-codex-process.ps1'), '-RequestPath', $launchRequest)
         $launcherLine = ($launcherArgs | ForEach-Object { ConvertTo-FactoryWindowsArgument $_ }) -join ' '
-        $launcherPid = [ClaudeFactory.DetachedWorkerProcess]::Start($launcherExe, $launcherLine, $Worktree, $factoryEnvironment)
+        $launcherPid = [ClaudeFactory.DetachedWorkerProcess]::Start($launcherExe, $launcherLine, $PluginRoot, $factoryEnvironment)
         # Keep the launch reservation while its helper is alive. A timeout
         # could otherwise report failure just before a delayed worker starts.
         while (-not (Test-Path -LiteralPath $launchResult)) {
@@ -200,6 +201,7 @@ function Start-FactoryCodexWorkerProcess {
         id = "codex-$($process.processId)"
         sessionId = $null
         name = $SessionName
+        nameStatusPath = "$ArtifactPrefix-codex-name.json"
         state = "working"
         processId = [int]$process.processId
         processStartTimeUtc = [string]$process.processStartTimeUtc
@@ -210,6 +212,19 @@ function Start-FactoryCodexWorkerProcess {
         attachCommand = $null
         cliVersion = [string]$capabilities.version
     }
+}
+
+function Get-FactoryCodexSessionNameWarning {
+    param([Parameter(Mandatory = $true)]$Session)
+
+    $nameStatusPath = [string](Get-FactoryNestedValue $Session 'nameStatusPath' '')
+    if ($nameStatusPath -and (Test-Path -LiteralPath $nameStatusPath)) {
+        try {
+            $nameStatus = Read-FactoryJson $nameStatusPath
+            if ([string]$nameStatus.status -eq 'failed') { return [string]$nameStatus.warning }
+        } catch { return 'Could not read the native Codex title update status.' }
+    }
+    return ''
 }
 
 function Get-FactoryCodexSessionSnapshot {
@@ -267,11 +282,13 @@ function Get-FactoryCodexSessionSnapshot {
         $sha = [Security.Cryptography.SHA256]::Create()
         try { ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($lastMessage)))).Replace("-", "").ToLowerInvariant() } finally { $sha.Dispose() }
     } else { "" }
+    $nameWarning = Get-FactoryCodexSessionNameWarning -Session $Session
     return [pscustomobject]@{
         runtime = "codex"
         id = [string]$Session.id
         sessionId = $threadId
         name = [string]$Session.name
+        nameWarning = $nameWarning
         state = $state
         status = $state
         transcriptPath = $transcriptPath
@@ -351,7 +368,7 @@ function Close-FactoryTaskWorkerSessions {
         [string]$Session.runtime
     } else { "claude" }
     if ($runtime -ne "codex") {
-        return Remove-FactoryTaskAgentSessions -ClaudeCommand $ClaudeCommand -TaskId $TaskId -Worktree $Worktree
+        return Remove-FactoryTaskAgentSessions -ClaudeCommand $ClaudeCommand -TaskId $TaskId -Worktree $Worktree -Session $Session
     }
     try {
         $result = Invoke-FactoryCodexSessionDisposition -CodexCommand $CodexCommand -Session $Session -Disposition $CodexDisposition

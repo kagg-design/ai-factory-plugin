@@ -9,7 +9,12 @@ function Get-FactoryMatchingOrchestratorRows {
         [string]$SessionId = ""
     )
 
-    $namePattern = '^' + [regex]::Escape($Name) + '(?: \([1-9][0-9]*\))?$'
+    $familyNames = @($Name)
+    if ($Name -cmatch '^Factory ([A-Za-z][A-Za-z0-9_-]{0,31})$') {
+        $familyNames += 'Factory ' + [char]0x00B7 + ' ' + $Matches[1]
+        $familyNames += 'Claude Factory Orchestrator'
+    }
+    $namePattern = '^(?:' + (($familyNames | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?: \([1-9][0-9]*\))?$'
     return @($Rows | Where-Object {
         $rowName = if ($null -ne $_.PSObject.Properties["name"]) { [string]$_.name } else { "" }
         $rowCwd = if ($null -ne $_.PSObject.Properties["cwd"]) { [string]$_.cwd } else { "" }
@@ -84,8 +89,8 @@ function Start-FactoryClaudeBackgroundOrchestrator {
     $receiptPath = Join-Path ([string]$Context.projectData) 'orchestrator-launch.json'
     if (Test-Path -LiteralPath $receiptPath) {
         $receipt = Read-FactoryJson $receiptPath
-        if (-not (Test-FactorySamePath ([string]$receipt.repositoryRoot) ([string]$Context.repositoryRoot)) -or
-            [string]$receipt.name -cne $Name) {
+        $receiptNameRow = [pscustomobject]@{ name = [string]$receipt.name; cwd = [string]$receipt.repositoryRoot }
+        if (@(Get-FactoryMatchingOrchestratorRows -Rows @($receiptNameRow) -RepositoryRoot ([string]$Context.repositoryRoot) -Name $Name).Count -ne 1) {
             throw "The pending orchestrator launch belongs to another repository or name: $receiptPath"
         }
         $SessionId = [string]$receipt.requestedSessionId
@@ -137,7 +142,7 @@ function Start-FactoryClaudeBackgroundOrchestrator {
         throw "Claude orchestrator '$backgroundId' is $($row.state). Saved conversation unchanged; inspect: $receiptPath"
     }
     Write-FactoryOrchestratorIdentity -Path (Join-Path ([string]$Context.projectData) 'orchestrator-session.json') `
-        -RepositoryRoot $Context.repositoryRoot -Name $Name -SessionId $actualSessionId -BackgroundId $backgroundId
+        -RepositoryRoot $Context.repositoryRoot -Name ([string]$row.name) -SessionId $actualSessionId -BackgroundId $backgroundId
     if ($null -ne $Rotation) {
         $null = Complete-FactoryOrchestratorRotation -Context $Context -Rotation $Rotation -NewSessionId $actualSessionId
     }
@@ -229,7 +234,7 @@ function Wait-FactoryRespawnedOrchestrator {
         })
         if ($rows.Count -eq 1) {
             Write-FactoryOrchestratorIdentity -Path (Join-Path ([string]$Context.projectData) 'orchestrator-session.json') `
-                -RepositoryRoot $Context.repositoryRoot -Name $Name -SessionId $sessionId -BackgroundId $backgroundId
+                -RepositoryRoot $Context.repositoryRoot -Name ([string]$rows[0].name) -SessionId $sessionId -BackgroundId $backgroundId
             Remove-Item -LiteralPath (Join-Path ([string]$Context.projectData) 'orchestrator-launch.json') -Force
             return $rows[0]
         }

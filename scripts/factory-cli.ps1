@@ -489,6 +489,9 @@ function Add-CliTaskTree {
     if ($session.Exists) {
         $sessionName = if ($session.Name) { "$($session.Name) $($script:Tree.Horizontal) " } else { "" }
         $details.Add("Session: $($session.Runtime) $sessionName$($session.ShortId) / $($session.State)")
+        $nameWarning = [string](Get-FactoryNestedValue (Get-FactoryNestedValue $Task 'backgroundSession') 'nameWarning' '')
+        if ($session.Runtime -eq 'codex') { $nameWarning = Get-FactoryCodexSessionNameWarning -Session $Task.backgroundSession }
+        if ($nameWarning) { $details.Add("Session name warning: $nameWarning") }
     } else {
         $details.Add("Session: none")
     }

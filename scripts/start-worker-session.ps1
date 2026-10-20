@@ -99,7 +99,7 @@ $existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -
         $testDatabaseName = Get-FactoryTestDatabaseName -Settings $testDatabaseSettings -Scope "worker" -TaskId $TaskId
     }
 
-    $sessionName = Get-FactoryWorkerSessionName -TaskId $TaskId -Title ([string]$task.title)
+    $sessionName = Get-FactoryWorkerSessionName -TaskId $TaskId -Title ([string]$task.title) -Config $config -Context $context
 
     Set-FactoryProperty -Target $task -Name "startMode" -Value $Mode
     Set-FactoryProperty -Target $task -Name "status" -Value "starting"
@@ -465,6 +465,7 @@ verification|ci|stage|prod|external, and Regression: yes when applicable.
             stderrPath = [string]$codexLaunch.stderrPath
             lastMessagePath = [string]$codexLaunch.lastMessagePath
             shimDirectory = [string]$codexLaunch.shimDirectory
+            nameStatusPath = [string]$codexLaunch.nameStatusPath
             lastAssistantMessage = $null
             attachCommand = $codexAttach
             cliVersion = [string]$codexLaunch.cliVersion

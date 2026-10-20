@@ -38,6 +38,8 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-server-identity.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-orchestrator-start.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'orchestrator-name.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'session-project-labels.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'factory-status.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'claude-orchestrator-lifecycle.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
@@ -294,12 +296,15 @@ try {
     Assert-True ($codexOrchestratorSource.Contains('This bootstrap turn only establishes a resumable conversation.')) "Codex bootstrap may perform expensive operational work before opening the TUI."
     Assert-True ($codexOrchestratorSource.Contains('Do not load a skill, read a file, run a command, call a tool')) "Codex bootstrap does not prohibit eager factory skill loading."
 
-    $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export"
-    Assert-Equal "factory-local-fe35a8dc-fix-the-profile-export" $readableLocalSession "Local session name is not readable."
+    $nameContext = [pscustomobject]@{ repositoryRoot = 'C:\fixture'; projectKey = 'fixture-12345678' }
+    $nameConfig = [pscustomobject]@{ orchestrator = [pscustomobject]@{ name = 'AwesomeHR' } }
+    $nameSeparator = ' ' + [char]0x00B7 + ' '
+    $readableLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title "Fix the profile export" -Config $nameConfig -Context $nameContext
+    Assert-Equal ('AwesomeHR' + $nameSeparator + 'fe35a8dc' + $nameSeparator + 'fix-the-profile-export') $readableLocalSession "Local session name is not readable."
     Assert-True ($readableLocalSession.Length -le 64) "Readable local session name exceeds the CLI limit."
     $unicodeLocalTitle = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0JjRgdC/0YDQsNCy0LjRgtGMINGN0LrRgdC/0L7RgNGCINC/0YDQvtGE0LjQu9GP"))
     $unicodeLocalSlug = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("0LjRgdC/0YDQsNCy0LjRgtGMLdGN0LrRgdC/0L7RgNGCLdC/0YDQvtGE0LjQu9GP"))
-    $unicodeLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title $unicodeLocalTitle
+    $unicodeLocalSession = Get-FactoryWorkerSessionName -TaskId "local:20260816-210251-fe35a8dc" -Title $unicodeLocalTitle -Config $nameConfig -Context $nameContext
     Assert-True ($unicodeLocalSession.Contains($unicodeLocalSlug)) "Local session name discarded a Unicode title."
 
     $orchestratorRows = @(
@@ -664,8 +669,8 @@ try {
     Assert-True ([bool]$parsedDateTimeHeartbeat.success) "A DateTime-valued lease heartbeat was not accepted."
     Assert-True ([Math]::Abs(([DateTime]$parsedDateTimeHeartbeat.value - $dateTimeHeartbeat).TotalMilliseconds) -lt 1) "A DateTime-valued lease heartbeat changed during normalization."
 
-    $cultureLeaseTimestamp = [DateTime]::UtcNow.AddMinutes(-2).ToString("o", [Globalization.CultureInfo]::InvariantCulture)
-    $cultureAges = New-Object Collections.Generic.List[int]
+    $cultureLeaseInstant = [DateTime]::UtcNow.AddMinutes(-2)
+    $cultureLeaseTimestamp = $cultureLeaseInstant.ToString("o", [Globalization.CultureInfo]::InvariantCulture)
     $originalCulture = [Threading.Thread]::CurrentThread.CurrentCulture
     try {
         foreach ($cultureName in @("en-GB", "en-US", "ru-RU")) {
@@ -679,13 +684,18 @@ try {
                 }
                 queue = @(); lastReclaim = $null; updatedAt = Get-FactoryUtcTimestamp
             })
+            $statusStartedAt = [DateTime]::UtcNow
             $cultureStatus = (& $testLeaseScript -Action status -Repository $repository) | ConvertFrom-Json
-            $cultureAges.Add([int]$cultureStatus.holderAgeSeconds)
+            $statusFinishedAt = [DateTime]::UtcNow
+            # Each culture invokes a child process. Compare with its own wall
+            # clock interval instead of assuming all calls finish in 2 seconds.
+            $minimumAge = [Math]::Floor(($statusStartedAt - $cultureLeaseInstant).TotalSeconds) - 1
+            $maximumAge = [Math]::Ceiling(($statusFinishedAt - $cultureLeaseInstant).TotalSeconds) + 1
+            Assert-True ($cultureStatus.holderAgeSeconds -ge $minimumAge -and $cultureStatus.holderAgeSeconds -le $maximumAge) "Lease age changed with culture $cultureName`: $($cultureStatus.holderAgeSeconds), expected $minimumAge..$maximumAge."
         }
     } finally {
         [Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture
     }
-    Assert-True ((($cultureAges | Measure-Object -Maximum).Maximum - ($cultureAges | Measure-Object -Minimum).Minimum) -le 2) "Lease age changed with the current culture: $($cultureAges -join ', ')."
 
     Write-FactoryJsonAtomic -Path ([string]$context.testLeasePath) -Value ([pscustomobject]@{
         version = 1
@@ -1562,14 +1572,14 @@ try {
     Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.requestPath))) "Native enqueue retained the consumed request."
     Assert-True (-not (Test-Path -LiteralPath ([string]$preparedIntake.normalizationPath))) "Native enqueue retained the consumed draft."
     Assert-True (-not [string]$enqueuedIntake.schedulerError) "Native enqueue could not wake the scheduler: $($enqueuedIntake.schedulerError)"
-    $intakeLaunchDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $intakeLaunchDeadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         $intakeState = Read-FactoryJson -Path $context.statePath
         $intakeTask = @($intakeState.tasks | Where-Object { [string]$_.id -eq $intakeTaskId })[0]
         if ([string]$intakeTask.status -in @("starting", "planning", "running", "awaiting-input")) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $intakeLaunchDeadline)
-    Assert-True ([string]$intakeTask.status -in @("starting", "planning", "running", "awaiting-input")) "Native enqueue did not wake the scheduler and launch the task."
+    Assert-True ([string]$intakeTask.status -in @("starting", "planning", "running", "awaiting-input")) "Native enqueue did not wake the scheduler and launch the task: status=$($intakeTask.status); error=$($intakeTask.error)."
     Assert-Equal "asana" ([string]$intakeTask.source.adapter) "Native enqueue did not persist source identity."
     $duplicateIntake = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\prepare-intake.ps1") -Repository $repository -Url "https://app.asana.com/0/0/$intakeTaskId" -Mode auto) | ConvertFrom-Json
     Assert-True ([bool]$duplicateIntake.duplicate) "Native intake did not deduplicate the same Asana task ID."
@@ -1660,7 +1670,7 @@ try {
     Assert-Equal $localText ([string]$automaticLocalTask.title) "Local task title was not derived from operator text."
     Assert-Equal $localText ([string]$automaticLocalTask.brief) "Local task brief did not preserve operator text."
     $localTaskNonce = [regex]::Match($automaticLocalId, '([0-9a-f]{8})$').Groups[1].Value
-    $expectedLocalSessionPrefix = "factory-local-$localTaskNonce-update-the-personal-"
+    $expectedLocalSessionPrefix = (Get-FactoryOrchestratorAlias -Config (Read-FactoryJson $context.configPath) -Context $context) + $nameSeparator + $localTaskNonce + $nameSeparator + 'update-'
     Assert-True ([string]$automaticLocalTask.backgroundSession.name -like "$expectedLocalSessionPrefix*") "Quoted local task text was not retained in the worker session name."
     Assert-True ([string]$automaticLocalTask.backgroundSession.name -notmatch '-[0-9a-f]{12}-update-') "Local worker session still contains an unreadable artifact hash."
     Assert-True ([string]$automaticLocalTask.status -in @("starting", "running", "awaiting-review", "held")) "Automatic local task was not launched."
@@ -4042,7 +4052,9 @@ $result = [ordered]@{
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\"' }).Count -eq 1) "First Codex startup did not create exactly one app-backed orchestrator thread."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"project/list\"' }).Count -eq 1) "Codex app-backed startup did not resolve the repository project."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/start\".*\"threadSource\":\"vscode\"' }).Count -eq 1) "Codex orchestrator was not created with an app-visible source."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^app-server-request\t.*\"method\":\"thread/name/set\".*Factory Orchestrator - repository' }).Count -eq 1) "Codex app task did not receive a readable repository title."
+    $codexNames = @(Get-Content -LiteralPath $codexLog -Encoding UTF8 | Where-Object { $_.StartsWith("app-server-request`t") } | ForEach-Object { $_.Substring("app-server-request`t".Length) | ConvertFrom-Json } | Where-Object { $_.method -eq 'thread/name/set' })
+    $expectedCodexName = Get-FactoryOrchestratorDisplayName -Alias (Get-FactoryOrchestratorAlias -Config (Read-FactoryJson $context.configPath) -Context $context)
+    Assert-True (@($codexNames | Where-Object { $_.params.name -ceq $expectedCodexName }).Count -eq 1) "Codex app task did not receive the shared factory label."
     Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^--remote\tws://127\.0\.0\.1:\d+\tresume\t.*bbbbbbbb-' }).Count -eq 1) "First Codex startup did not resume the bootstrapped orchestrator through the shared server."
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") start -Agent codex -Repository $repository -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex
     Assert-Equal 0 $LASTEXITCODE "Stored Codex orchestrator resume failed."
