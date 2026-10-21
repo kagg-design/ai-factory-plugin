@@ -372,6 +372,30 @@ function Test-FactoryTaskHasValidatedResult {
     )
 }
 
+function Test-FactoryWorkerReplyCanContinue {
+    param($Reply, $Task)
+
+    if ([int](Get-FactoryNestedValue -Target $Reply -Name "version" -Default 0) -ne 2 -or
+        [string](Get-FactoryNestedValue -Target $Reply -Name "origin") -ne "operator" -or
+        -not [string](Get-FactoryNestedValue -Target $Reply -Name "messageId") -or
+        [int](Get-FactoryNestedValue -Target $Reply -Name "attempt" -Default -1) -ne
+            [int](Get-FactoryNestedValue -Target $Task -Name "attempts" -Default 1)) { return $false }
+    $consumed = Get-FactoryNestedValue -Target $Task -Name "inSessionReply"
+    if ([string](Get-FactoryNestedValue -Target $consumed -Name "messageId") -eq [string]$Reply.messageId) { return $false }
+    $runtime = [string](Get-FactoryNestedValue -Target $Task.backgroundSession -Name "runtime" -Default "claude")
+    $source = [string](Get-FactoryNestedValue -Target $Reply -Name "source")
+    $inputSource = [string](Get-FactoryNestedValue -Target $Reply -Name "inputSource")
+    switch ([string](Get-FactoryNestedValue -Target $Reply -Name "authorization")) {
+        "runtime-user-source" { return $runtime -eq "claude" -and $source -eq "UserPromptSubmit" -and $inputSource -ceq "user" }
+        "explicit-worker-command" {
+            return $runtime -eq "claude" -and $source -eq "UserPromptExpansion" -and $inputSource -in @("", "user") -and
+                [string](Get-FactoryNestedValue -Target $Reply -Name "commandName") -in @("factory", "factory:factory")
+        }
+        "factory-codex-resume" { return $runtime -eq "codex" -and $source -eq "codex-resume" }
+        default { return $false }
+    }
+}
+
 function Resume-FactoryTaskFromInSessionReply {
     # Caller owns the project state mutex. A runtime row alone is never input.
     param(
@@ -394,6 +418,7 @@ function Resume-FactoryTaskFromInSessionReply {
     if (-not (Test-Path -LiteralPath $replyPath -PathType Leaf)) { return $false }
     $reply = Read-FactoryJson -Path $replyPath
     if ([string]$reply.kind -ne "reply" -or [string]$reply.sessionId -ne $sessionId -or [string]$reply.taskId -ne [string]$Task.id) { return $false }
+    if (-not (Test-FactoryWorkerReplyCanContinue -Reply $reply -Task $Task)) { return $false }
     $replyTime = ConvertFrom-FactoryRoundtripTimestamp -Value $reply.capturedAt
     if (-not $replyTime.success) { return $false }
     $sessionStarted = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $session -Name "startedAt")
@@ -463,6 +488,7 @@ function Resume-FactoryTaskFromInSessionReply {
     Set-FactoryProperty -Target $Task -Name "status" -Value "running"
     Set-FactoryProperty -Target $Task -Name "inSessionReply" -Value ([pscustomobject]@{
         sessionId = $sessionId; capturedAt = ConvertTo-FactoryRoundtripTimestamp -Value $reply.capturedAt; fromStatus = $fromStatus
+        messageId = $reply.messageId; attempt = $reply.attempt; origin = $reply.origin; authorization = $reply.authorization
     })
     Set-FactoryProperty -Target $Task -Name "error" -Value $null
     Set-FactoryProperty -Target $Task -Name "holdReason" -Value $null

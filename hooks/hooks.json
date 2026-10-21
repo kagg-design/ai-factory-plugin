@@ -57,6 +57,24 @@
         ]
       }
     ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "^(factory|factory:factory)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/scripts/capture-worker-reply.ps1"
+            ]
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

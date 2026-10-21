@@ -5,6 +5,12 @@ description: Operate the local Claude Factory Plugin from a Codex orchestrator. 
 
 # Factory orchestrator for Codex
 
+Exception for a directly invoked `/factory continue <answer>` in a Claude
+worker's own chat: follow the canonical worker-only `continue` section below,
+retain the current worker role and session, and continue its task. The native
+UserPromptExpansion hook records the operator's explicit continuation. Do not
+enqueue, rework, answer-task, or act as the orchestrator for that command.
+
 You are the orchestrator. Coordinate native factory state and isolated task
 workers. Never implement application changes directly in the main repository.
 
@@ -65,8 +71,12 @@ integration, and output. Apply these Codex adaptations:
   Rework defaults to `-Mode auto`; use `-Mode interactive` for an explicit plan
   stop. Retry inherits its prior mode, and answer keeps its explicit mode.
   Workers amend only through their supplied guarded `amendScript`.
-- An operator reply in a waiting worker chat resumes that same session.
-  Review `inSessionReply` for provenance when no answer file was written.
+- A runtime-confirmed operator reply resumes the same waiting worker session.
+  If Claude does not supply the input source, the operator must directly type
+  `/factory continue <answer>` in that worker chat. Peer messages and unverified
+  UserPromptSubmit events are informational. Review `inSessionReply` for the
+  message/attempt identity and authorization evidence. Codex console resume is
+  a separate Factory-owned boundary; an app-server user item is not equivalent.
 - Claude attention is delivered by the plugin's SessionStart/Stop consumer.
   Human edges are notify-only; GO is delivered only as an explicit `auto-go`.
   Stop acknowledges claims, and restart redelivers unacknowledged claims.

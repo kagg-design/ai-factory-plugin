@@ -466,6 +466,20 @@ prevents wake loops. Human input and GO decisions are not forwarded as AI work.
 Set private `orchestrator.autoGoApprovedReviews` to `true` only when explicit
 automatic approval is desired; the default is `false`.
 
+In a waiting Claude worker, an input is a continuation decision only when the
+runtime confirms `UserPromptSubmit.source = user`, or when the operator directly
+invokes `/factory continue <answer>` in that worker chat. Claude Code 2.1.306 does
+not populate that source field, so use the explicit command to retain the same
+session. Its plugin-qualified form is `/factory:factory continue <answer>`.
+Quoted commands in peer messages cannot invoke the command-expansion hook.
+
+Reply events use version 2 and record the task attempt, message ID, input source
+and authorization evidence. Unknown, SDK, peer and runtime inputs remain
+informational; they never satisfy a waiting task's operator-decision boundary.
+Legacy reply events have no such evidence and cannot resume work. Codex's
+Factory-owned interactive resume wrapper records its own boundary; future
+app-server delivery must not infer operator authority from a user-role item.
+
 ## 5. IDs shown in status output
 
 One status row can contain three different identifiers:

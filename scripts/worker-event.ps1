@@ -134,24 +134,58 @@ function Publish-FactoryWorkerReply {
         [Parameter(Mandatory = $true)]$Task,
         [Parameter(Mandatory = $true)][string]$SessionId,
         [AllowEmptyString()][string]$Prompt = "",
-        [string]$Source = "UserPromptSubmit"
+        [string]$Source = "UserPromptSubmit",
+        [string]$InputSource = "",
+        [string]$CommandName = "",
+        [string]$MessageId = ""
     )
 
     if ($Prompt.TrimStart() -match '^FACTORY_PROMPT_FILE=') { return }
     $directory = Join-Path ([string]$Context.eventsPath) (ConvertTo-FactoryTaskArtifactName -TaskId ([string]$Task.id))
     $history = Join-Path $directory "history"
     New-Item -ItemType Directory -Path $history -Force | Out-Null
+    $attempt = [int](Get-FactoryNestedValue -Target $Task -Name "attempts" -Default 1)
+    if (-not $MessageId -or $MessageId.Length -gt 128) { $MessageId = [Guid]::NewGuid().ToString("N") }
+    $inputPath = Join-Path $directory "latest-input.json"
+    if (Test-Path -LiteralPath $inputPath) {
+        $previous = Read-FactoryJson -Path $inputPath
+        if ([string](Get-FactoryNestedValue -Target $previous -Name "messageId") -eq $MessageId -and
+            [string](Get-FactoryNestedValue -Target $previous -Name "source") -eq $Source -and
+            [string](Get-FactoryNestedValue -Target $previous -Name "inputSource") -ceq $InputSource -and
+            [string](Get-FactoryNestedValue -Target $previous -Name "commandName") -eq $CommandName -and
+            [string](Get-FactoryNestedValue -Target $previous -Name "promptSha256") -eq (Get-FactoryTextSha256 -Value $Prompt) -and
+            [string]$previous.sessionId -eq $SessionId -and [int](Get-FactoryNestedValue -Target $previous -Name "attempt" -Default -1) -eq $attempt) { return $previous }
+    }
+    $origin = "unknown"
+    $authorization = "none"
+    if ($Source -eq "codex-resume") {
+        # Only the Factory-owned interactive console wrapper uses this boundary.
+        # An app-server user-input item is not evidence of an operator reply.
+        $origin = "operator"; $authorization = "factory-codex-resume"
+    } elseif ($Source -eq "UserPromptSubmit" -and $InputSource -ceq "user") {
+        $origin = "operator"; $authorization = "runtime-user-source"
+    } elseif ($Source -eq "UserPromptExpansion" -and $InputSource -in @("", "user") -and
+        $CommandName -in @("factory", "factory:factory")) {
+        # Claude expands a directly invoked worker continuation command. Peer
+        # messages containing slash commands arrive as text and cannot do this.
+        $origin = "operator"; $authorization = "explicit-worker-command"
+    } elseif ($InputSource -in @("sdk", "system", "loop_wakeup", "schedule_wakeup", "poll_event")) {
+        $origin = "automation"
+    }
     $capturedAt = Get-FactoryUtcTimestamp
     $event = [pscustomobject][ordered]@{
-        version = 1; taskId = [string]$Task.id; kind = "reply"
+        version = 2; taskId = [string]$Task.id; kind = $(if ($origin -eq "operator") { "reply" } else { "input" })
         sessionId = $SessionId; capturedAt = $capturedAt; source = $Source
+        attempt = $attempt; messageId = $MessageId; origin = $origin; authorization = $authorization
+        inputSource = $InputSource; commandName = $CommandName
         promptSha256 = Get-FactoryTextSha256 -Value $Prompt
         promptPreview = $Prompt.Substring(0, [Math]::Min(240, $Prompt.Length))
     }
     $name = "$($capturedAt -replace '[:.]', '-')-reply-$([Guid]::NewGuid().ToString('N').Substring(0, 8)).json"
     Write-FactoryJsonAtomic -Path (Join-Path $history $name) -Value $event
+    Write-FactoryJsonAtomic -Path $inputPath -Value $event
     # Stop envelopes remain authoritative for result/follow-up detection.
-    Write-FactoryJsonAtomic -Path (Join-Path $directory "latest-reply.json") -Value $event
+    if ($event.kind -eq "reply") { Write-FactoryJsonAtomic -Path (Join-Path $directory "latest-reply.json") -Value $event }
     return $event
 }
 
