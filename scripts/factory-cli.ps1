@@ -1911,8 +1911,8 @@ function Write-CliHelp {
         "answer" {
             @(
                 'factory answer <task-id> --text "your answer"',
-                'Posts an answer to a pending Asana question and returns Factory to Taken.',
-                'The native scheduler then resumes the worker from the Asana comments.'
+                'Records an operator answer for the waiting worker; direct ROCK answers are local.',
+                'Legacy Asana questions post the answer and return Factory to Taken before native resume.'
             ) | Write-Output
         }
         "hold" {
@@ -2029,6 +2029,16 @@ function Write-CliHelp {
                 "It copies and SHA-256 verifies the project runtime under LocalAppData, switches automatic resolution, and retains the legacy source copy."
             ) | Write-Output
         }
+        "rock" {
+            @(
+                'factory rock [status|questions] [ROCK_GID]',
+                'factory rock answer ROCK_GID QUESTION_ID --text "operator answer"',
+                'factory rock pause|resume ROCK_GID',
+                'factory rock import ROCK_GID --file UTF8_SNAPSHOT',
+                'factory rock retry ROCK_GID EVENT_ID',
+                'Private ROCK memory and direct decisions. Answers do not approve GO or merge gates.'
+            ) | Write-Output
+        }
         "config" {
             @(
                 "factory config [path|edit]",
@@ -2138,7 +2148,10 @@ if ($normalizedCommand -eq "wait") {
     $Remaining = @()
 }
 $remainingValues = New-Object Collections.Generic.List[string]
+$rockAnswerTextValue = $false
 foreach ($value in @($Remaining)) {
+    if ($rockAnswerTextValue) { $remainingValues.Add([string]$value); $rockAnswerTextValue = $false; continue }
+    if ($normalizedCommand -eq 'rock' -and $Target -eq 'answer' -and $value -eq '--text') { $remainingValues.Add([string]$value); $rockAnswerTextValue = $true; continue }
     if ($value -eq "--yes") { $Yes = $true }
     elseif ($value -eq "--keep") { $Keep = $true }
     elseif ($value -eq "--force") { $Force = $true }
@@ -2277,6 +2290,26 @@ if ($normalizedCommand -eq "runtime") {
     Write-CliRuntime -Context $context -Action $Target
     exit 0
 }
+if ($normalizedCommand -eq 'rock') {
+    if ($anyDestructiveOptionsUsed -or $startOptionsUsed) { throw 'Use: factory help rock' }
+    $action = if ($Target) { $Target.ToLowerInvariant() } else { 'status' }
+    $argsMap = @{ Repository = [string]$context.repositoryRoot; Action = $action }
+    $values = @($remainingValues)
+    if ($values.Count -gt 0) { $argsMap.EpicGid = $values[0] }
+    switch ($action) {
+        { $_ -in @('status', 'questions', 'pause', 'resume') } { if ($values.Count -gt 1 -or $File) { throw 'Unexpected ROCK arguments.' } }
+        'answer' { if ($values.Count -ne 4 -or $values[2] -cne '--text' -or $File) { throw 'Use: factory rock answer ROCK_GID QUESTION_ID --text "answer"' }; $argsMap.QuestionId = $values[1]; $argsMap.Text = $values[3] }
+        'import' {
+            if ($values.Count -eq 3 -and $values[1] -ceq '--file' -and -not $File) { $argsMap.File = $values[2] }
+            elseif ($values.Count -eq 1 -and $File) { $argsMap.File = $File }
+            else { throw 'Use: factory rock import ROCK_GID --file SNAPSHOT' }
+        }
+        'retry' { if ($values.Count -ne 2 -or $File) { throw 'Use: factory rock retry ROCK_GID EVENT_ID' }; $argsMap.EventId = $values[1] }
+        default { throw 'Use: factory help rock' }
+    }
+    & (Join-Path $PSScriptRoot 'rock-control.ps1') @argsMap
+    exit 0
+}
 
 if ($normalizedCommand -eq "config") {
     if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw "config accepts only path or edit." }
@@ -2387,8 +2420,16 @@ switch ($normalizedCommand) {
             -not [string]$remainingValues[1] -or $anyDestructiveOptionsUsed -or $startOptionsUsed) {
             throw 'Use: factory answer <task-id> --text "your answer"'
         }
-        & (Join-Path $PSScriptRoot 'asana-terminal-answer.ps1') -Repository ([string]$context.repositoryRoot) `
-            -TaskId $Target -Answer ([string]$remainingValues[1])
+        $task = Get-FactoryTask -State $state -TaskId $Target
+        $question = Get-CliProperty $task 'asanaQuestion'
+        if ([string](Get-CliProperty $question 'channel') -eq 'rock') {
+            . (Join-Path $PSScriptRoot 'rock-common.ps1')
+            $null = & (Join-Path $PSScriptRoot 'answer-task.ps1') -Repository ([string]$context.repositoryRoot) -TaskId $Target -Text ([string]$remainingValues[1]) -FromRock -RockOperator -RockId ([string]$question.rockId) -RockQuestionId ([string]$question.storyGid) -RockActionId "operator:$([Guid]::NewGuid().ToString('N'))"
+            Write-Output 'Operator answer saved locally; worker queued. GO and merge gates require their own approval.'
+        } else {
+            & (Join-Path $PSScriptRoot 'asana-terminal-answer.ps1') -Repository ([string]$context.repositoryRoot) `
+                -TaskId $Target -Answer ([string]$remainingValues[1])
+        }
     }
     "go" {
         if ($remainingValues.Count -gt 0 -or $anyDestructiveOptionsUsed -or $startOptionsUsed) { throw "go accepts exactly one task ID." }

@@ -206,7 +206,8 @@ function Reset-FactoryAsanaRun {
             'review', 'approval', 'integration', 'production', 'cleanup', 'backgroundSession', 'syncPreparation',
             'pendingInstructions', 'reworkRequestedAt', 'holdReason', 'heldFromStatus', 'error', 'asanaQuestion',
             'asanaSyncedState', 'asanaSpecPath', 'security', 'mergeGate', 'launchStartedAt', 'launchCompletedAt',
-            'launchFailedAt', 'launchProcessId', 'launchProcessStartTimeUtc', 'completedAt', 'testDatabase')) {
+            'launchFailedAt', 'launchProcessId', 'launchProcessStartTimeUtc', 'completedAt', 'testDatabase',
+            'rockId', 'rockDispatchId', 'rockAppliedActions', 'rockAnswer')) {
             Set-FactoryProperty -Target $task -Name $name -Value $null
         }
         Set-FactoryProperty -Target $task -Name 'title' -Value ([string]$Fresh.name)
@@ -247,6 +248,15 @@ function Write-FactoryAsanaTransition {
 
 function Start-FactoryRockCycle {
     param($Config, [string]$Reason, [string]$Gid)
+    if ([bool](Get-FactoryNestedValue (Get-FactoryNestedValue $Config 'rocks') 'enabled' $false)) {
+        . (Join-Path $PSScriptRoot 'rock-common.ps1')
+        $directConfiguration = Get-FactoryRockConfiguration -Config $Config
+        if ($null -ne $directConfiguration) {
+            foreach ($orchestrator in @($directConfiguration.orchestrators)) {
+                if (@((Get-FactoryNestedValue $orchestrator 'ownedTasks' @()) | Where-Object { [string]$_.taskId -ceq $Gid }).Count) { return }
+            }
+        }
+    }
     $path = [string]$Config.launcher.path
     if (-not $path) { return }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Rock launcher not found: $path" }

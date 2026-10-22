@@ -92,6 +92,9 @@ try {
         if ($selected.Count -ge $capacity) { break }
         $gid = [string]$task.gid
         if (-not $gid) { continue }
+        . (Join-Path $PSScriptRoot 'rock-common.ps1')
+        $directConfiguration = Get-FactoryRockConfiguration -Config $config
+        if ($null -ne $directConfiguration -and $null -ne (Get-FactoryRockOwner $directConfiguration $gid ([string]$context.repositoryRoot))) { continue }
         $existing = @($state.tasks | Where-Object { [string]$_.id -eq $gid })
         if ($existing.Count -and -not (Test-FactoryAsanaRunCanRestart -Task $existing[0])) { continue }
         $fresh = Get-FactoryAsanaTask -Config $config -Gid $gid

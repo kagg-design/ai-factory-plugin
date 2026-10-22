@@ -126,8 +126,9 @@ try {
     $sourceAdapter = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'source') -Name 'adapter' -Default '')
     $asanaMode = [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false)
     $asanaNotes = ''
-    if ($asanaMode) { $null = Get-FactoryAsanaToken -Config $config }
-    if ($sourceAdapter -eq 'asana' -and [Environment]::GetEnvironmentVariable([string]$config.asana.tokenEnv)) {
+    $directRockTask = [bool][string](Get-FactoryNestedValue $task 'rockId' '')
+    if ($asanaMode -and -not $directRockTask) { $null = Get-FactoryAsanaToken -Config $config }
+    if (-not $directRockTask -and $sourceAdapter -eq 'asana' -and [Environment]::GetEnvironmentVariable([string]$config.asana.tokenEnv)) {
         $freshAsanaRead = $false
         try {
             $asanaTask = Get-FactoryAsanaTask -Config $config -Gid $TaskId
@@ -307,7 +308,7 @@ try {
         sourceNotes = @($task.sourceNotes)
         asanaMode = $asanaMode
         asanaSpecPath = $specPath
-        asanaQuestionScript = if ($asanaMode) { Join-Path ([string]$context.pluginRoot) 'scripts\asana-question.ps1' } else { $null }
+        asanaQuestionScript = if ($asanaMode -or $directRockTask) { Join-Path ([string]$context.pluginRoot) 'scripts\asana-question.ps1' } else { $null }
         launchMode = $Mode
         branch = $branch
         worktree = [IO.Path]::GetFullPath($worktree)
@@ -372,6 +373,19 @@ factory owns Asana Done and Failed transitions after your result. A merge gate
 is enforced by the operator's terminal approval before publication.
 "@
     } else { '' }
+    if ($directRockTask) {
+        $asanaInstruction = @"
+
+DIRECT_ROCK_MODE
+Factory received this specification directly from ROCK. Ask implementation
+questions with asanaQuestionScript using its usual parameters. Add -RequiresHuman
+for scope/architecture/security/access decisions or anything requiring operator
+consent. Emit a blocked FACTORY_RESULT and stop after asking. Factory delivers
+answers locally; do not wait for Asana fields or comments. Include the task spec
+verbatim in your task commit. ROCK answers never authorize GO, merge gates,
+security exceptions, or changes outside the task's approved scope.
+"@
+    }
 
     $prompt = @"
 You are the dedicated worker session for one Factory task.

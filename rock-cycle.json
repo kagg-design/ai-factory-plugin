@@ -6,6 +6,11 @@
   "timeoutMinutes": 90,
   "staleLockMinutes": 120,
   "dailyHourLocal": 9,
+  "direct": {
+    "enabled": false,
+    "timeoutSeconds": 900,
+    "memoryDir": "%LOCALAPPDATA%\\ClaudeFactory\\rocks"
+  },
   "allowedTools": [
     "mcp__claude_ai_Asana__*",
     "mcp__claude_ai_Asana__get_task", "mcp__claude_ai_Asana__get_task_stories",
@@ -21,14 +26,18 @@
       "epicGid": "1219601019224697",
       "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601019224697",
       "repoPath": "C:\\laragon\\www\\Projects\\rock-readonly\\awesomehr",
-      "extraDirs": []
+      "extraDirs": [],
+      "ownedTasks": [],
+      "watchedTasks": []
     },
     {
       "name": "billing",
       "epicGid": "1219601069124635",
       "epicUrl": "https://app.asana.com/1/14748072439266/project/1215506997644941/task/1219601069124635",
       "repoPath": "C:\\laragon\\www\\Projects\\rock-readonly\\awesomehr",
-      "extraDirs": ["C:\\laragon\\www\\Projects\\rock-readonly\\cloud-infrastructure-auditors"]
+      "extraDirs": ["C:\\laragon\\www\\Projects\\rock-readonly\\cloud-infrastructure-auditors"],
+      "ownedTasks": [],
+      "watchedTasks": []
     }
   ]
 }

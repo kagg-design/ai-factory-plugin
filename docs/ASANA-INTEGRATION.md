@@ -134,6 +134,11 @@ publication pipeline reaches done.
 
 ## Rock launcher setup
 
+An opt-in local transport with private ROCK memory is documented in
+[Direct ROCK orchestration](dev/ROCK-DIRECT-ORCHESTRATION.md). It uses browser
+source snapshots and typed local results instead of Asana machine comments.
+It ships disabled; the legacy setup below remains the default.
+
 1. Edit `rock-cycle.json`. It defines the named `access` and `billing`
    orchestrators, their epic GIDs, and their `repoPath` and `extraDirs`.
    Its paths point to the dedicated local checkouts under

@@ -46,6 +46,7 @@ foreach ($task in @($state.tasks | Where-Object {
     if ($gid -notmatch '^\d+$') { continue }
     try {
         $question = Get-FactoryNestedValue -Target $task -Name 'asanaQuestion'
+        if ($null -ne $question -and [string](Get-FactoryNestedValue $question 'channel') -eq 'rock') { continue }
         if ($question -and [string]$task.status -in @('blocked', 'held', 'awaiting-input')) {
             $lastCheck = [string](Get-FactoryNestedValue -Target $question -Name 'lastPolledAt' -Default '')
             if ($lastCheck -and
@@ -112,7 +113,7 @@ foreach ($task in @($state.tasks | Where-Object {
             $securityText = [string](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $task -Name 'security') -Name 'summary' -Default 'not configured for this repo')
             $message = "DONE (factory):`nHEAD: $($task.commit)`nMerged: $($config.developmentBranch) $developmentSha, $($config.productionBranch) $productionSha`nSpec: $spec`nTests: $testText`nSecurity: $securityText`nNotes: Verify the published change."
             $comments = @(Get-FactoryAsanaComments -Config $config -Gid $gid)
-            if (-not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
+            if (-not [string](Get-FactoryNestedValue $task 'rockId') -and -not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
                 $null = Add-FactoryAsanaComment -Config $config -Gid $gid -Text $message
             }
             Set-FactoryAsanaDone -Config $config -Gid $gid
@@ -120,7 +121,7 @@ foreach ($task in @($state.tasks | Where-Object {
             Write-FactoryAsanaTransition -Context $context -Gid $gid -From 'Taken' -To 'Done' -WorkerId $gid
             Set-AsanaSyncState -TaskId $gid -Field 'asanaSyncedState' -Value 'Done'
             Set-AsanaSyncState -TaskId $gid -Field 'asanaState' -Value 'Done'
-            try { Start-FactoryRockCycle -Config $config -Reason 'Done' -Gid $gid } catch { Write-Warning $_.Exception.Message }
+            if (-not [string](Get-FactoryNestedValue $task 'rockId')) { try { Start-FactoryRockCycle -Config $config -Reason 'Done' -Gid $gid } catch { Write-Warning $_.Exception.Message } }
             Write-Output "Completed Asana task $gid."
         } elseif ([string]$task.status -eq 'failed' -and [string]$task.asanaSyncedState -ne 'Failed') {
             $reason = [string](Get-FactoryNestedValue -Target $task -Name 'error' -Default 'Worker could not finish.')
@@ -128,14 +129,14 @@ foreach ($task in @($state.tasks | Where-Object {
             $branch = [string](Get-FactoryNestedValue -Target $task -Name 'branch' -Default '')
             $message = "FAILED (factory): $reason`nTried: worker implementation and checks.`nNext: inspect the retained worktree and re-groom or retry.`nWorktree: $worktree`nBranch: $branch"
             $comments = @(Get-FactoryAsanaComments -Config $config -Gid $gid)
-            if (-not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
+            if (-not [string](Get-FactoryNestedValue $task 'rockId') -and -not @($comments | Where-Object { [string]$_.text -eq $message }).Count) {
                 $null = Add-FactoryAsanaComment -Config $config -Gid $gid -Text $message
             }
             Set-FactoryAsanaField -Config $config -Gid $gid -Field ([string]$config.asana.fields.factory) -Value ([string]$config.asana.fields.failed)
             Write-FactoryAsanaTransition -Context $context -Gid $gid -From 'Taken' -To 'Failed' -WorkerId $gid
             Set-AsanaSyncState -TaskId $gid -Field 'asanaSyncedState' -Value 'Failed'
             Set-AsanaSyncState -TaskId $gid -Field 'asanaState' -Value 'Failed'
-            try { Start-FactoryRockCycle -Config $config -Reason 'Failed' -Gid $gid } catch { Write-Warning $_.Exception.Message }
+            if (-not [string](Get-FactoryNestedValue $task 'rockId')) { try { Start-FactoryRockCycle -Config $config -Reason 'Failed' -Gid $gid } catch { Write-Warning $_.Exception.Message } }
             Write-Output "Reported failure for Asana task $gid."
         }
     } catch { $syncErrors.Add("Asana sync for $gid failed: $($_.Exception.Message)") }

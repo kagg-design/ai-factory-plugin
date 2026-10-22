@@ -615,7 +615,7 @@ function Get-FactoryOperatorActionEvents {
             $events.Add([pscustomobject][ordered]@{
                 kind = 'merge-gate'; taskId = $taskId; title = $title; status = $status; identity = [string]$gate.commit
                 audience = 'human'; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
-                reason = 'Merge gate waits for Igor: confirm in the terminal or comment /merge on Asana.'
+                reason = if ([string](Get-FactoryNestedValue $task 'rockId')) { 'Merge gate waits for Igor: confirm with factory merge in the terminal.' } else { 'Merge gate waits for Igor: confirm in the terminal or comment /merge on Asana.' }
                 occurredAt = [string]$gate.requestedAt; command = "factory merge $taskId --yes"
             })
             continue
@@ -631,8 +631,11 @@ function Get-FactoryOperatorActionEvents {
             continue
         }
         $asanaQuestion = Get-FactoryNestedValue -Target $task -Name "asanaQuestion"
-        if ([bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -and
+        if (([bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -or
+            [string](Get-FactoryNestedValue $asanaQuestion 'channel') -eq 'rock') -and
             $null -ne $asanaQuestion -and $status -in @("blocked", "held", "awaiting-input")) {
+            if ([string](Get-FactoryNestedValue $asanaQuestion 'channel') -eq 'rock' -and
+                -not [bool](Get-FactoryNestedValue $asanaQuestion 'requiresHuman' $false)) { continue }
             $events.Add([pscustomobject][ordered]@{
                 kind = "asana-question"; taskId = $taskId; title = $title; status = $status
                 identity = [string](Get-FactoryNestedValue -Target $asanaQuestion -Name "storyGid" -Default "")

@@ -261,6 +261,11 @@ function Invoke-RockOrchestrator {
 
 if (-not [IO.File]::Exists($ConfigPath)) { throw "Rock config not found: $ConfigPath" }
 $config = [IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json
+if ([bool](Get-FactoryNestedValue (Get-FactoryNestedValue $config 'direct') 'enabled' $false)) {
+    $selection = if ($Epic) { $Epic } else { $EpicGid }
+    & (Join-Path $PSScriptRoot 'scripts\rock-direct-cycle.ps1') -ConfigPath $ConfigPath -Epic $selection -Reason $Reason -Task $Task -DryRun:$DryRun
+    exit 0
+}
 foreach ($required in @('tokenEnv', 'igorGid', 'stateDir', 'claudePath')) {
     if (-not [string]$config.$required) { throw "Rock config is missing '$required'." }
 }

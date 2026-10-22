@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $schedulerScriptPath = $MyInvocation.MyCommand.Path
 . (Join-Path $PSScriptRoot "factory-common.ps1")
+. (Join-Path $PSScriptRoot 'rock-common.ps1')
 
 if ($RuntimeHome) {
     $env:CLAUDE_FACTORY_HOME = [IO.Path]::GetFullPath($RuntimeHome)
@@ -572,6 +573,10 @@ function Invoke-SchedulerTick {
         $state = Read-FactoryJson -Path ([string]$context.statePath)
         $asanaConfig = Read-FactoryJson -Path ([string]$context.configPath)
         if (-not [bool]$state.paused) {
+            try {
+                Sync-FactoryRockTaskEvents -Context $context -Config $asanaConfig -State $state
+                Start-FactoryRockService -Context $context -Config $asanaConfig
+            } catch { $errors.Add("Direct ROCK: $($_.Exception.Message)") }
             $asanaEnabled = [bool](Get-CliSafeProperty -InputObject (Get-CliSafeProperty -InputObject $asanaConfig -Name 'asana') -Name 'enabled' -Default $false)
             if ($asanaEnabled) { try {
                 $asanaPoll = Invoke-FactoryNativeProcess -Command 'powershell' -Arguments @(
@@ -660,6 +665,15 @@ function Invoke-SchedulerTick {
         $queuedCount = @($state.tasks | Where-Object { [string]$_.status -eq "queued" }).Count
         $approvedCount = @($state.tasks | Where-Object { [string]$_.status -in @("approved", "integrating", "production") }).Count
         $runnableCount = $activeWorkers + $queuedCount + $approvedCount
+        # Publication or a worker result may have completed during this tick.
+        try { Sync-FactoryRockTaskEvents -Context $context -Config $asanaConfig -State $state }
+        catch { $errors.Add("Direct ROCK event capture: $($_.Exception.Message)") }
+        # A pending ROCK exchange is unfinished work. Keep an already-active
+        # factory active; never reactivate an inactive factory or clear pause.
+        if ([bool]$state.active -and $runnableCount -eq 0) {
+            try { if (Test-FactoryRockHasPendingWork -Config $asanaConfig) { $runnableCount++ } }
+            catch { $runnableCount++; $errors.Add("Direct ROCK pending-work check: $($_.Exception.Message)") }
+        }
         if ($runnableCount -eq 0 -and [bool]$state.active) {
             Update-SchedulerState -Active $false
         }

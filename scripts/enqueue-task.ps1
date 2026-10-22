@@ -10,6 +10,8 @@ param(
     [Parameter(ParameterSetName = "LocalFile")][ValidateSet("interactive", "auto")][string]$StartMode = "interactive",
     [switch]$NoResume,
     [switch]$AsanaMode,
+    [string]$RockId = '',
+    [string]$RockActionId = '',
     [switch]$Force,
     [string]$ClaudeCommand = ""
 )
@@ -133,6 +135,7 @@ function Remove-ConsumedIntakeFiles {
 
 $context = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "project-context.ps1") -Repository $Repository -Initialize) |
     ConvertFrom-Json
+$config = Read-FactoryJson -Path $context.configPath
 $request = $null
 $consumePaths = @()
 $isLocalIntake = $PSCmdlet.ParameterSetName -in @("Local", "LocalFile")
@@ -271,13 +274,23 @@ if ($sourceError) {
 $mutex = $null
 $task = $null
 $duplicate = $false
+if ($RockId) {
+    if ($AsanaMode) { throw 'Direct ROCK intake cannot enable the legacy Asana transport.' }
+    . (Join-Path $PSScriptRoot 'rock-common.ps1')
+    $rockConfig = Get-FactoryRockConfiguration -Config $config
+    if ($null -eq $rockConfig -or -not $RockActionId -or [string]$identity.adapter -cne 'asana') { throw 'Direct ROCK intake requires enabled configuration and a native Asana identity.' }
+    $owner = Get-FactoryRockOrchestrator $rockConfig $RockId
+    if (-not (Test-FactoryRockBinding $owner ([string]$identity.stateId) ([string]$context.repositoryRoot))) { throw 'ROCK does not own this task/repository.' }
+}
 try {
     $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
     $state = Read-FactoryJson -Path ([string]$context.statePath)
+    if ($RockId -and ([bool]$state.paused -or -not [bool]$state.active)) { throw 'Deferred: factory is paused or inactive.' }
     $matches = @($state.tasks | Where-Object { Test-TaskMatchesSource -Task $_ -Identity $identity })
     if ($matches.Count -gt 0) {
         $task = $matches[0]
         $duplicate = $true
+        if ($RockId -and [string](Get-FactoryNestedValue $task 'rockDispatchId') -cne $RockActionId) { throw 'ROCK intake cannot replace an existing task.' }
     } else {
         $now = Get-FactoryUtcTimestamp
         $task = [pscustomobject][ordered]@{
@@ -294,6 +307,8 @@ try {
                 normalizedAt = $now
             }
             asanaMode = [bool]$AsanaMode
+            rockId = if ($RockId) { $RockId } else { $null }
+            rockDispatchId = if ($RockId) { $RockActionId } else { $null }
             repoForce = [bool]$Force
             runId = [Guid]::NewGuid().ToString('N')
             readyClaimedAt = Get-FactoryUtcTimestamp
@@ -335,7 +350,7 @@ try {
             updatedAt = $now
         }
         $state.tasks = @($state.tasks) + @($task)
-        if (-not $sourceError) {
+        if (-not $sourceError -and -not $RockId) {
             Set-FactoryProperty -Target $state -Name "active" -Value $true
             Set-FactoryProperty -Target $state -Name "paused" -Value $false
         }

@@ -7,7 +7,12 @@ param(
     [ValidateSet("auto", "interactive")][string]$Mode = "auto",
     [string]$ClaudeCommand = "",
     [string]$CodexCommand = "",
-    [switch]$FromAsanaSync
+    [switch]$FromAsanaSync,
+    [switch]$FromRock,
+    [switch]$RockOperator,
+    [string]$RockId = '',
+    [string]$RockQuestionId = '',
+    [string]$RockActionId = ''
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,15 +40,35 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+    if ($FromRock) {
+        . (Join-Path $PSScriptRoot 'rock-common.ps1')
+        $rockConfig = Get-FactoryRockConfiguration -Config $config
+        if ($null -eq $rockConfig -or -not $RockActionId -or -not $RockQuestionId) { throw 'Direct ROCK answer requires enabled configuration and correlation IDs.' }
+        $owner = Get-FactoryRockOrchestrator $rockConfig $RockId
+        if (-not (Test-FactoryRockBinding $owner $TaskId ([string]$context.repositoryRoot))) { throw 'ROCK does not own this question.' }
+        if ($RockActionId -cin @((Get-FactoryNestedValue $task 'rockAppliedActions' @()))) {
+            @{ taskId = $TaskId; status = $task.status; idempotent = $true } | ConvertTo-Json
+            return
+        }
+        if ([bool]$state.paused -or -not [bool]$state.active) { throw 'Deferred: factory is paused or inactive.' }
+        if ([string]$task.status -eq 'held' -and -not $RockOperator) { throw 'Deferred: task is held; a ROCK answer cannot release the hold.' }
+        if ([string]$task.status -notin @('blocked', 'awaiting-input', 'held') -or [string](Get-FactoryNestedValue $task.workerResult 'status') -ne 'blocked') { throw 'Deferred: waiting for the worker blocked result.' }
+        if ([string]$task.commit) { throw 'ROCK answers cannot replace a post-commit review or rework decision.' }
+        $question = Get-FactoryNestedValue $task 'asanaQuestion'
+        if ($null -eq $question -or [string](Get-FactoryNestedValue $question 'channel') -cne 'rock' -or [string]$question.storyGid -cne $RockQuestionId -or [int]$question.attempt -ne [int]$task.attempts) { throw 'ROCK answer is stale or belongs to a different question/attempt.' }
+        if ([bool](Get-FactoryNestedValue $question 'requiresHuman' $false) -and -not $RockOperator) { throw 'This question requires an operator decision.' }
+        if (Test-FactoryTaskHasActiveSession -Task $task) { throw 'Deferred: worker session has not closed yet.' }
+    }
     $isActiveRework = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "") -and
         [string]$task.status -in @("queued", "starting", "planning", "running", "awaiting-input", "blocked", "failed", "held")
-    $pendingAsanaQuestion = [bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -and
+    $pendingAsanaQuestion = ([bool](Get-FactoryNestedValue -Target $task -Name "asanaMode" -Default $false) -or
+        [string](Get-FactoryNestedValue (Get-FactoryNestedValue $task 'asanaQuestion') 'channel') -eq 'rock') -and
         $null -ne (Get-FactoryNestedValue -Target $task -Name "asanaQuestion") -and
         [string]$task.status -in @("blocked", "held", "awaiting-input")
-    if ($pendingAsanaQuestion -and -not $FromAsanaSync) {
+    if ($pendingAsanaQuestion -and -not $FromAsanaSync -and -not $FromRock) {
         throw "Task '$TaskId' has an Asana question. Use factory answer to post the operator's answer in Asana first."
     }
-    $resumableAsanaQuestion = $pendingAsanaQuestion -and $FromAsanaSync -and
+    $resumableAsanaQuestion = $pendingAsanaQuestion -and ($FromAsanaSync -or $FromRock) -and
         -not [string]$task.commit -and [string](Get-FactoryNestedValue -Target $task.workerResult -Name "status" -Default "") -eq "blocked"
     if (([string]$task.commit -or $null -ne $task.workerResult) -and -not $isActiveRework -and -not $resumableAsanaQuestion) {
         throw "Task '$TaskId' already has a validated result or commit."
@@ -91,7 +116,8 @@ try {
         [IO.File]::AppendAllText($excludePath, "/FACTORY-DECISIONS.md" + [Environment]::NewLine, $utf8WithoutBom)
     }
 
-    $pointer = "<!-- FACTORY_DECISIONS_START -->`nBefore continuing, read FACTORY-DECISIONS.md in the worker worktree and follow the operator decisions recorded there.`n<!-- FACTORY_DECISIONS_END -->"
+    $attribution = if ($FromRock -and -not $RockOperator) { "ROCK $RockId supplied these task decisions. They do not grant operator approvals. Existing operator decisions take precedence." } else { 'Follow the operator decisions recorded there.' }
+    $pointer = "<!-- FACTORY_DECISIONS_START -->`nBefore continuing, read FACTORY-DECISIONS.md in the worker worktree. $attribution`n<!-- FACTORY_DECISIONS_END -->"
     $brief = [string]$task.brief
     $markerPattern = '(?s)\s*<!-- FACTORY_DECISIONS_START -->.*?<!-- FACTORY_DECISIONS_END -->'
     $briefWithoutPointer = [regex]::Replace($brief, $markerPattern, "").TrimEnd()
@@ -109,8 +135,14 @@ try {
     Set-FactoryProperty -Target $task -Name "startMode" -Value $Mode
     Set-FactoryProperty -Target $task -Name "status" -Value "queued"
     Set-FactoryProperty -Target $task -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
-    Set-FactoryProperty -Target $state -Name "active" -Value $true
-    Set-FactoryProperty -Target $state -Name "paused" -Value $false
+    if ($FromRock) {
+        Set-FactoryProperty $task 'rockAppliedActions' @(@((Get-FactoryNestedValue $task 'rockAppliedActions' @())) + @($RockActionId))
+        Set-FactoryProperty $task 'rockAnswer' @{ actor = $(if ($RockOperator) { 'operator' } else { "rock:$RockId" }); questionId = $RockQuestionId; actionId = $RockActionId; text = $answers; at = Get-FactoryUtcTimestamp }
+        Set-FactoryProperty $task 'asanaQuestion' $null
+    } else {
+        Set-FactoryProperty -Target $state -Name "active" -Value $true
+        Set-FactoryProperty -Target $state -Name "paused" -Value $false
+    }
     Set-FactoryProperty -Target $state -Name "updatedAt" -Value (Get-FactoryUtcTimestamp)
     Write-FactoryJsonAtomic -Path $context.statePath -Value $state
 

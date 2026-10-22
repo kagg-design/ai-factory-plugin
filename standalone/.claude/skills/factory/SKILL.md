@@ -939,6 +939,11 @@ that must remain inspectable.
 
 ### `answer <task-id> (--text TEXT|--file PATH) [--interactive]`
 
+When `asanaQuestion.channel` is `rock`, show the question to Igor and, only after
+his answer, run `factory answer TASK_ID --text "IGOR'S ANSWER"`. This records a
+local operator answer. Do not post it to Asana or wait for its Factory field.
+See the direct `rock` section below. The following Asana flow is legacy-only.
+
 For a pending Asana question (`asanaQuestion` in factory state), show the exact
 question, context, options, and default to Igor in this orchestrator conversation.
 The `asana-question` event from `factory wait` carries those details. Check the
@@ -1089,6 +1094,27 @@ it back with `--cursor`. For Codex, each new AI-actionable edge is forwarded
 once through the Factory-managed shared app-server to the saved orchestrator;
 the acknowledgement survives restarts. Human input and GO remain human-owned
 unless private `orchestrator.autoGoApprovedReviews` is explicitly true.
+
+### `rock` (opt-in direct orchestration)
+
+`factory rock status` reads private ROCK memory and event progress;
+`factory rock questions` shows all unresolved questions together. See
+`factory help rock` and `docs/dev/ROCK-DIRECT-ORCHESTRATION.md` for setup/import,
+per-ROCK pause/resume and failed-event retry. The feature ships disabled.
+
+ROCK receives native task events and returns typed decisions to Factory. Its
+planner has no Asana connector, shell or mutation tools. Read Asana only through
+the existing browser and use `factory rock import ROCK_GID --file SNAPSHOT` for
+UTF-8 source snapshots. A `rock-source-refresh` event requests that browser read;
+it never authorizes reconnecting an Asana app or using a token as a fallback.
+
+Show pending ROCK questions with context/options/recommendations and batch them
+for Igor. Only after Igor answers, use
+`factory rock answer ROCK_GID QUESTION_ID --text "IGOR'S ANSWER"`.
+For a worker question whose native channel is `rock`, `factory answer TASK_ID
+--text "IGOR'S ANSWER"` supplies it locally. Never invent an operator answer.
+ROCK replies are agent decisions and cannot authorize GO, a merge gate, security
+exceptions or new access. Existing native publication and human gates still apply.
 
 ### `runtime [status|migrate]`
 

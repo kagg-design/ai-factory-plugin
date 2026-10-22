@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Factory direct ROCK result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "eventId", "summary", "decisions", "actions"],
+  "properties": {
+    "version": {"const": 1},
+    "eventId": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 16000},
+    "decisions": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+    "actions": {
+      "type": "array", "maxItems": 50,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "type"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
+          "type": {"enum": ["answer", "dispatch", "escalate"]},
+          "taskId": {"type": "string", "pattern": "^[0-9]+$"},
+          "repository": {"type": "string", "minLength": 1},
+          "questionId": {"type": "string", "minLength": 1},
+          "text": {"type": "string", "minLength": 1, "maxLength": 16000},
+          "title": {"type": "string", "minLength": 1, "maxLength": 500},
+          "brief": {"type": "string", "minLength": 1, "maxLength": 50000},
+          "acceptanceCriteria": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 4000}}
+        },
+        "allOf": [
+          {"if": {"properties": {"type": {"const": "answer"}}}, "then": {"required": ["taskId", "repository", "questionId", "text"]}},
+          {"if": {"properties": {"type": {"const": "dispatch"}}}, "then": {"required": ["taskId", "repository", "title", "brief"]}},
+          {"if": {"properties": {"type": {"const": "escalate"}}}, "then": {"required": ["text"]}}
+        ]
+      }
+    }
+  }
+}

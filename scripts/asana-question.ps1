@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Question,
     [Parameter(Mandatory = $true)][string]$QuestionContext,
     [Parameter(Mandatory = $true)][string]$Options,
-    [ValidateSet('A', 'B')][string]$Default = 'A'
+    [ValidateSet('A', 'B')][string]$Default = 'A',
+    [switch]$RequiresHuman
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,11 +17,42 @@ $context = & (Join-Path $PSScriptRoot 'project-context.ps1') -Repository $Reposi
 $config = Read-FactoryJson -Path $context.configPath
 $state = Read-FactoryJson -Path $context.statePath
 $task = Get-FactoryTask -State $state -TaskId $TaskId
-if (-not [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false)) {
+if (-not [bool](Get-FactoryNestedValue -Target $task -Name 'asanaMode' -Default $false) -and -not [string](Get-FactoryNestedValue $task 'rockId')) {
     throw "Task '$TaskId' is not in Asana mode."
 }
 if ([string]$task.status -notin @('running', 'awaiting-input', 'planning')) {
     throw "Task '$TaskId' cannot ask an Asana question from '$($task.status)'."
+}
+. (Join-Path $PSScriptRoot 'rock-common.ps1')
+$rock = Get-FactoryRockConfiguration -Config $config
+$owner = if ($null -ne $rock) { Get-FactoryRockOwner $rock $TaskId ([string]$context.repositoryRoot) } else { $null }
+if ($null -eq $owner -and [string](Get-FactoryNestedValue $task 'rockId')) { throw 'Direct ROCK configuration is unavailable for this task; restore its binding before continuing.' }
+if ($null -ne $owner) {
+    $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+    try {
+        $state = Read-FactoryJson -Path $context.statePath
+        $task = Get-FactoryTask -State $state -TaskId $TaskId
+        if ([string]$task.status -notin @('running', 'awaiting-input', 'planning')) { throw 'Task changed while preparing its ROCK question.' }
+        $pending = Get-FactoryNestedValue $task 'asanaQuestion'
+        $questionText = "$Question`nContext: $QuestionContext`nOptions: $Options`nSuggested default: $Default"
+        if ($null -ne $pending) {
+            if ([string](Get-FactoryNestedValue $pending 'channel') -eq 'rock' -and [int]$pending.attempt -eq [int]$task.attempts -and [string]$pending.text -ceq $questionText -and [bool]$pending.requiresHuman -eq [bool]$RequiresHuman) {
+                Write-Output 'The same ROCK question is already saved. Emit a blocked FACTORY_RESULT and stop.'
+                return
+            }
+            throw 'A different question is already pending for this task.'
+        }
+        $questionRecord = [pscustomobject]@{ channel = 'rock'; rockId = [string]$owner.epicGid; storyGid = "rock:$([Guid]::NewGuid().ToString('N'))"; attempt = [int]$task.attempts; askedAt = Get-FactoryUtcTimestamp; text = $questionText; requiresHuman = [bool]$RequiresHuman; fallbackStartedAt = $null }
+        Set-FactoryProperty $task 'asanaQuestion' $questionRecord
+        Set-FactoryProperty $task 'rockId' ([string]$owner.epicGid)
+        Set-FactoryProperty $task 'asanaMode' $false
+        Write-FactoryJsonAtomic -Path $context.statePath -Value $state
+    } finally { Exit-FactoryMutex -Mutex $mutex }
+    # The scheduler republishes this from task state if this process is interrupted.
+    Sync-FactoryRockTaskEvents -Context $context -Config $config -State $state
+    Start-FactoryRockService -Context $context -Config $config
+    Write-Output 'Question saved in ROCK memory. Emit a blocked FACTORY_RESULT and stop; Factory delivers the answer directly.'
+    return
 }
 $remote = Get-FactoryAsanaTask -Config $config -Gid $TaskId
 if ((Get-FactoryAsanaField -Task $remote -Gid ([string]$config.asana.fields.factory)) -ne [string]$config.asana.fields.taken) {

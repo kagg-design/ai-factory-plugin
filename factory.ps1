@@ -4,7 +4,7 @@ param(
     [ValidateSet(
         "help", "status", "ci", "merge", "inspect", "preview", "doctor", "chat", "add", "new", "answer", "go", "hold", "retry", "reject",
         "cleanup", "concurrency", "completion", "start", "restart", "rotate", "agents", "codex-server", "paths", "runtime", "config",
-        "scheduler", "tick", "pause", "resume", "stop", "wait", "purge", "archive:seed"
+        "scheduler", "tick", "pause", "resume", "stop", "wait", "purge", "archive:seed", "rock"
     )]
     [string]$Command = "help",
 
@@ -41,6 +41,7 @@ param(
             "completion" { "status", "enable" }
             "config" { "path", "edit" }
             "runtime" { "status", "migrate" }
+            "rock" { "status", "questions", "answer", "pause", "resume", "import", "retry" }
             "ci" { "status", "acknowledge" }
             "codex-server" { "status", "start", "stop", "restart" }
             "scheduler" { "status", "start", "stop", "tick" }
