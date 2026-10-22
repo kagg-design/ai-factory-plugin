@@ -20,16 +20,23 @@ Assert-Name ((Get-FactoryOrchestratorDisplayName $alias) -ceq 'Factory Auditors'
 Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context -NameOverride 'AwesomeHR') -ceq 'AwesomeHR') '-Name did not override config.'
 
 $config.orchestrator = [pscustomobject]@{}
-Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context) -ceq 'CloudInfra-8ce0') 'Directory fallback is unstable or too long.'
+Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context) -ceq 'cloud-infrastructure-auditors') 'Directory fallback changed the folder name.'
 $singleWordContext = [pscustomobject]@{ repositoryRoot = 'C:\laragon\www\motivehr'; projectKey = 'motivehr-4893d8fb' }
-Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $singleWordContext) -ceq 'Motivehr-4893') 'Short directory fallback was truncated.'
+Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $singleWordContext) -ceq 'motivehr') 'Directory fallback changed case or added a suffix.'
+$unicodeFolder = ([char]0x041F).ToString() + [char]0x0440 + [char]0x043E + [char]0x0435 + [char]0x043A + [char]0x0442
+foreach ($folder in @('am-logger', 'AMLogger', 'My.Project (dev)', '123-project', $unicodeFolder, ('long-project-name-' * 5).TrimEnd('-'))) {
+    $folderContext = [pscustomobject]@{ repositoryRoot = 'C:\fixture\' + $folder }
+    $folderAlias = Get-FactoryOrchestratorAlias -Config $config -Context $folderContext
+    Assert-Name ($folderAlias -ceq $folder) "Directory fallback did not preserve '$folder'."
+    Assert-Name ((Get-FactoryOrchestratorDisplayName $folderAlias) -ceq ('Factory ' + $folder)) 'Display name changed the complete folder name.'
+}
 $config.orchestrator = [pscustomobject]@{ name = 'bad.name' }
 $errorText = ''
 try { $null = Get-FactoryOrchestratorAlias -Config $config -Context $context } catch { $errorText = $_.Exception.Message }
 Assert-Name ($errorText -match 'contain only') 'A configured name containing dots was accepted.'
 
 $config.orchestrator.name = 'Claude Factory Orchestrator'
-Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context) -ceq 'CloudInfra-8ce0') 'The legacy generic name did not acquire a project owner.'
+Assert-Name ((Get-FactoryOrchestratorAlias -Config $config -Context $context) -ceq 'cloud-infrastructure-auditors') 'The legacy generic name did not use the complete folder name.'
 $oldRow = [pscustomobject]@{ name = 'Claude Factory Orchestrator'; sessionId = 'recorded-session'; cwd = $context.repositoryRoot }
 $matched = @(Get-FactoryMatchingOrchestratorRows -Rows @($oldRow) -RepositoryRoot $context.repositoryRoot -Name ('Factory ' + [char]0x00B7 + ' Auditors') -SessionId 'recorded-session')
 Assert-Name ($matched.Count -eq 1) 'Renaming lost the stored conversation identity.'

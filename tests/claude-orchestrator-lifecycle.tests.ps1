@@ -329,6 +329,26 @@ try {
     Assert-Lifecycle ($override.exitCode -eq 0) "-Name start failed: $($override.output)"
     Assert-Lifecycle ((Read-FactoryJson $context.configPath).orchestrator.name -ceq 'Auditors') '-Name did not persist the short label.'
     Assert-Lifecycle ([IO.File]::ReadAllText($launchCountPath) -ceq $launchesBeforeOverride) '-Name started a second live orchestrator.'
+
+    # A source update changes only the default label. Reuse a live old label;
+    # an explicit restart may rename it while retaining its exact conversation.
+    $beforeFolderRename = Read-FactoryJson $identityPath
+    $folderConfig = Read-FactoryJson $context.configPath
+    $folderConfig.orchestrator.PSObject.Properties.Remove('name')
+    Write-FactoryJsonAtomic $context.configPath $folderConfig
+    $oldFolderName = 'Factory AmLogge-7b36'
+    [IO.File]::AppendAllText($registryPath, "launch`t$($beforeFolderRename.backgroundId)`t$repository`t$oldFolderName`tworking`t$($beforeFolderRename.sessionId)`t5000`n", $script:FactoryUtf8NoBom)
+    Write-FactoryOrchestratorIdentity $identityPath $repository $oldFolderName $beforeFolderRename.sessionId $beforeFolderRename.backgroundId
+    $liveOldLabel = Invoke-LifecycleCommand 'start'
+    Assert-Lifecycle ($liveOldLabel.exitCode -eq 0 -and [IO.File]::ReadAllText($launchCountPath) -ceq $launchesBeforeOverride) 'Changing the default label replaced a live orchestrator.'
+    Assert-Lifecycle ((Read-FactoryJson $identityPath).name -ceq $oldFolderName) 'A normal start renamed the live conversation.'
+    [IO.File]::WriteAllText((Join-Path $transcriptsPath "$($beforeFolderRename.sessionId).jsonl"), '{"type":"user","message":"Keep this conversation too"}')
+    $folderRestart = Invoke-LifecycleCommand 'restart'
+    Assert-Lifecycle ($folderRestart.exitCode -eq 0) "Folder-name restart failed: $($folderRestart.output)"
+    $afterFolderRename = Read-FactoryJson $identityPath
+    $folderName = 'Factory ' + (Split-Path $repository -Leaf)
+    Assert-Lifecycle ($afterFolderRename.name -ceq $folderName -and $afterFolderRename.sessionId -eq $beforeFolderRename.sessionId) 'Folder-name restart changed the UUID or retained the abbreviated label.'
+    Assert-Lifecycle ([IO.File]::ReadAllText($context.statePath) -ceq $beforeState) 'Folder-name restart changed the task ledger.'
     Write-Host 'Claude orchestrator lifecycle tests passed (background-first launch, attach/restart, numbered recovery, unknown launches, task preservation).'
 } finally {
     foreach ($name in $savedEnvironment.Keys) {

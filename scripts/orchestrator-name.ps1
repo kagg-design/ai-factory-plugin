@@ -9,8 +9,8 @@ function Get-FactoryOrchestratorAlias {
 
     $configured = Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Config -Name 'orchestrator') -Name 'name' -Default ''
     $alias = if ($NameOverride) { $NameOverride.Trim() } else { ([string]$configured).Trim() }
-    # The old default is not a project label. Give old configs the same stable
-    # repository-derived owner as configs with no explicit alias.
+    # The old default is not a project label. Use the repository folder just
+    # as for configs with no explicit alias.
     if ($alias -ceq 'Claude Factory Orchestrator') { $alias = '' }
     if ($alias) {
         if ($alias -cnotmatch '^[A-Za-z][A-Za-z0-9_-]{0,31}$') {
@@ -19,19 +19,7 @@ function Get-FactoryOrchestratorAlias {
         return $alias
     }
 
-    $repositoryName = Split-Path ([string]$Context.repositoryRoot) -Leaf
-    $parts = @($repositoryName -split '[^A-Za-z0-9]+' | Where-Object { $_ })
-    $short = ''
-    $fragmentLimit = if ($parts.Count -eq 1) { 12 } else { 5 }
-    foreach ($part in @($parts | Select-Object -First 2)) {
-        $fragment = $part.Substring(0, [Math]::Min($fragmentLimit, $part.Length)).ToLowerInvariant()
-        $short += $fragment.Substring(0, 1).ToUpperInvariant() + $fragment.Substring(1)
-    }
-    if (-not $short) { $short = 'Project' }
-    $key = [string]$Context.projectKey
-    $match = [regex]::Match($key, '-([0-9a-fA-F]{8})$')
-    if (-not $match.Success) { throw "Project key has no stable hash: '$key'." }
-    return "$short-$($match.Groups[1].Value.Substring(0, 4).ToLowerInvariant())"
+    return Split-Path ([string]$Context.repositoryRoot) -Leaf
 }
 
 function Get-FactoryOrchestratorDisplayName {

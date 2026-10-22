@@ -37,10 +37,13 @@ try {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
     }
 
+    $defaultConfig = [pscustomobject]@{ orchestrator = [pscustomobject]@{} }
+    $sessionName = Get-FactoryOrchestratorDisplayName (Get-FactoryOrchestratorAlias -Config $defaultConfig -Context $context)
+    if ($sessionName -cne 'Factory repository with spaces') { throw 'Default Codex name changed the repository folder.' }
     foreach ($mode in @('new', 'resume')) {
         $launchExitCode = -1
         Start-FactoryCodexOrchestrator -CodexCommand $fakeCodex -PluginRoot $PluginRoot -Context $context `
-            -Model 'test-model' -SessionName 'Factory Auditors' `
+            -Model 'test-model' -SessionName $sessionName `
             -Resume:($mode -eq 'resume') -ExitCodeVariableName 'launchExitCode'
         if ($launchExitCode -ne 0) { throw "Codex $mode attach rejected the launch arguments (exit $launchExitCode)." }
     }
@@ -63,8 +66,8 @@ try {
         throw 'Resume did not validate the saved conversation.'
     }
     $names = @($requests | Where-Object { $_.method -eq 'thread/name/set' })
-    if ($names.Count -ne 2 -or @($names | Where-Object { $_.params.name -cne 'Factory Auditors' }).Count) {
-        throw 'New and resumed Codex orchestrators did not share the configured owner/role label.'
+    if ($names.Count -ne 2 -or @($names | Where-Object { $_.params.name -cne $sessionName }).Count) {
+        throw 'New and resumed Codex orchestrators did not share the full repository folder label.'
     }
     $attaches = @($lines | Where-Object { $_ -match '^--remote\t.*\tresume\t' })
     if ($attaches.Count -ne 2) { throw 'Expected one terminal attach for each startup.' }

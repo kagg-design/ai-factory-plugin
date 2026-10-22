@@ -10,7 +10,7 @@ function Get-FactoryMatchingOrchestratorRows {
     )
 
     $familyNames = @($Name)
-    if ($Name -cmatch '^Factory ([A-Za-z][A-Za-z0-9_-]{0,31})$') {
+    if ($Name -cmatch '^Factory (.+)$') {
         $familyNames += 'Factory ' + [char]0x00B7 + ' ' + $Matches[1]
         $familyNames += 'Claude Factory Orchestrator'
     }

@@ -979,8 +979,10 @@ request is active; stray answers for otherwise finished tasks remain rejected.
 The orchestrator is named `Factory <alias>`; its workers are named
 `<alias> · <task-id> · <title>`, for example `Factory AwesomeHR` and
 `AwesomeHR · c068b7ec · access-sync`. The alias comes from `orchestrator.name`
-or the stable repository-derived fallback. Do not add worker/orchestrator
-role words. New Claude and Codex workers use this same convention.
+or, when unset, the exact repository folder name, preserving case,
+punctuation and full length without a hash suffix. Internal runtime project
+keys remain unchanged. Do not add worker/orchestrator role words. New Claude
+and Codex workers use this same convention.
 
 Existing live Claude sessions keep their names. An explicit orchestrator
 `factory restart` can update its label while retaining the exact conversation

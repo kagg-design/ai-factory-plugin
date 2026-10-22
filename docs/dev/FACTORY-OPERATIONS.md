@@ -126,11 +126,14 @@ label such as `AwesomeHR`, or run `factory start -Name AwesomeHR` to save it.
 Both runtimes use `Factory AwesomeHR` for the orchestrator and
 `AwesomeHR · <task-id> · <title>` for its workers. For local tasks the ID is
 the eight-character task code; Asana tasks retain their full GID. There are
-no `worker` or `orchestrator` suffixes. Names stay within 64 characters by
-shortening the title first, preserving the complete factory label and normal
-task IDs. With no label, Factory derives a short name from the repository
-directory plus part of its project key. The old generic configured value
-`Claude Factory Orchestrator` also uses this repository-derived fallback.
+no `worker` or `orchestrator` suffixes. Worker titles use the remaining space
+in a 64-character display budget; the complete factory label and normal task
+IDs take priority when they exceed that budget. With no explicit label,
+Factory uses the repository folder name exactly, preserving its case,
+punctuation and full length, with no hash suffix. For example, `am-logger`
+becomes `Factory am-logger`. Internal project keys retain their path hashes
+for separate runtime storage. The old generic configured value
+`Claude Factory Orchestrator` also uses the complete folder name.
 
 An existing live Claude conversation retains its current label until an
 explicit `factory restart` from PowerShell after exiting the TUI. Restart

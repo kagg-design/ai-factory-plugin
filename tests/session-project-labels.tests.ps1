@@ -19,8 +19,8 @@ $contexts = @(
 foreach ($entry in @(
     @{ config = [pscustomobject]@{ orchestrator = @{ name = 'AwesomeHR' } }; context = $contexts[0]; label = 'AwesomeHR' },
     @{ config = [pscustomobject]@{ orchestrator = @{ name = 'Auditors' } }; context = $contexts[1]; label = 'Auditors' },
-    @{ config = [pscustomobject]@{ orchestrator = @{} }; context = $contexts[0]; label = 'Motivehr-4893' },
-    @{ config = [pscustomobject]@{ orchestrator = @{} }; context = $contexts[1]; label = 'Auditors-8ce0' }
+    @{ config = [pscustomobject]@{ orchestrator = @{} }; context = $contexts[0]; label = 'motivehr' },
+    @{ config = [pscustomobject]@{ orchestrator = @{} }; context = $contexts[1]; label = 'auditors' }
 )) {
     # Use PSCustomObjects as real deserialized config objects, not hashtables.
     $entry.config.orchestrator = [pscustomobject]$entry.config.orchestrator
@@ -42,6 +42,22 @@ foreach ($entry in @(
     )
     $matches = @(Get-FactoryMatchingOrchestratorRows -Rows $rows -RepositoryRoot $entry.context.repositoryRoot -Name ('Factory ' + $entry.label))
     Assert-Label ($matches.Count -eq 3 -and 'foreign' -notin @($matches.id) -and 'worker' -notin @($matches.id)) 'Old/new orchestrator families mixed workers or repositories.'
+}
+$defaultConfig = [pscustomobject]@{ orchestrator = [pscustomobject]@{} }
+foreach ($folder in @('am-logger', 'My.Project (dev)', ('long-project-name-' * 5).TrimEnd('-'))) {
+    $folderContext = [pscustomobject]@{ repositoryRoot = 'C:\fixture\' + $folder }
+    foreach ($taskId in @($localId, $asanaId)) {
+        $identity = if ($taskId -eq $localId) { 'c068b7ec' } else { $asanaId }
+        $name = Get-FactoryWorkerSessionName -TaskId $taskId -Title ('Long task title ' * 20) -Config $defaultConfig -Context $folderContext
+        Assert-Label ($name.StartsWith($folder + $separator + $identity)) 'A full folder name shortened the factory owner or normal task identity.'
+    }
+    $rows = @(
+        [pscustomobject]@{ id = 'current'; name = 'Factory ' + $folder; cwd = $folderContext.repositoryRoot },
+        [pscustomobject]@{ id = 'legacy'; name = 'Claude Factory Orchestrator'; cwd = $folderContext.repositoryRoot },
+        [pscustomobject]@{ id = 'foreign'; name = 'Factory ' + $folder; cwd = 'C:\other\' + $folder }
+    )
+    $matches = @(Get-FactoryMatchingOrchestratorRows -Rows $rows -RepositoryRoot $folderContext.repositoryRoot -Name ('Factory ' + $folder))
+    Assert-Label ($matches.Count -eq 2 -and 'foreign' -notin @($matches.id)) 'Folder labels lost legacy discovery or mixed repositories with the same folder name.'
 }
 
 $longAlias = 'A' * 32

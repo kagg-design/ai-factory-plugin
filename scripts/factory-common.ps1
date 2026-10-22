@@ -1636,9 +1636,10 @@ function Get-FactoryWorkerSessionName {
     } else {
         ConvertTo-FactoryTaskArtifactName -TaskId $TaskId
     }
-    # Keep the full owner label and task identity; shorten the title first.
-    # Only unusually long nonstandard task IDs need compacting.
-    $identityBudget = 64 - $prefix.Length
+    # Keep the full owner label and normal task identity, even when a long
+    # repository folder exceeds the display budget. Shorten the title first;
+    # only unusually long nonstandard task IDs need compacting.
+    $identityBudget = [Math]::Max(16, 64 - $prefix.Length)
     if ($identity.Length -gt $identityBudget) {
         $identity = '~' + $identity.Substring($identity.Length - ($identityBudget - 1))
     }
