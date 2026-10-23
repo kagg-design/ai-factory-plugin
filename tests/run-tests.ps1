@@ -206,6 +206,10 @@ try {
     foreach ($relativeFile in @($bundleManifest.files)) {
         Assert-True (Test-Path -LiteralPath (Join-Path $pluginRoot $relativeFile)) "Manifest file is missing: $relativeFile"
     }
+    $suiteReferences = @([regex]::Matches([IO.File]::ReadAllText($PSCommandPath), '[A-Za-z0-9-]+\.tests\.ps1') | ForEach-Object Value | Sort-Object -Unique)
+    foreach ($suite in $suiteReferences) {
+        Assert-True (('tests/' + $suite) -in @($bundleManifest.files)) "Test entrypoint dependency is absent from the bundle: tests/$suite"
+    }
     Assert-True (@($bundleManifest.files) -contains "factory") "The plugin manifest omits the Bash-compatible factory launcher."
     $bashLauncher = Get-Content -LiteralPath (Join-Path $pluginRoot "factory") -Raw
     Assert-True ($bashLauncher.StartsWith("#!/usr/bin/env bash")) "The cross-shell factory launcher is not a Bash script."
@@ -4238,10 +4242,14 @@ $result = [ordered]@{
     Assert-Equal 2 $codexProxyExit "Codex Git proxy allowed a worker push."
     Remove-Item Env:\CLAUDE_FACTORY_REAL_GIT -ErrorAction SilentlyContinue
     Remove-Item Env:\CLAUDE_FACTORY_WORKTREE -ErrorAction SilentlyContinue
+    # Fake workers reuse a thread UUID. Earlier fixture cleanup may legitimately
+    # have deleted it already; assert this rejection adds exactly one deletion.
+    $codexDeletesBeforeDiscard = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^delete\t--force\taaaaaaaa-' }).Count
     $codexDiscard = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId "codex-task" -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json
     Assert-True ([bool]$codexDiscard.removedFromState) "Codex task rejection did not forget the task."
     Assert-True (-not (Test-Path -LiteralPath ([string]$codexRecordedTask.backgroundSession.shimDirectory))) "Codex task rejection left its private Git shim directory behind."
-    Assert-True (@(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^delete\t--force\taaaaaaaa-' }).Count -eq 1) "Confirmed rejection did not delete the Codex session."
+    $codexDeletesAfterDiscard = @(Get-Content -LiteralPath $codexLog | Where-Object { $_ -match '^delete\t--force\taaaaaaaa-' }).Count
+    Assert-Equal ($codexDeletesBeforeDiscard + 1) $codexDeletesAfterDiscard "Confirmed rejection did not delete the Codex session exactly once."
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "factory.ps1") codex-server stop -Repository $repository -CodexCommand $fakeCodex 1> $null
     Assert-Equal 0 $LASTEXITCODE "Shared Codex app-server was not stopped after its test coverage."
     Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_LOG -ErrorAction SilentlyContinue

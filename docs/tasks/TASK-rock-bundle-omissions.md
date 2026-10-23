@@ -12,3 +12,12 @@ The manifest now includes these runtime/test dependencies and the ROCK rollout
 documentation. The focused ROCK suite explicitly requires every new runtime and
 test dependency to be both listed and present. This correction is part of the
 already-authorized feature and test packaging work; no live runtime is changed.
+
+The entrypoint dependency check also found five pre-existing omissions:
+orchestrator-name, session-project-labels, timestamp-normalization,
+worker-chat-attention-amend and worker-result-followup suites. They are now
+listed. The test harness checks every directly referenced `.tests.ps1` against
+the manifest, preventing the same packaging defect when more suites are added.
+The final dependency check passed for all 22 directly referenced suites and all
+132 manifest entries. The focused ROCK suite passed after the runtime/test files
+were added to the bundle inventory.

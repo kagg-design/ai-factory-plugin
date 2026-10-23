@@ -78,3 +78,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\rock-scheduler-compat.
 The second command succeeds only when the deliberately broken copy is detected
 with the specific inherited-pipe diagnostic. Other failures are not accepted as
 proof that the regression check works.
+
+The first full run passed the repaired slot-fill gate (30.525 seconds, all three
+workers alive) and then exposed another fixture assumption at rejection: the
+shared FakeCodex log was expected to contain exactly one deletion globally.
+Fake workers reuse the same thread UUID; releasing the controlled slot workers
+before native cleanup can now legitimately add prior deletions. The rejection
+check now snapshots the count around the exact operation and requires a delta
+of one, retaining detection of missing or duplicate deletion.
+
+After this correction, `tests/run-tests.ps1 -RuntimeOnly` passed to exit code 0:
+`All factory runtime tests passed.` The slot-fill check again returned three live
+workers (29.893 seconds). The full entrypoint's preceding 22 standalone suites
+had already passed, including the ledger repair and inherited-pipe negative
+control. No single uninterrupted full rerun is claimed after the final assertion
+correction; its complete runtime portion was rerun successfully.

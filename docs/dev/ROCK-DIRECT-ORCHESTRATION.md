@@ -200,7 +200,7 @@ run has not been performed as part of the offline implementation.
 Recommended rollout: import Access sources; pilot direct questions on one task;
 verify its ordinary review/GO/merge gate; then enable direct dispatch and Billing
 watchers. Keep meaningful human-visible updates on the board through the browser
-after agreeing the projection policy. Metrics that currently derive cycle time
+using the agreed projection policy. Metrics that currently derive cycle time
 from TAKEN/DONE comments need an explicit local-event source before those metrics
 can describe direct tasks accurately.
 
@@ -212,13 +212,28 @@ fixtures. The ROCK suite includes the actual public question/answer/import paths
 safe legacy rollback, exact local commit evidence and corrupt-memory isolation.
 PowerShell parsing, JSON parsing and `git diff --check` also passed.
 
-The complete entrypoint is not green: it stops in an existing ledger fixture
-that omits runtime dependencies. The separate `-RuntimeOnly` run proceeded through
-publication, recovery, sync, CLI and orchestrator checks, then failed a 28-second
-Codex launch threshold at 29.78 seconds. An isolated baseline/branch comparison
-returned with all three workers still alive: baseline 28.637 seconds, ROCK-disabled
-branch 27.676 seconds. This provides functional compatibility evidence, not a
-claim that the full suite passed. Separate reports are under `docs/tasks`.
+Igor authorized the fixture repairs. The ledger test now packages its runtime
+dependencies. The Codex slot test uses controlled worker lifetime, verifies all
+three live workers, and bounds output-pipe completion separately from cold start.
+A negative control enables handle inheritance only in a disposable plugin copy;
+the check detects that exact defect. Production launchers are unchanged.
+
+The full entrypoint passed all 22 preliminary suites, including the forced ledger
+race and pipe-inheritance negative control. Its runtime section then passed the
+slot gate (30.525 seconds) and exposed a cumulative FakeCodex deletion-count
+assertion. After isolating that assertion to the exact rejection operation,
+`tests/run-tests.ps1 -RuntimeOnly` passed to exit code 0, including publication,
+recovery, CLI, sync and Codex checks. Its slot gate returned all three workers
+alive in 29.893 seconds. Validation therefore comprises the full preliminary run
+and the successful runtime rerun, rather than a single uninterrupted full run.
 
 The comparison is reproducible with `tests/rock-scheduler-compat.tests.ps1` and
-its optional `-BaselinePluginRoot`. It does not weaken the existing timing gate.
+its optional `-BaselinePluginRoot`; `-InjectInheritedPipe` exercises the negative
+control. A further run alongside the full suite passed with all workers alive.
+The final manifest contains all 22 referenced suites and their new dependencies;
+all 132 entries exist. The focused ROCK suite passed after adding bundle checks.
+Separate repair and evidence reports are under `docs/tasks`.
+
+These checks ran on the isolated ROCK branch based on `37aeca7`. The separate
+`main` change `99f4043` (CI attention replay / stale Claude claims) was committed
+during this work and is not merged into this branch or covered by these results.

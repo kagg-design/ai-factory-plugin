@@ -46,4 +46,6 @@ only its disposable copy and retains all ledger assertions.
 `tests/run-tests.ps1 -LedgerOnly` passed: forced replacement race (12 initializations),
 write guards, recovery copies, legitimate rejection, and idle/busy scheduler journal
 checks. The idle measurement recorded 15 holds/minute; busy heartbeats made no
-ledger writes. The full entrypoint is being checked separately.
+ledger writes. The full entrypoint also passed this suite and all other 21
+preliminary suites. Its later runtime assertion issue and successful runtime
+rerun are recorded in TASK-codex-slot-fill-timing-sensitive-check.md.
