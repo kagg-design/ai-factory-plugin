@@ -50,9 +50,11 @@ function Get-FactoryCiUnacknowledgedFailures {
 }
 
 function Get-FactoryCiStatus {
-    param($Context)
+    param($Context, $Config = $null)
     try {
         $journal = Read-FactoryCiJournal $Context
+        $Config = Get-FactoryCiConfig -Context $Context -Config $Config
+        $null = Update-FactoryCiSkippedEntries -Entries $journal.entries -Config $Config
         $blocking = @($journal.entries | Where-Object { @(Get-FactoryCiUnacknowledgedFailures $_).Count -gt 0 })
         return [pscustomobject]@{
             blocked = $blocking.Count -gt 0; error = ""; entries = @($journal.entries)
@@ -65,6 +67,45 @@ function Get-FactoryCiStatus {
             entries = @(); blocking = @(); path = Get-FactoryCiPath $Context
         }
     }
+}
+
+function Get-FactoryCiConfig {
+    param($Context, $Config = $null)
+    if ($null -eq $Config -and $null -ne $Context.PSObject.Properties['configPath'] -and
+        (Test-Path -LiteralPath ([string]$Context.configPath) -PathType Leaf)) {
+        return Read-FactoryJson -Path ([string]$Context.configPath)
+    }
+    return $Config
+}
+
+function Get-FactoryCiBranchPolicy {
+    param($Config, [string]$Branch)
+    $settings = Get-FactoryNestedValue $Config 'ciMonitoring'
+    $configured = $null -ne $settings -and $null -ne $settings.PSObject.Properties['requireSuccessfulRunOn'] -and
+        $null -ne $settings.requireSuccessfulRunOn
+    $required = if ($configured) { @($settings.requireSuccessfulRunOn) } else { @() }
+    return [pscustomobject]@{
+        configured = $configured
+        requireSuccess = @($required | Where-Object { $Branch -clike [string]$_ }).Count -gt 0
+    }
+}
+
+function Update-FactoryCiSkippedEntries {
+    param([object[]]$Entries, $Config)
+    $changed = $false
+    foreach ($entry in $Entries) {
+        # Migrate only complete, error-free evidence. Never turn an unknown
+        # snapshot or a retained failure into an exemption from CI.
+        if ($entry.status -ne 'unverified' -or $entry.error -or @($entry.failures).Count -or -not @($entry.runs).Count) { continue }
+        $policy = Get-FactoryCiBranchPolicy -Config $Config -Branch $entry.branch
+        if (-not $policy.requireSuccess -and -not @($entry.runs | Where-Object {
+            $_.status -ne 'completed' -or $_.conclusion -notin @('skipped', 'neutral')
+        }).Count) {
+            $entry.status = 'skipped'
+            $changed = $true
+        }
+    }
+    return $changed
 }
 
 function Get-FactoryCiRepository {
@@ -135,13 +176,13 @@ function Get-FactoryCiRuns {
 }
 
 function Set-FactoryCiObservation {
-    param($Entry, $Observation, [string]$ErrorText = "", [int]$MaxObservationAttempts = 5)
+    param($Entry, $Observation, [string]$ErrorText = "", [int]$MaxObservationAttempts = 5, $Config = $null)
     $Entry.lastPollAt = Get-FactoryUtcTimestamp
     if ($ErrorText) {
         $failures = [int](Get-FactoryNestedValue $Entry 'observationFailures' 0) + 1
         Set-FactoryProperty -Target $Entry -Name 'observationFailures' -Value $failures
         if (@($Entry.failures).Count) { $Entry.status = 'failed' }
-        elseif ($Entry.status -notin @('passed', 'unverified')) {
+        elseif ($Entry.status -notin @('passed', 'skipped', 'unverified')) {
             $Entry.status = if ($failures -ge $MaxObservationAttempts) { 'unverified' } else { 'pending' }
         }
         $Entry.error = $ErrorText
@@ -190,11 +231,15 @@ function Set-FactoryCiObservation {
     $Entry.runs = @($previousRuns.Values | Sort-Object id)
     $missingRuns = @($Entry.runs | Where-Object { $_.id -notin @($runs | ForEach-Object { [string]$_.id }) }).Count -gt 0
     $Entry.error = if (-not $Observation.complete -or $staleSnapshot -or $missingRuns) { 'Incomplete or stale Actions snapshot; CI is unverified.' } else { '' }
+    $policy = Get-FactoryCiBranchPolicy -Config $Config -Branch $Entry.branch
     $Entry.status = if ($Entry.failures.Count) { 'failed' }
         elseif ($Entry.error) { 'unknown' }
+        elseif (-not $runs.Count -and $policy.configured -and -not $policy.requireSuccess) { 'skipped' }
         elseif (-not $runs.Count -or @($runs | Where-Object { $_.status -ne 'completed' }).Count) { 'pending' }
-        elseif (-not @($runs | Where-Object { $_.conclusion -eq 'success' }).Count -or
-            @($runs | Where-Object { $_.conclusion -notin @('success', 'skipped') }).Count) { 'unverified' }
+        elseif (@($runs | Where-Object { $_.conclusion -notin @('success', 'skipped', 'neutral') }).Count) { 'unverified' }
+        elseif (-not @($runs | Where-Object { $_.conclusion -eq 'success' }).Count) {
+            if ($policy.requireSuccess) { 'unverified' } else { 'skipped' }
+        }
         else { 'passed' }
 }
 
@@ -211,7 +256,7 @@ function Get-FactoryCiDueEntries {
         $lastPollAtUtc = ConvertTo-FactoryUtcDateTime -Value $entry.lastPollAt -AllowNull
         $ageDays = ($NowUtc.ToUniversalTime() - $publishedAtUtc).TotalDays
         $unresolved = @(Get-FactoryCiUnacknowledgedFailures $entry).Count -gt 0
-        $interval = if ($entry.status -in @('passed', 'unverified')) { 300 } else { 30 }
+        $interval = if ($entry.status -in @('passed', 'skipped', 'unverified')) { 300 } else { 30 }
         $pollDue = $null -eq $lastPollAtUtc -or
             ($NowUtc.ToUniversalTime() - $lastPollAtUtc).TotalSeconds -ge $interval
         if (($ageDays -le 7 -or $unresolved) -and $pollDue) {
@@ -231,7 +276,15 @@ function Sync-FactoryPublicationCi {
     try { $pollMutex = Enter-FactoryMutex -ProjectKey "$($Context.projectKey)-ci-poll" -TimeoutMilliseconds 0 }
     catch { return Get-FactoryCiStatus $Context }
     try {
-        $snapshot = Get-FactoryCiStatus $Context
+        $Config = Get-FactoryCiConfig -Context $Context -Config $Config
+        $mutex = Enter-FactoryMutex -ProjectKey "$($Context.projectKey)-ci"
+        try {
+            $journal = Read-FactoryCiJournal $Context
+            if (Update-FactoryCiSkippedEntries -Entries $journal.entries -Config $Config) {
+                Write-FactoryJsonAtomic -Path (Get-FactoryCiPath $Context) -Value $journal
+            }
+        } finally { Exit-FactoryMutex $mutex }
+        $snapshot = Get-FactoryCiStatus -Context $Context -Config $Config
         if ($snapshot.error -or -not $snapshot.entries.Count) { return $snapshot }
         $settings = Get-FactoryCiPollingSettings -Context $Context -Config $Config
         $now = [DateTime]::UtcNow
@@ -248,11 +301,11 @@ function Sync-FactoryPublicationCi {
                 $journal = Read-FactoryCiJournal $Context
                 $current = @($journal.entries | Where-Object { $_.key -ceq $entry.key })
                 if ($current.Count -ne 1) { throw 'CI publication disappeared during observation.' }
-                Set-FactoryCiObservation -Entry $current[0] -Observation $observation -ErrorText $pollError -MaxObservationAttempts $settings.maxObservationAttempts
+                Set-FactoryCiObservation -Entry $current[0] -Observation $observation -ErrorText $pollError -MaxObservationAttempts $settings.maxObservationAttempts -Config $Config
                 Write-FactoryJsonAtomic -Path (Get-FactoryCiPath $Context) -Value $journal
             } finally { Exit-FactoryMutex $mutex }
         }
-        return Get-FactoryCiStatus $Context
+        return Get-FactoryCiStatus -Context $Context -Config $Config
     } catch {
         $status = Get-FactoryCiStatus $Context
         $status.error = "CI observation unavailable: $($_.Exception.Message)"
@@ -284,8 +337,8 @@ function Confirm-FactoryCiFailure {
 }
 
 function Get-FactoryCiAttentionEvents {
-    param($Context)
-    $status = Get-FactoryCiStatus $Context
+    param($Context, $Config = $null, $Status = $null)
+    $status = if ($null -ne $Status) { $Status } else { Get-FactoryCiStatus -Context $Context -Config $Config }
     if ($status.error) {
         [pscustomobject]@{ kind = 'ci-monitor'; taskId = $null; title = 'Publication CI'; status = 'unknown'
             reason = $status.error; command = 'factory ci'; aiActionable = $true; humanDecision = $false }
@@ -293,6 +346,7 @@ function Get-FactoryCiAttentionEvents {
     foreach ($entry in $status.entries) {
         $failures = @(Get-FactoryCiUnacknowledgedFailures $entry)
         if (-not $failures.Count -and [string]$entry.status -ne 'unverified') { continue }
+        if (-not $failures.Count -and ([DateTime]::UtcNow - (ConvertTo-FactoryUtcDateTime $entry.publishedAt)).TotalDays -gt 7) { continue }
         $reason = if ($failures.Count) {
             "Publications blocked: $($entry.branch) $($entry.sha). " +
             (($failures | ForEach-Object { "$($_.name): $($_.conclusion) (attempt $($_.attempt)) $($_.url)" }) -join '; ')

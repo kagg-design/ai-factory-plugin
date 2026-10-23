@@ -547,11 +547,12 @@ function Add-CliCiLines {
     $pending = @($Ci.entries | Where-Object { $_.status -eq 'pending' }).Count
     $failed = @($Ci.entries | Where-Object { $_.failures.Count -gt 0 }).Count
     $passed = @($Ci.entries | Where-Object { $_.status -eq 'passed' }).Count
+    $skippedCount = @($Ci.entries | Where-Object { $_.status -eq 'skipped' }).Count
     $unknown = @($Ci.entries | Where-Object { $_.status -in @('unknown', 'unverified') }).Count
     $gate = if ($Ci.blocked) { 'PUBLICATIONS BLOCKED' } else { 'publication gate open' }
-    $Lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) CI $($script:Tree.Horizontal) pending $pending; passed $passed; failed $failed; unverified $unknown; $gate")
+    $Lines.Add("$($script:Tree.Branch)$($script:Tree.Horizontal) CI $($script:Tree.Horizontal) pending $pending; passed $passed; skipped $skippedCount; failed $failed; unverified $unknown; $gate")
     if ($Ci.error) { Add-CliWrappedLine -Lines $Lines -FirstPrefix "$($script:Tree.Vertical)  " -ContinuationPrefix "$($script:Tree.Vertical)  " -Text (ConvertTo-CliLine $Ci.error) }
-    $rows = @($Ci.entries | Where-Object { $Detail -or $_.status -ne 'passed' } |
+    $rows = @($Ci.entries | Where-Object { $Detail -or $_.status -notin @('passed', 'skipped') } |
         Sort-Object @{ Expression = { @(Get-FactoryCiUnacknowledgedFailures $_).Count }; Descending = $true }, publishedAt -Descending |
         Select-Object -First $(if ($Detail) { 50 } else { 3 }))
     foreach ($entry in $rows) {

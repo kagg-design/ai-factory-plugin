@@ -17,6 +17,9 @@ function New-FactoryAttentionState {
         version = 1
         revision = 0
         activeKeys = @()
+        ciActiveKeys = @()
+        ciSeenKeys = @()
+        ciNotifiedKeys = @()
         events = @()
         waitAcknowledgedRevision = 0
         orchestratorAcknowledgedRevision = 0
@@ -50,7 +53,6 @@ function Sync-FactoryAttentionState {
     )
 
     . (Join-Path $PSScriptRoot "publication-ci.ps1")
-    $ciEvents = @(Get-FactoryCiAttentionEvents -Context $Context)
     $path = Get-FactoryAttentionPath -Context $Context
     $mutex = Enter-FactoryMutex -ProjectKey "$([string]$Context.projectKey)-attention"
     try {
@@ -59,6 +61,10 @@ function Sync-FactoryAttentionState {
         } else { New-FactoryAttentionState }
         Add-MissingFactoryProperties -Target $attention -Defaults (New-FactoryAttentionState)
 
+        # Read while owning the scan lock, so an older source snapshot cannot
+        # replace a newer scan. A missing/empty journal is not proof of recovery.
+        $ciStatus = Get-FactoryCiStatus -Context $Context -Config $Config
+        $ciEvents = @(Get-FactoryCiAttentionEvents -Context $Context -Status $ciStatus)
         . (Join-Path $PSScriptRoot 'rock-common.ps1')
         try { $rockEvents = @(Get-FactoryRockAttentionEvents -Context $Context -Config $Config) }
         catch {
@@ -67,12 +73,35 @@ function Sync-FactoryAttentionState {
         $currentEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + $ciEvents + $rockEvents
         $previousActive = @((Get-FactoryNestedValue -Target $attention -Name "activeKeys" -Default @()) | ForEach-Object { [string]$_ })
         $currentKeys = New-Object Collections.Generic.List[string]
+        $ciKeys = New-Object 'Collections.Generic.HashSet[string]'
+        $ciSeen = New-Object 'Collections.Generic.HashSet[string]'
+        foreach ($key in $attention.ciSeenKeys) { $null = $ciSeen.Add([string]$key) }
+        $ciNotified = New-Object 'Collections.Generic.HashSet[string]'
+        foreach ($key in $attention.ciNotifiedKeys) { $null = $ciNotified.Add([string]$key) }
+        $notifiedThrough = [Math]::Max([long]$attention.waitAcknowledgedRevision, [long]$attention.orchestratorAcknowledgedRevision)
         $journal = New-Object Collections.Generic.List[object]
-        foreach ($saved in @((Get-FactoryNestedValue -Target $attention -Name "events" -Default @()))) { $journal.Add($saved) }
+        foreach ($saved in @((Get-FactoryNestedValue -Target $attention -Name "events" -Default @()))) {
+            $journal.Add($saved)
+            if ($saved.kind -eq 'publication-ci') {
+                $null = $ciSeen.Add([string]$saved.key)
+                if ($previousActive -contains [string]$saved.key) { $null = $ciKeys.Add([string]$saved.key) }
+                if ($saved.status -eq 'unverified' -and [long]$saved.revision -le $notifiedThrough) {
+                    $null = $ciNotified.Add([string]$saved.key)
+                }
+            }
+        }
+        if ($ciStatus.error -or -not @($ciStatus.entries).Count) {
+            foreach ($key in $attention.ciActiveKeys) { $null = $ciKeys.Add([string]$key) }
+            foreach ($key in $ciKeys) { $currentKeys.Add($key) }
+        } else { $ciKeys.Clear() }
         $revision = [long](Get-FactoryNestedValue -Target $attention -Name "revision" -Default 0)
         foreach ($event in $currentEvents) {
             $key = Get-FactoryAttentionEventKey -Event $event
             $currentKeys.Add($key)
+            if ($event.kind -eq 'publication-ci') {
+                $null = $ciKeys.Add($key)
+                if (-not $ciSeen.Add($key)) { continue }
+            }
             if ($previousActive -contains $key) { continue }
             $revision++
             $journal.Add([pscustomobject][ordered]@{
@@ -93,6 +122,18 @@ function Sync-FactoryAttentionState {
             })
         }
 
+        # An unverified publication is one notification across manual wait and
+        # bridge consumers, even if its outcome briefly disappears and returns.
+        $eligibleUnverified = New-Object 'Collections.Generic.HashSet[string]'
+        foreach ($saved in $journal) {
+            if ($saved.kind -ne 'publication-ci') { continue }
+            $eligible = $ciKeys.Contains([string]$saved.key)
+            if ($saved.status -eq 'unverified') {
+                $eligible = $eligible -and -not $ciNotified.Contains([string]$saved.key) -and $eligibleUnverified.Add([string]$saved.key)
+            }
+            Set-FactoryProperty $saved 'aiActionable' $eligible
+            Set-FactoryProperty $saved 'includeInDefaultWait' $eligible
+        }
         if ($journal.Count -gt 1024) {
             $trimmed = @($journal.ToArray() | Select-Object -Last 1024)
             $journal = New-Object Collections.Generic.List[object]
@@ -102,6 +143,9 @@ function Sync-FactoryAttentionState {
         Set-FactoryProperty -Target $attention -Name "version" -Value 1
         Set-FactoryProperty -Target $attention -Name "revision" -Value $revision
         Set-FactoryProperty -Target $attention -Name "activeKeys" -Value @($currentKeys.ToArray())
+        Set-FactoryProperty -Target $attention -Name "ciActiveKeys" -Value @($ciKeys | ForEach-Object { $_ })
+        Set-FactoryProperty -Target $attention -Name "ciSeenKeys" -Value @($ciSeen | ForEach-Object { $_ })
+        Set-FactoryProperty -Target $attention -Name "ciNotifiedKeys" -Value @($ciNotified | ForEach-Object { $_ })
         Set-FactoryProperty -Target $attention -Name "events" -Value @($journal.ToArray())
         Set-FactoryProperty -Target $attention -Name "lastScanAt" -Value $now
         Set-FactoryProperty -Target $attention -Name "updatedAt" -Value $now
@@ -109,6 +153,20 @@ function Sync-FactoryAttentionState {
         return $attention
     } finally {
         Exit-FactoryMutex -Mutex $mutex
+    }
+}
+
+function Confirm-FactoryClaudeAttentionClaim {
+    param($Attention, [string]$SessionId, [DateTime]$HookStartedAtUtc, [string]$AcknowledgedAt)
+    $claim = $Attention.claudeClaim
+    $delivered = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue $claim 'deliveredAt')
+    # A Stop that started before delivery can still be running as the consumer
+    # delivers. Only a later completed turn in the same session may acknowledge.
+    if ($null -ne $claim -and [string]$claim.status -eq 'delivered' -and
+        [string]$claim.sessionId -eq $SessionId -and $delivered.success -and
+        $delivered.value -lt $HookStartedAtUtc.ToUniversalTime()) {
+        Set-FactoryProperty $claim 'status' 'acknowledged'
+        Set-FactoryProperty $claim 'acknowledgedAt' $AcknowledgedAt
     }
 }
 

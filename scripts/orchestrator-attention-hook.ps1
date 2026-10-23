@@ -48,14 +48,8 @@ try {
     $hostProcess = Get-FactoryClaudeHookHostProcess
     $attention = Update-FactoryAttentionRecord -Context $context -Mutator {
         param($record)
-        $claim = $record.claudeClaim
-        $claimTime = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $claim -Name "deliveredAt")
-        if ($eventName -eq "Stop" -and $null -ne $claim -and
-            [bool](Get-FactoryNestedValue -Target $inputJson -Name "stop_hook_active" -Default $false) -and
-            $claimTime.success -and $claimTime.value -lt $hookStartedAtUtc -and
-            [string]$claim.sessionId -eq $sessionId -and [string]$claim.status -eq "delivered") {
-            Set-FactoryProperty -Target $claim -Name "status" -Value "acknowledged"
-            Set-FactoryProperty -Target $claim -Name "acknowledgedAt" -Value $startedAt
+        if ($eventName -eq "Stop") {
+            Confirm-FactoryClaudeAttentionClaim -Attention $record -SessionId $sessionId -HookStartedAtUtc $hookStartedAtUtc -AcknowledgedAt $startedAt
         }
         if (-not (Test-FactoryClaudeAttentionConsumer -Consumer $record.claudeConsumer)) {
             Set-FactoryProperty -Target $record -Name "claudeConsumer" -Value ([pscustomobject]@{

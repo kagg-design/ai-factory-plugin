@@ -395,7 +395,9 @@ Add-DoctorCheck -Name "runnableNativeWork" -Passed $true -Severity "info" -Detai
 
 $claudeHealth = Get-FactoryClaudeAttentionHealth -Context $context -Config $config
 if ($claudeHealth.enabled) {
-    $consumerDetail = if ($claudeHealth.alive) { $claudeHealth.consumer | ConvertTo-Json -Compress } else { "No live consumer. Start/restart the Claude orchestrator to re-arm delivery." }
+    $consumerDetail = if ($claudeHealth.needsAction) { $claudeHealth.reason }
+        elseif ($claudeHealth.alive) { $claudeHealth.consumer | ConvertTo-Json -Compress }
+        else { "No live consumer. Start/restart the Claude orchestrator to re-arm delivery." }
     Add-DoctorCheck -Name "claudeAttentionConsumer" -Passed (-not $claudeHealth.needsAction) -Severity "warning" -Detail $consumerDetail
 }
 

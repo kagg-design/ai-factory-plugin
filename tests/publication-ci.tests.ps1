@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PluginRoot 'scripts/attention-state.ps1')
 $ciTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('factory-ci-tests-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $ciTestRoot
+$savedCiFactoryHome = $env:CLAUDE_FACTORY_HOME
+$env:CLAUDE_FACTORY_HOME = Join-Path $ciTestRoot 'runtime'
 $ciContext = [pscustomobject]@{ projectKey = ('ci-test-' + [Guid]::NewGuid().ToString('N')); projectData = $ciTestRoot; repositoryRoot = $ciTestRoot }
 $script:CiAssertions = 0
 $originalReader = $null
@@ -41,7 +43,22 @@ try {
     Assert-Ci ($skipEntry.status -eq 'passed' -and @($skipEntry.runs | Where-Object { $_.conclusion -eq 'skipped' }).Count -eq 1) 'A skipped companion workflow hid successful deploy CI or lost skip evidence.'
     $skipEntry.runs = @()
     Set-FactoryCiObservation $skipEntry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha skipped)) })
-    Assert-Ci ($skipEntry.status -eq 'unverified') 'An entirely skipped CI was labelled successful.'
+    Assert-Ci ($skipEntry.status -eq 'skipped') 'An entirely skipped CI remained actionable.'
+    $skipEntry.runs = @()
+    Set-FactoryCiObservation $skipEntry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha neutral)) })
+    Assert-Ci ($skipEntry.status -eq 'skipped') 'Neutral-only CI remained actionable.'
+    $requiredConfig = [pscustomobject]@{ ciMonitoring = [pscustomobject]@{ requireSuccessfulRunOn = @('develop') } }
+    Set-FactoryCiObservation $skipEntry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha neutral)) }) -Config $requiredConfig
+    Assert-Ci ($skipEntry.status -eq 'unverified') 'An explicitly required success was waived.'
+    $optionalConfig = [pscustomobject]@{ ciMonitoring = [pscustomobject]@{ requireSuccessfulRunOn = @('master', 'release/*') } }
+    $skipEntry.runs = @()
+    Set-FactoryCiObservation $skipEntry ([pscustomobject]@{ complete = $true; runs = @() }) -Config $optionalConfig
+    Assert-Ci ($skipEntry.status -eq 'skipped') 'A branch with no required CI stayed pending without workflows.'
+    Assert-Ci ((Get-FactoryCiBranchPolicy $optionalConfig 'release/1').requireSuccess) 'Required branch patterns were ignored.'
+    $emptyPolicy = [pscustomobject]@{ ciMonitoring = [pscustomobject]@{ requireSuccessfulRunOn = @() } }
+    Assert-Ci ((Get-FactoryCiBranchPolicy $emptyPolicy 'develop').configured) 'An explicit empty required-branch list was lost.'
+    Set-FactoryCiObservation $skipEntry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha failure)) }) -Config $optionalConfig
+    Assert-Ci ($skipEntry.status -eq 'failed') 'A no-required-CI branch hid a known failure.'
     Set-FactoryCiObservation $entry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $nextSha failure)) })
     Assert-Ci ($entry.failures.Count -eq 0) 'Unrelated SHA affected the gate.'
     Set-FactoryCiObservation $entry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha failure 1 '10' master)) })
@@ -56,6 +73,18 @@ try {
     $again = Sync-FactoryAttentionState -Context $ciContext -State $fakeState -Config ([pscustomobject]@{})
     Assert-Ci ($attention.revision -eq $again.revision -and $again.events.Count -eq 1) 'Unchanged CI failure spammed attention.'
     Assert-Ci ($again.events[0].aiActionable) 'CI failure was not visible to the orchestrator.'
+    # A transient unreadable, missing, or empty source cannot resolve CI keys.
+    $failureKey = $again.events[0].key
+    foreach ($sourceState in @('invalid', 'missing', 'empty')) {
+        if ($sourceState -eq 'invalid') { Write-FactoryJsonAtomic -Path (Get-FactoryCiPath $ciContext) -Value ([pscustomobject]@{ version = 1 }) }
+        elseif ($sourceState -eq 'missing') { Remove-Item -LiteralPath (Get-FactoryCiPath $ciContext) }
+        else { Save-CiFixture ([pscustomobject]@{ version = 1; entries = @() }) }
+        $gap = Sync-FactoryAttentionState -Context $ciContext -State $fakeState -Config ([pscustomobject]@{})
+        Assert-Ci ($gap.activeKeys -contains $failureKey) "$sourceState source dropped a known CI key."
+        Save-CiFixture $journal
+        $recovered = Sync-FactoryAttentionState -Context $ciContext -State $fakeState -Config ([pscustomobject]@{})
+        Assert-Ci (@($recovered.events | Where-Object kind -eq 'publication-ci').Count -eq 1) "$sourceState source recovery replayed CI."
+    }
     Set-FactoryCiObservation -Entry $entry -Observation $null -ErrorText 'Authentication expired'
     Assert-Ci ($entry.status -eq 'failed' -and $entry.failures.Count -eq 1) 'Auth error erased known failure.'
     Set-FactoryCiObservation $entry ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $sha '' 2)) })
@@ -195,10 +224,77 @@ try {
         Save-CiFixture $timeoutJournal
         $secondUnverified = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
         Assert-Ci ($firstUnverified.revision -eq $secondUnverified.revision) 'Changing timeout wording replayed one unverified outcome.'
+        $unverifiedKey = @($secondUnverified.events | Where-Object status -eq 'unverified')[-1].key
+        Assert-Ci (@(Get-FactoryClaudeDeliverableEvents $secondUnverified | Where-Object key -eq $unverifiedKey).Count -eq 1) 'Unverified outcome was not initially deliverable.'
+        $timeoutJournal.entries[0].status = 'pending'; Save-CiFixture $timeoutJournal
+        $null = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        $timeoutJournal.entries[0].status = 'unverified'; Save-CiFixture $timeoutJournal
+        $beforeDelivery = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($beforeDelivery.revision -eq $secondUnverified.revision -and
+            @(Get-FactoryClaudeDeliverableEvents $beforeDelivery | Where-Object key -eq $unverifiedKey).Count -eq 1) 'A temporary gap lost an undelivered unverified notification.'
+        $null = Update-FactoryAttentionRecord -Context $ciContext -Mutator {
+            param($record)
+            $record.orchestratorAcknowledgedRevision = $record.revision
+        }
+        $delivered = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci (@($delivered.events | Where-Object { $_.key -eq $unverifiedKey -and $_.includeInDefaultWait }).Count -eq 0) 'A delivered unverified outcome remained in default wait.'
+        Assert-Ci (@(Get-FactoryClaudeDeliverableEvents $delivered).Count -eq 0) 'A delivered unverified outcome rewoke Claude.'
+        # Upgrade an old journal that already contains repeated revisions for
+        # the same delivered identity. None of those duplicates may wake again.
+        $null = Update-FactoryAttentionRecord -Context $ciContext -Mutator {
+            param($record)
+            $duplicate = @($record.events | Where-Object key -eq $unverifiedKey)[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $record.revision++
+            $duplicate.revision = $record.revision
+            $record.events = @($record.events) + @($duplicate)
+        }
+        $delivered = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci (@($delivered.events | Where-Object { $_.key -eq $unverifiedKey -and ($_.includeInDefaultWait -or $_.aiActionable) }).Count -eq 0) 'An old duplicate revision replayed a delivered identity.'
+        $timeoutJournal.entries[0].status = 'pending'; Save-CiFixture $timeoutJournal
+        $null = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        $timeoutJournal.entries[0].status = 'unverified'; Save-CiFixture $timeoutJournal
+        $returned = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($returned.revision -eq $delivered.revision) 'A temporary pending outcome re-raised an unverified publication.'
+        $null = Update-FactoryAttentionRecord -Context $ciContext -Mutator { param($record) $record.events = @() }
+        $trimmed = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($trimmed.revision -eq $returned.revision) 'Trimming attention history forgot a CI notification identity.'
+        Set-FactoryCiObservation $timeoutJournal.entries[0] ([pscustomobject]@{ complete = $true; runs = @((New-CiRun $env:FACTORY_FAKE_GH_SHA failure)) })
+        Save-CiFixture $timeoutJournal
+        $red = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($red.revision -eq $returned.revision + 1 -and @(Get-FactoryClaudeDeliverableEvents $red).Count -eq 1) 'A new failure did not wake after an unverified notification.'
+        Register-FactoryCiPublication -Context $ciContext -Task $task -Slug 'fixture/project' -Branch develop -Sha ('f' * 40)
+        $newPublication = Read-FactoryCiJournal $ciContext
+        $newPublication.entries[1].status = 'unverified'
+        Save-CiFixture $newPublication
+        $newShaAttention = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci ($newShaAttention.revision -eq $red.revision + 1) 'A new unverified SHA reused an older publication notification.'
+        $null = Update-FactoryAttentionRecord -Context $ciContext -Mutator { param($record) $record.waitAcknowledgedRevision = $record.revision }
+        $manuallyDelivered = Sync-FactoryAttentionState -Context $ciContext -State $attentionState -Config ([pscustomobject]@{})
+        Assert-Ci (@($manuallyDelivered.events | Where-Object { $_.status -eq 'unverified' -and $_.includeInDefaultWait }).Count -eq 0) 'Manual wait delivery left unverified notifications actionable.'
+        $timeoutJournal.entries[0].failures = @(); $timeoutJournal.entries[0].runs = @()
+        $timeoutJournal.entries[0].status = 'unverified'
+        $timeoutJournal.entries[0].publishedAt = [DateTime]::UtcNow.AddDays(-8).ToString('o')
+        Save-CiFixture $timeoutJournal
+        Assert-Ci (@(Get-FactoryCiAttentionEvents $ciContext).Count -eq 0) 'An expired unverified publication still produced attention.'
     } finally {
         $env:PATH = $savedPath
         Remove-Item Env:\FACTORY_FAKE_GH_MODE,Env:\FACTORY_FAKE_GH_SHA,Env:\FACTORY_FAKE_GH_BRANCH -ErrorAction SilentlyContinue
     }
+
+    # Cached skipped-only evidence migrates even after its polling window,
+    # persists once, and never needs a GitHub read or an operator journal edit.
+    $migration = Read-FactoryCiJournal $ciContext
+    $legacy = $migration.entries[0]
+    $legacy.status = 'unverified'; $legacy.error = ''
+    $legacy.runs = @([pscustomobject]@{ id = '10'; attempt = 1; status = 'completed'; conclusion = 'skipped'; name = 'CI' })
+    Save-CiFixture $migration
+    Assert-Ci ((Get-FactoryCiStatus $ciContext).entries[0].status -eq 'skipped') 'Legacy skipped runs still produced attention before polling.'
+    Assert-Ci (@(Get-FactoryCiAttentionEvents $ciContext).Count -eq 0) 'Legacy skipped runs still raised an edge.'
+    $migrated = Sync-FactoryPublicationCi $ciContext
+    Assert-Ci ($migrated.entries[0].status -eq 'skipped' -and (Read-FactoryCiJournal $ciContext).entries[0].status -eq 'skipped') 'Skipped migration was not persisted outside the polling window.'
+    $migrationText = [IO.File]::ReadAllText((Get-FactoryCiPath $ciContext))
+    $null = Sync-FactoryPublicationCi $ciContext
+    Assert-Ci ([IO.File]::ReadAllText((Get-FactoryCiPath $ciContext)) -ceq $migrationText) 'Skipped migration rewrote the journal repeatedly.'
 
     # Native command timeout is opt-in; regular callers retain their behavior.
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -223,6 +319,7 @@ try {
     Assert-Ci ($launcher.Contains('verificationMode = "targeted"') -and -not $launcher.Contains('fullTestCommands =')) 'Worker payload still inherits the integration suite.'
     Write-Output "Publication CI tests passed ($script:CiAssertions assertions)."
 } finally {
+    $env:CLAUDE_FACTORY_HOME = $savedCiFactoryHome
     if ($originalReader) { Set-Item Function:Get-FactoryCiRuns -Value $originalReader }
     if ($originalNative) { Set-Item Function:Invoke-FactoryNativeProcess -Value $originalNative }
     # Only this test's newly created, explicitly resolved temporary directory.
