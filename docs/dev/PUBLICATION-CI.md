@@ -53,21 +53,48 @@ A successful rerun of the same failed run, on that exact SHA, clears its
 failure. A different SHA/workflow success, a pending/cancelled rerun, or an API
 error cannot clear known red evidence. Older API attempts cannot roll back
 the recorded attempt or reuse an acknowledgement of an earlier failure.
-An entirely skipped set, cancelled runs, or neutral results are unverified,
-not green. When at least one workflow succeeds and its only companions are
-skipped workflows, the aggregate passes and detail output explicitly counts
-the skips. This covers repositories where standalone CI stands aside because
-the deploy workflow invokes CI. A passed workflow is not a claim that every
-optional job/test ran. Authentication errors and timeouts leave a new entry
+An entirely skipped or neutral completed run set has status `skipped` and
+does not request attention. When at least one workflow succeeds and its only
+companions are skipped or neutral, the aggregate passes. Detail output retains
+the run conclusions. Cancelled runs remain unverified. A passed workflow is not
+a claim that every optional job/test ran.
+
+Private `ciMonitoring.requireSuccessfulRunOn` defaults to `null`: completed
+skipped/neutral workflows are quiet, while no visible workflow remains pending.
+To declare branches that require a successful run, set an array of branch names
+or PowerShell wildcard patterns, for example:
+
+```json
+"ciMonitoring": {
+  "enabled": true,
+  "requireSuccessfulRunOn": ["master", "release/*"]
+}
+```
+
+With this policy, develop has no required CI: an empty complete snapshot or
+skipped/neutral-only set is `skipped`. On master and release branches, a
+skipped/neutral-only set is `unverified`; no visible run remains pending.
+An empty array declares no required CI on any branch. Running workflows still
+remain pending, and known failures still block publication on every branch.
+This setting describes Actions verification; it does not verify external
+deployments such as Buddy.
+
+Authentication errors and timeouts leave a new entry
 pending until the configured attempt limit, then mark it unverified. Truncated
 snapshots (more than 100 matching runs), missing known runs, or stale attempts
 remain unverified and visible. These conditions do not create
 a new failure block, but preserve existing ones. An unreadable/corrupt journal
 blocks publications instead of resetting history.
 
-An unverified outcome produces one `factory wait` attention edge per published
-repository, branch, and SHA. Repeated timeout messages do not wake the
-orchestrator again; a changed CI outcome can produce a new edge.
+An unverified outcome produces one attention edge per published repository,
+branch, and SHA during the seven-day observation window. After a bridge or
+default-wait delivery it stays visible in CI status but is excluded from the
+default wait and subsequent bridge delivery. Repeated timeout messages and a
+temporary pending/unknown outcome do not wake the orchestrator again. A new
+failed run attempt or a new published SHA can produce a new edge. The durable
+CI identity ledger survives attention-history trimming. A missing, unreadable,
+or empty CI journal preserves the prior active CI keys; recovery cannot turn
+the same evidence into a fresh batch. An unreadable journal still blocks pushes.
 
 Snapshots are at most every 30 seconds per unresolved entry; successful or
 otherwise terminal unverified entries are checked every five minutes. Monitoring
@@ -104,6 +131,11 @@ No task-state schema migration or runtime move is needed. Old configs default
 to monitoring future GitHub publications. `ciMonitoring.enabled: false` opts
 out of registering new pushes, but does not erase existing evidence or bypass
 known failures. Previously published tasks are not automatically backfilled.
+Existing error-free unverified entries containing only completed skipped or
+neutral runs are reclassified automatically unless their branch explicitly
+requires success. Status and attention apply this rule immediately; the next
+CI synchronization persists it once, including entries older than seven days.
+No operator journal edits or additional GitHub calls are needed for migration.
 
 Existing native schedulers load the updated reconciliation and integration
 scripts on subsequent calls, so no restart is required for those paths. Already

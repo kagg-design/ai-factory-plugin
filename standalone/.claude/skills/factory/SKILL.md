@@ -862,6 +862,21 @@ report the failing run; do not silently acknowledge, disable monitoring, add
 skip-test markers, or repair shared branches. A successful rerun of the same
 failed run clears its block; a different SHA's green run does not.
 
+Completed skipped/neutral-only Actions runs are `skipped`, with no attention
+edge. Success with skipped/neutral companions is `passed`. Private
+`ciMonitoring.requireSuccessfulRunOn` may list branch names or wildcard
+patterns, for example `["master", "release/*"]`: these branches require a
+successful run; other branches may have no Actions runs by design. An empty
+array declares no required CI; the default `null` keeps no visible runs pending
+and accepts completed skipped/neutral-only sets. Known failures block every
+branch regardless of this setting. Existing skipped-only unverified evidence
+is reclassified automatically without operator action.
+
+Unverified publications notify once per repository/branch/SHA within seven
+days, then remain visible in status without waking default waits again. Missing
+or unreadable CI scans preserve prior keys, and a recovered read does not
+re-raise old publications. New failed attempts and new SHAs can notify again.
+
 Only after explicit operator authorization to proceed despite the recorded
 failure, run `factory ci acknowledge FULL_PUBLISHED_SHA "operator reason"`.
 This audits acceptance of the currently failed run attempts (for example to
@@ -1072,11 +1087,18 @@ explicitly need human-decision notifications may use the script's
 `-IncludeOperatorApproval` switch.
 Claude orchestrators receive default-wait edges natively through SessionStart/Stop
 async rewake hooks. AI edges request action; human input and Asana questions are
-notify-only. Stop acknowledges a delivered claim durably; a restart redelivers
-an unacknowledged claim. The plugin keeps one consumer alive and re-arms it
+notify-only. Any later Stop from the same saved session acknowledges a claim
+delivered before that hook invocation, including `stop_hook_active: false`
+after an interrupted rewake. A Stop begun before delivery cannot acknowledge
+the batch. A restart redelivers an unacknowledged claim. The plugin keeps one consumer alive and re-arms it
 before its configured daily timeout. Do not run a watcher or background
 `factory wait` while a consumer is live. `factory doctor` reports its lease;
 status reports pending attention older than 60 seconds without a live consumer.
+Both status and doctor flag a delivered claim older than private
+`orchestrator.attentionClaimTimeoutSeconds` (default 300, minimum 60), even with
+a live consumer. A later completed turn recovers delivery automatically. If
+needed, exit the orchestrator TUI, then run `factory restart` from PowerShell
+to redeliver it. Elapsed time alone never acknowledges a running turn's claim.
 Verified operator replies in a waiting worker's own chat resume that same
 session without an answer file. Use `/factory continue <answer>` when the
 runtime does not expose the input source. `inSessionReply` records message ID,

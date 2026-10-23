@@ -17,9 +17,11 @@ live runtimes were not used for the checks.
   to finish first. Exiting 2 with a synthetic message then started an idle
   background turn which replied `REWAKE_CONFIRMED`, without user input.
   The initial Stop carried `stop_hook_active: false`; the rewake turn's Stop
-  carried `true`. Acknowledgement requires that flag and a claim predating
-  the hook invocation, so an initial or duplicate Stop cannot acknowledge a
-  batch whose continuation has not run yet.
+  carried `true`. The current acknowledgement rule accepts either flag value:
+  any later Stop from the same saved orchestrator session acknowledges a claim
+  delivered before that hook started. A Stop hook that started before delivery
+  cannot acknowledge it, including when its consumer later delivers a batch.
+  This allows an ordinary completed turn to recover an interrupted rewake.
 - The installed schema accepts a positive timeout without a schema maximum.
   The command runner uses the configured seconds multiplied by 1000, and the
   rewake path still enforces that timeout. The separate 60-second SessionEnd
@@ -57,6 +59,20 @@ manual-wait cursors.
 SessionStart also waits briefly for a verified identity while a Factory launch
 receipt exists, covering an initial hook that arrives before startup persists
 the conversation UUID.
+
+Delivered claims older than private `orchestrator.attentionClaimTimeoutSeconds`
+(default 300, minimum 60) are reported by both status and doctor, even when a
+consumer has a live heartbeat. A later same-session Stop acknowledges them and
+allows newer edges through without SessionStart. If the session cannot finish
+a turn, exit the orchestrator TUI and run `factory restart` in PowerShell;
+SessionStart redelivers the durable claim. Factory never acknowledges solely
+because time elapsed, so a still-running turn retains its batch.
+
+The 2026-10-23 synthetic regressions cover ordinary Stops with
+`stop_hook_active: false` after both SessionStart and Stop-path delivery,
+duplicate acknowledgement, Stops predating delivery, foreign sessions, events
+recorded after the claimed revision, and stale-claim status/doctor diagnostics
+with a live consumer. These checks use temporary repositories and runtime state.
 
 The first transport probe supplied a private runtime explicitly through its
 test hook wrapper. The native restart probe used the synthetic repository's
@@ -101,7 +117,7 @@ Final results:
   attention transport assertions, automatic/interactive rework and the
   before-resume state observation.
 - `tests/worker-chat-attention-amend.tests.ps1`: exit 0, including the isolated
-  Codex resume boundary, startup identity race, rewake-only Stop proof and
+  Codex resume boundary, startup identity race, delivery-time Stop proof and
   published-development-HEAD amend refusal.
 - Auxiliary suites in the full harness completed successfully. The final
   runtime section was rerun directly in Windows PowerShell after correcting

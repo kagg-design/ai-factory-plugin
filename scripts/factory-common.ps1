@@ -729,7 +729,7 @@ function Get-FactoryOperatorActionEvents {
             $events.Add([pscustomobject][ordered]@{
                 kind = "orchestrator-attention"; taskId = $null; title = "Claude attention consumer"; status = "stopped"
                 audience = "human"; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true
-                reason = "Deliverable attention is older than 60 seconds and no live Claude consumer exists."
+                reason = $health.reason
                 occurredAt = $health.oldestPendingAt; command = "factory restart"
             })
         }
@@ -739,7 +739,7 @@ function Get-FactoryOperatorActionEvents {
 
 function Get-FactoryClaudeAttentionHealth {
     param($Context, $Config, [DateTime]$NowUtc = [DateTime]::UtcNow)
-    $health = [pscustomobject]@{ enabled = $false; alive = $false; consumer = $null; needsAction = $false; oldestPendingAt = $null }
+    $health = [pscustomobject]@{ enabled = $false; alive = $false; consumer = $null; needsAction = $false; oldestPendingAt = $null; staleClaim = $false; reason = '' }
     if ([string](Get-FactoryNestedValue -Target $Config -Name "workerAgent" -Default "claude") -ne "claude" -or
         -not [bool](Get-FactoryNestedValue -Target (Get-FactoryNestedValue -Target $Config -Name "orchestrator") -Name "attentionBridge" -Default $true)) { return $health }
     $health.enabled = $true
@@ -755,14 +755,26 @@ function Get-FactoryClaudeAttentionHealth {
         ([bool]$_.aiActionable -or ([bool]$_.humanDecision -and [bool]$_.includeInDefaultWait))
     })
     $claim = Get-FactoryNestedValue -Target $attention -Name "claudeClaim"
-    if ($null -ne $claim -and [string]$claim.status -eq "delivered") { $pending += @($claim.events) }
+    if ($null -ne $claim -and [string]$claim.status -eq "delivered") {
+        $pending += @($claim.events)
+        $delivered = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue $claim 'deliveredAt')
+        $timeout = [Math]::Max(60, [int](Get-FactoryNestedValue (Get-FactoryNestedValue $Config 'orchestrator') 'attentionClaimTimeoutSeconds' 300))
+        if (-not $delivered.success -or ($NowUtc.ToUniversalTime() - $delivered.value).TotalSeconds -ge $timeout) {
+            $health.staleClaim = $true
+            $health.needsAction = $true
+            $health.reason = "Claude attention claim has remained delivered beyond $timeout seconds without acknowledgement. Exit the orchestrator TUI, then run factory restart in PowerShell to redeliver it."
+        }
+    }
     foreach ($event in $pending) {
         $detected = ConvertFrom-FactoryRoundtripTimestamp -Value (Get-FactoryNestedValue -Target $event -Name "detectedAt")
         if (-not $detected.success) { continue }
         if (-not $health.oldestPendingAt -or $detected.value -lt (ConvertTo-FactoryUtcDateTime $health.oldestPendingAt)) {
             $health.oldestPendingAt = ConvertTo-FactoryRoundtripTimestamp -Value $detected.value
         }
-        if (-not $health.alive -and ($NowUtc.ToUniversalTime() - $detected.value).TotalSeconds -ge 60) { $health.needsAction = $true }
+        if (-not $health.alive -and ($NowUtc.ToUniversalTime() - $detected.value).TotalSeconds -ge 60) {
+            $health.needsAction = $true
+            if (-not $health.reason) { $health.reason = 'Deliverable attention is older than 60 seconds and no live Claude consumer exists. Exit the orchestrator TUI, then run factory restart in PowerShell.' }
+        }
     }
     return $health
 }

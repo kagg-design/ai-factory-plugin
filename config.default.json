@@ -28,11 +28,13 @@
   },
   "orchestrator": {
     "attentionBridge": true,
+    "attentionClaimTimeoutSeconds": 300,
     "autoGoApprovedReviews": false
   },
   "ciMonitoring": {
     "enabled": true,
     "apiTimeoutSeconds": 15,
+    "requireSuccessfulRunOn": null,
     "pollBudgetSeconds": 20,
     "maxObservationAttempts": 5
   },

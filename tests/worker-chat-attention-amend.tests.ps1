@@ -354,14 +354,44 @@ try {
     Assert-Chat ($attention.orchestratorAcknowledgedRevision -gt 0 -and $attention.claudeClaim.status -eq 'delivered') 'Claim/cursor were not durable before waking.'
     $redelivery = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
     Assert-Chat ($redelivery.exitCode -eq 2 -and $redelivery.stdout.Contains('Redelivered: True')) 'Dead consumer claim was not redelivered on restart.'
+    $proof = Read-FactoryJson $context.attentionPath
+    $deliveryTime = ConvertTo-FactoryUtcDateTime $proof.claudeClaim.deliveredAt
+    foreach ($hookStart in @($deliveryTime.AddSeconds(-1), $deliveryTime)) {
+        Confirm-FactoryClaudeAttentionClaim $proof $orchestratorId $hookStart (Get-FactoryUtcTimestamp)
+        Assert-Chat ($proof.claudeClaim.status -eq 'delivered') 'A pre-delivery/intermediate Stop acknowledged an unhandled batch.'
+    }
+    Confirm-FactoryClaudeAttentionClaim $proof 'foreign-session' $deliveryTime.AddSeconds(1) (Get-FactoryUtcTimestamp)
+    Assert-Chat ($proof.claudeClaim.status -eq 'delivered') 'A foreign Stop acknowledged the claim.'
     $input.hook_event_name = 'Stop'
     $input.stop_hook_active = $false
     $null = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
-    Assert-Chat ((Read-FactoryJson $context.attentionPath).claudeClaim.status -eq 'delivered') 'An unrelated initial Stop acknowledged a queued rewake before its turn ran.'
+    $acknowledged = Read-FactoryJson $context.attentionPath
+    Assert-Chat ($acknowledged.claudeClaim.status -eq 'acknowledged') 'A later normal turn failed to recover an interrupted rewake claim.'
+    $ackTime = $acknowledged.claudeClaim.acknowledgedAt
+    Confirm-FactoryClaudeAttentionClaim $acknowledged $orchestratorId ([DateTime]::UtcNow) (Get-FactoryUtcTimestamp)
+    Assert-Chat ($acknowledged.claudeClaim.acknowledgedAt -eq $ackTime) 'Duplicate acknowledgement changed the receipt.'
+    # Deliver from a Stop consumer, then finish a normal same-session turn.
+    $task.error = 'Later Stop-path blocker'; Save-ChatTask $task
+    $stopDelivery = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
+    Assert-Chat ($stopDelivery.exitCode -eq 2 -and $stopDelivery.stdout.Contains('Later Stop-path blocker')) 'A later edge did not reach the re-armed Stop consumer.'
+    $through = (Read-FactoryJson $context.attentionPath).claudeClaim.throughRevision
+    $task.error = 'Newest blocker after throughRevision'; Save-ChatTask $task
+    $null = Sync-FactoryAttentionState -Context $context -State (Read-FactoryJson $context.statePath) -Config $config
+    $normalStop = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
+    Assert-Chat ($normalStop.exitCode -eq 2 -and $normalStop.stdout.Contains('Newest blocker after throughRevision')) 'Normal Stop after Stop-path delivery lost newer attention.'
+    Assert-Chat ((Read-FactoryJson $context.attentionPath).claudeClaim.throughRevision -gt $through) 'Acknowledgement swallowed an event recorded after the delivered batch.'
     $input.stop_hook_active = $true
+    $task.error = 'Newer edge for hook-continued Stop'; Save-ChatTask $task
+    $null = Sync-FactoryAttentionState -Context $context -State (Read-FactoryJson $context.statePath) -Config $config
+    $continuedStop = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
+    Assert-Chat ($continuedStop.exitCode -eq 2 -and $continuedStop.stdout.Contains('Newer edge for hook-continued Stop') -and
+        -not $continuedStop.stdout.Contains('Newest blocker after throughRevision')) 'Hook-continued Stop replayed an old batch or lost newer attention.'
     $ack = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
     $attention = Read-FactoryJson $context.attentionPath
     Assert-Chat ($attention.claudeClaim.status -eq 'acknowledged' -and -not $ack.stdout.Contains('Synthetic blocker')) 'Stop did not acknowledge, or replayed an acknowledged claim.'
+    $ackTime = $attention.claudeClaim.acknowledgedAt
+    $null = Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')
+    Assert-Chat ((Read-FactoryJson $context.attentionPath).claudeClaim.acknowledgedAt -eq $ackTime) 'Repeated true Stop acknowledged the claim twice.'
     $cursor = $attention.orchestratorAcknowledgedRevision
     $null = Invoke-ChatScript 'wait-factory.ps1' @('-Repository',$repository,'-TimeoutSeconds','1')
     Assert-Chat ((Read-FactoryJson $context.attentionPath).orchestratorAcknowledgedRevision -eq $cursor) 'Manual wait moved the orchestrator cursor.'
@@ -375,6 +405,18 @@ try {
         $record.claudeConsumer = [pscustomobject]@{ pid = $PID; processStartTimeUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'); sessionId = $orchestratorId; token = 'existing'; heartbeatAt = Get-FactoryUtcTimestamp }
     }
     Assert-Chat ((Invoke-ChatHook 'orchestrator-attention-hook.ps1' $input @('-ConsumerSeconds','1')).exitCode -eq 0) 'Second consumer was allowed.'
+    $null = Update-FactoryAttentionRecord -Context $context -Mutator {
+        param($record)
+        $record.claudeClaim.status = 'delivered'
+        $record.claudeClaim.deliveredAt = [DateTime]::UtcNow.AddMinutes(-6).ToString('o')
+    }
+    $health = Get-FactoryClaudeAttentionHealth -Context $context -Config $config
+    Assert-Chat ($health.alive -and $health.needsAction -and $health.staleClaim -and $health.reason.Contains('factory restart')) 'A live consumer masked a stale delivered claim.'
+    $status = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile','-File',(Join-Path $PluginRoot 'factory.ps1'),'status','-Repository',$repository,'-NoReconcile')
+    Assert-Chat ($status.stdout.Contains('ORCHESTRATOR ATTENTION') -and $status.stdout.Contains('factory restart')) 'Status omitted stale-claim recovery with a live consumer.'
+    $doctor = (Invoke-ChatScript 'factory-doctor.ps1' @('-Repository',$repository,'-ClaudeCommand',$fakeClaude)).stdout | ConvertFrom-Json
+    $consumerCheck = @($doctor.checks | Where-Object name -eq 'claudeAttentionConsumer')[0]
+    Assert-Chat (-not $consumerCheck.passed -and $consumerCheck.detail.Contains('factory restart')) 'Doctor reported a stale delivered claim as healthy.'
     $staleConsumer = (Read-FactoryJson $context.attentionPath).claudeConsumer
     $staleConsumer.heartbeatAt = [DateTime]::UtcNow.AddMinutes(-2).ToString('o')
     Assert-Chat (-not (Test-FactoryClaudeAttentionConsumer $staleConsumer)) 'A stale orphan consumer retained its lease.'
