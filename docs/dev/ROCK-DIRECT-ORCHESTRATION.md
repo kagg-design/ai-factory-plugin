@@ -13,6 +13,18 @@ The implementation is opt-in and ships disabled. It has not been activated on
 the live Access or Billing ROCK, and their Asana instructions are not edited.
 Local tests use synthetic Git repositories and model results.
 
+The operating contract was clarified by Igor's supplied #ai conversation on
+2026-10-23: one planning coordinator covers both ROCKs; tasks have one owner and
+cross-repository prerequisites; live-behavior changes require human approval
+before merge. Asana must retain readable milestones and human intervention from
+a phone. Machine receipts remain local. See
+`docs/tasks/TASK-rock-direct-memory-questions.md` for the agreed rollout decisions.
+The prototype still has separate per-ROCK execution contexts and does not yet
+provide joint planning, native prerequisite enforcement or browser publication
+of milestones. These remain rollout requirements before replacing the full
+two-ROCK production cycle. Isolated transport tests do not establish that the
+whole operating contract is implemented.
+
 ## Storage and identity
 
 `direct.memoryDir/<Asana epic GID>/` is shared by every participating project.

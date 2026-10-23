@@ -1,7 +1,9 @@
 [CmdletBinding()]
-param([string]$PluginRoot = (Split-Path -Parent $PSScriptRoot), [string]$BaselinePluginRoot = '')
+param([string]$PluginRoot = '', [string]$BaselinePluginRoot = '', [switch]$InjectInheritedPipe)
 $ErrorActionPreference = 'Stop'
+if (-not $PluginRoot) { $PluginRoot = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PluginRoot 'scripts\factory-common.ps1')
+. (Join-Path $PSScriptRoot 'codex-slot-fill.helpers.ps1')
 
 function Test-RockDisabledScheduler {
     param([string]$SourceRoot, [string]$Label)
@@ -13,13 +15,35 @@ function Test-RockDisabledScheduler {
     $oldHome = $env:CLAUDE_FACTORY_HOME
     $oldDelay = $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS
     $oldLog = $env:CLAUDE_FACTORY_TEST_CODEX_LOG
+    $oldRelease = $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH
     $context = $null
     try {
         $null = New-Item -ItemType Directory -Path $repository -Force
         $env:CLAUDE_FACTORY_HOME = Join-Path $fixture 'runtime'
         $env:CLAUDE_FACTORY_TEST_CODEX_LOG = Join-Path $fixture 'codex.tsv'
+        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH = Join-Path $fixture 'release'
+        if ($InjectInheritedPipe) {
+            # Mutate only the disposable plugin, restoring the exact Windows
+            # handle-inheritance defect this regression must detect.
+            $fixturePlugin = Join-Path $fixture 'plugin'
+            $null = New-Item -ItemType Directory -Path $fixturePlugin
+            foreach ($item in @('scripts', 'resources', 'config.default.json')) {
+                Copy-Item -LiteralPath (Join-Path $SourceRoot $item) -Destination $fixturePlugin -Recurse
+            }
+            $schedulerPath = Join-Path $fixturePlugin 'scripts\factory-scheduler.ps1'
+            $schedulerText = [IO.File]::ReadAllText($schedulerPath)
+            $pattern = '(?m)^(\s*)false,(\r?\n\s*CREATE_NO_WINDOW,)'
+            if ([regex]::Matches($schedulerText, $pattern).Count -ne 1) { throw 'Inherited-pipe mutation point needs updating.' }
+            [IO.File]::WriteAllText($schedulerPath, [regex]::Replace($schedulerText, $pattern, '${1}true,${2}'))
+            $workerLauncherPath = Join-Path $fixturePlugin 'scripts\DetachedWorkerProcess.cs'
+            $workerLauncher = [IO.File]::ReadAllText($workerLauncherPath)
+            $workerCall = 'CreateProcess(application, command, IntPtr.Zero, IntPtr.Zero, false,'
+            if (-not $workerLauncher.Contains($workerCall)) { throw 'Worker inheritance mutation point needs updating.' }
+            [IO.File]::WriteAllText($workerLauncherPath, $workerLauncher.Replace($workerCall, $workerCall.Replace('false,', 'true,')))
+            $SourceRoot = $fixturePlugin
+        }
         foreach ($compilerInput in @(@{source='FakeClaude.cs';output=$fakeClaude}, @{source='FakeCodex.cs';output=$fakeCodex})) {
-            $compile = "Add-Type -Path '" + (Join-Path $SourceRoot "tests\$($compilerInput.source)").Replace("'", "''") + "' -OutputAssembly '" + $compilerInput.output.Replace("'", "''") + "' -OutputType ConsoleApplication"
+            $compile = "Add-Type -Path '" + (Join-Path $PSScriptRoot $compilerInput.source).Replace("'", "''") + "' -OutputAssembly '" + $compilerInput.output.Replace("'", "''") + "' -OutputType ConsoleApplication"
             $compiled = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile','-Command',$compile) -TimeoutSeconds 60
             if ($compiled.exitCode -ne 0) { throw $compiled.output }
         }
@@ -44,21 +68,16 @@ function Test-RockDisabledScheduler {
         foreach ($index in 1..3) {
             $null = & (Join-Path $SourceRoot 'scripts\enqueue-task.ps1') -Repository $repository -LocalText "Scheduler slot $index" -StartMode auto -NoResume
         }
-        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS='30000'
+        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS=''
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        $run = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'scripts\factory-scheduler.ps1'),'-Action','tick','-Repository',$repository,'-ClaudeCommand',$fakeClaude,'-RuntimeHome',$env:CLAUDE_FACTORY_HOME) -TimeoutSeconds 180
+        $tick = (Invoke-CodexSlotFillProcess -Command powershell -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'scripts\factory-scheduler.ps1'),'-Action','tick','-Repository',$repository,'-ClaudeCommand',$fakeClaude,'-RuntimeHome',$env:CLAUDE_FACTORY_HOME)) | ConvertFrom-Json
         $timer.Stop()
-        if ($run.exitCode -ne 0) { throw $run.output }
-        $tick = $run.stdout | ConvertFrom-Json
-        if ([int]$tick.launchedCount -ne 3) { throw "Only $($tick.launchedCount) of three slots launched: $($run.stdout)" }
         $recorded = Read-FactoryJson $context.statePath
-        $live = 0
-        foreach ($task in @($recorded.tasks)) {
-            try { if ($null -ne (Get-Process -Id ([int]$task.backgroundSession.processId) -ErrorAction Stop)) { $live++ } } catch { }
-        }
-        if ($live -ne 3) { throw "The scheduler did not return while all three workers remained alive (alive: $live)." }
-        [pscustomobject]@{ label=$Label; launched=[int]$tick.launchedCount; liveWorkers=$live; seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3); original28SecondThreshold=($timer.Elapsed.TotalSeconds -lt 28) }
+        if (@($recorded.tasks).Count -ne 3) { throw 'Slot-fill fixture did not retain exactly three queued tasks.' }
+        Assert-CodexSlotFillWorkers -Tick $tick -State $recorded -TaskIds @($recorded.tasks | ForEach-Object { [string]$_.id })
+        [pscustomobject]@{ label=$Label; launched=[int]$tick.launchedCount; liveWorkers=@($recorded.tasks).Count; seconds=[Math]::Round($timer.Elapsed.TotalSeconds,3) }
     } finally {
+        if ($env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH) { [IO.File]::WriteAllText($env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH, 'release') }
         if ($null -ne $context -and (Test-Path -LiteralPath $context.statePath)) {
             foreach ($task in @((Read-FactoryJson $context.statePath).tasks)) {
                 $null = Invoke-FactoryNativeProcess -Command powershell -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'scripts\reject-task.ps1'),'-Repository',$repository,'-TaskId',[string]$task.id,'-Yes','-ClaudeCommand',$fakeClaude,'-CodexCommand',$fakeCodex) -TimeoutSeconds 60
@@ -75,10 +94,22 @@ function Test-RockDisabledScheduler {
         $env:CLAUDE_FACTORY_HOME=$oldHome
         $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS=$oldDelay
         $env:CLAUDE_FACTORY_TEST_CODEX_LOG=$oldLog
+        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH=$oldRelease
         $absolute = [IO.Path]::GetFullPath($fixture)
         $prefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\rock-scheduler-compat-'
         if ($absolute.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $absolute)) { Remove-Item -LiteralPath $absolute -Recurse -Force }
     }
+}
+if ($InjectInheritedPipe) {
+    try { Test-RockDisabledScheduler -SourceRoot $PluginRoot -Label inherited-pipe-mutant }
+    catch {
+        if ($_.Exception.Message -like 'SLOT_FILL_INHERITED_PIPE:*') {
+            Write-Host 'Inherited-pipe mutation detected after launcher exit; no worker lifetime or 28-second threshold used.'
+            return
+        }
+        throw
+    }
+    throw 'Slot-fill check failed to detect the inherited-pipe mutation.'
 }
 if ($BaselinePluginRoot) { Test-RockDisabledScheduler -SourceRoot $BaselinePluginRoot -Label baseline | ConvertTo-Json -Compress }
 Test-RockDisabledScheduler -SourceRoot $PluginRoot -Label direct-rock-disabled | ConvertTo-Json -Compress

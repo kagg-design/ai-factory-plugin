@@ -4,6 +4,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PluginRoot 'scripts\rock-actions.ps1')
 function Assert-Rock { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-RockThrows { param([scriptblock]$Code, [string]$Pattern) $caught = ''; try { & $Code | Out-Null } catch { $caught = $_.Exception.Message }; Assert-Rock ($caught -match $Pattern) "Expected '$Pattern', got '$caught'." }
+$manifest = Read-FactoryJson (Join-Path $PluginRoot 'MANIFEST.json')
+foreach ($required in @('scripts/rock-common.ps1', 'scripts/rock-actions.ps1', 'scripts/rock-control.ps1', 'scripts/rock-direct-cycle.ps1',
+    'resources/rock-direct-instructions.md', 'resources/rock-result.schema.json',
+    'tests/rock-direct.tests.ps1', 'tests/rock-scheduler-compat.tests.ps1', 'tests/codex-slot-fill.helpers.ps1')) {
+    Assert-Rock ($required -in @($manifest.files) -and (Test-Path -LiteralPath (Join-Path $PluginRoot $required) -PathType Leaf)) "Bundle omits a required ROCK file: $required"
+}
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "factory-rock-tests-$([Guid]::NewGuid().ToString('N'))"
 $oldFactoryHome = $env:CLAUDE_FACTORY_HOME
 $env:CLAUDE_FACTORY_HOME = Join-Path $testRoot 'factory'

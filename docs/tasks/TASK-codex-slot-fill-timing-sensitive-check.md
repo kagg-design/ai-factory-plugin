@@ -49,4 +49,32 @@ performed normal fixture cleanup.
 - Repeat the comparison under a quiet and a busy host before attributing changes.
 - Use only isolated fixtures and preserve all live runtime.
 
-This diagnostic report does not authorize a separate repair.
+## Repair
+
+Igor authorized repair in the Factory development chat on 2026-10-23.
+FakeCodex workers now wait on a test-owned release file, independently of cold
+startup time (with a four-minute containment ceiling). The slot-fill test keeps
+the three-launch and three-live-process assertions. Elapsed time is diagnostic.
+A test-only capture helper separately bounds process exit and pipe completion;
+it identifies a pipe held after the launcher has exited.
+
+The negative control changes `bInheritHandles` to true in both launcher boundaries
+of a disposable plugin copy. It failed with `SLOT_FILL_INHERITED_PIPE`, as required,
+then released and natively rejected its fake workers. The production launchers
+are unchanged. The full entrypoint includes this negative control.
+
+Positive comparison with the controlled worker fixture passed on both roots:
+baseline 30.667 seconds, ROCK branch 30.361 seconds, three live workers each.
+A further branch run alongside the full suite passed in 31.528 seconds. These
+are observations of host-dependent setup time, not a performance benchmark.
+
+Focused checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\rock-scheduler-compat.tests.ps1 -PluginRoot <checkout>
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\rock-scheduler-compat.tests.ps1 -PluginRoot <checkout> -InjectInheritedPipe
+```
+
+The second command succeeds only when the deliberately broken copy is detected
+with the specific inherited-pipe diagnostic. Other failures are not accepted as
+proof that the regression check works.

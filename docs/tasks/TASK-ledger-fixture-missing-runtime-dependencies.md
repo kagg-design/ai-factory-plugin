@@ -36,4 +36,14 @@ fixture-packaging failure; no evidence here establishes a production ledger faul
 - Verify no fixtures gain access to the real project state or services.
 - Preserve existing undeclared-removal, locking and recovery assertions.
 
-Repair is a separate Factory development task and requires Igor's authorization.
+## Repair
+
+Igor authorized repair in the Factory development chat on 2026-10-23.
+The fixture now copies the runtime PowerShell script package, including transitive
+dependencies, instead of maintaining an incomplete two-file list. It still patches
+only its disposable copy and retains all ledger assertions.
+
+`tests/run-tests.ps1 -LedgerOnly` passed: forced replacement race (12 initializations),
+write guards, recovery copies, legitimate rejection, and idle/busy scheduler journal
+checks. The idle measurement recorded 15 holds/minute; busy heartbeats made no
+ledger writes. The full entrypoint is being checked separately.

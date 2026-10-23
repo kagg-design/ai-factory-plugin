@@ -11,9 +11,9 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $fixturePlugin "scripts"), (Join-Path $fixturePlugin "resources"), $fixtureRepo -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $PluginRoot "config.default.json") -Destination $fixturePlugin
     Copy-Item -LiteralPath (Join-Path $PluginRoot "resources\state.template.json") -Destination (Join-Path $fixturePlugin "resources")
-    foreach ($name in @("factory-common.ps1", "project-context.ps1")) {
-        Copy-Item -LiteralPath (Join-Path $PluginRoot "scripts\$name") -Destination (Join-Path $fixturePlugin "scripts")
-    }
+    # Package runtime scripts together: common/context helpers have transitive
+    # dependencies that must also resolve in the disposable, patched plugin.
+    Copy-Item -Path (Join-Path $PluginRoot 'scripts\*.ps1') -Destination (Join-Path $fixturePlugin 'scripts')
     & git init --quiet $fixtureRepo
     if ($LASTEXITCODE -ne 0) { throw "Could not initialize ledger fixture repository." }
     $env:CLAUDE_FACTORY_HOME = Join-Path $fixtureRoot "runtime"

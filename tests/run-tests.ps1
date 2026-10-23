@@ -33,6 +33,8 @@ if (-not $RuntimeOnly) {
     }
     & (Join-Path $PSScriptRoot "state-ledger.tests.ps1") -PluginRoot $pluginRoot -NativeRace:$NativeLedgerRace
     if ($LedgerOnly) { return }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'rock-scheduler-compat.tests.ps1') -PluginRoot $pluginRoot -InjectInheritedPipe
+    if ($LASTEXITCODE -ne 0) { throw 'Codex inherited-pipe negative control failed.' }
     & (Join-Path $PSScriptRoot 'worker-result-followup.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'worker-chat-attention-amend.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'codex-session-snapshot.tests.ps1') -PluginRoot $pluginRoot
@@ -61,6 +63,7 @@ if (-not $RuntimeOnly) {
 . (Join-Path $pluginRoot "scripts\attention-state.ps1")
 . (Join-Path $pluginRoot "scripts\codex-runtime.ps1")
 . (Join-Path $pluginRoot "scripts\codex-orchestrator.ps1")
+. (Join-Path $PSScriptRoot 'codex-slot-fill.helpers.ps1')
 $testRoot = Join-Path "C:\tmp" "claude-factory-plugin-tests-$([Guid]::NewGuid().ToString('N'))"
 $repository = Join-Path $testRoot "repository"
 $remote = Join-Path $testRoot "remote.git"
@@ -4150,23 +4153,21 @@ $result = [ordered]@{
     $slotFillState.active = $true
     $slotFillState.paused = $false
     Write-FactoryTestState -Context $context -Value $slotFillState
-    $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS = "30000"
+    $savedSlotFillRelease = $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH
+    $savedSlotFillDelay = $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS
+    $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH = Join-Path $testRoot 'codex-slot-release'
+    $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS = ''
     try {
         $slotFillStopwatch = [Diagnostics.Stopwatch]::StartNew()
-        $slotFillTick = (& powershell -NoProfile -ExecutionPolicy Bypass -File $schedulerScript -Action tick -Repository $repository -ClaudeCommand $fakeClaude -RuntimeHome $runtime) | ConvertFrom-Json
+        $slotFillTick = (Invoke-CodexSlotFillProcess -Command powershell -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $schedulerScript, '-Action', 'tick', '-Repository', $repository, '-ClaudeCommand', $fakeClaude, '-RuntimeHome', $runtime)) | ConvertFrom-Json
         $slotFillStopwatch.Stop()
-        $slotFillDiagnostic = ($slotFillTick | ConvertTo-Json -Depth 20 -Compress)
-        Assert-Equal 3 ([int]$slotFillTick.launchedCount) "One scheduler cycle did not fill all three free Codex slots. Tick: $slotFillDiagnostic"
-        Assert-True ($slotFillStopwatch.Elapsed.TotalSeconds -lt 28) "Scheduler waited for a detached Codex descendant instead of returning after launcher result files. Elapsed: $([Math]::Round($slotFillStopwatch.Elapsed.TotalSeconds, 3))s."
         $slotFillRecordedState = Read-FactoryJson -Path $context.statePath
-        foreach ($slotFillTaskId in $slotFillTaskIds) {
-            $slotFillTask = Get-FactoryTask -State $slotFillRecordedState -TaskId $slotFillTaskId
-            Assert-True ($null -ne $slotFillTask.backgroundSession -and [int]$slotFillTask.backgroundSession.processId -gt 0) "Scheduler did not persist a Codex process for '$slotFillTaskId'."
-            try { $slotFillAlive = $null -ne (Get-Process -Id ([int]$slotFillTask.backgroundSession.processId) -ErrorAction Stop) } catch { $slotFillAlive = $false }
-            Assert-True $slotFillAlive "Codex worker '$slotFillTaskId' exited before the scheduler filled its peers."
-        }
+        Assert-CodexSlotFillWorkers -Tick $slotFillTick -State $slotFillRecordedState -TaskIds $slotFillTaskIds
+        Write-Host "Codex slots filled with all workers alive; elapsed=$([Math]::Round($slotFillStopwatch.Elapsed.TotalSeconds, 3))s (diagnostic only)."
     } finally {
-        Remove-Item Env:\CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS -ErrorAction SilentlyContinue
+        [IO.File]::WriteAllText($env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH, 'release')
+        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH = $savedSlotFillRelease
+        $env:CLAUDE_FACTORY_TEST_CODEX_WORKER_MILLISECONDS = $savedSlotFillDelay
         foreach ($slotFillTaskId in $slotFillTaskIds) {
             try {
                 $null = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $pluginRoot "scripts\reject-task.ps1") -Repository $repository -TaskId $slotFillTaskId -Reason "test fixture" -Yes -ClaudeCommand $fakeClaude -CodexCommand $fakeCodex) | ConvertFrom-Json

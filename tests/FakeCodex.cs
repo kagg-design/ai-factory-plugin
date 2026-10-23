@@ -259,6 +259,16 @@ public static class FakeCodex
         int workerDelay;
         if (!orchestrator && Int32.TryParse(workerDelayText, out workerDelay) && workerDelay > 0)
             System.Threading.Thread.Sleep(workerDelay);
+        var workerRelease = Environment.GetEnvironmentVariable("CLAUDE_FACTORY_TEST_CODEX_WORKER_RELEASE_PATH");
+        if (!orchestrator && !String.IsNullOrEmpty(workerRelease))
+        {
+            // Remain alive independently of cold-launch time. Tests release or
+            // natively reject these workers; this ceiling contains failed runs.
+            var deadline = DateTime.UtcNow.AddMinutes(4);
+            while (!File.Exists(workerRelease) && DateTime.UtcNow < deadline)
+                System.Threading.Thread.Sleep(50);
+            if (!File.Exists(workerRelease)) return 73;
+        }
         var outputIndex = Array.IndexOf(args, "--output-last-message");
         if (outputIndex >= 0 && outputIndex + 1 < args.Length)
             File.WriteAllText(args[outputIndex + 1], message, new UTF8Encoding(false));
