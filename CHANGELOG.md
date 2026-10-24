@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Let the shared ROCK coordinator publish through its existing Asana access
+  after affected factories approve or correct the exact proposal. Native events
+  replace an external chat publisher; fail-closed tool guards and actual readback
+  protect claims, human instructions and duplicate delivery.
+- Complete ordinary Asana `factory add` sources through the existing factory
+  orchestrator after native done and matching publication evidence. Retain local
+  worker communication and record an idempotent source completion receipt.
+
 - Add native per-repository security gates and summary-only DONE reporting,
   escaped-defect metrics and a Monday 09:00 installer. Verify Taken claims,
   isolate default-board repo routing, start fresh on re-Ready, require recorded

@@ -1,8 +1,8 @@
-# Durable intent only. The browser-capable main orchestrator performs the UI work;
-# the read-only ROCK model cannot post, set fields or acknowledge browser work.
+# Durable publication intents and receipts. A configured coordinator publication
+# phase or the legacy browser consumer delivers them; the planner stays read-only.
 function Test-FactoryRockBrowserProjection {
     param($Configuration)
-    return [bool](Get-FactoryNestedValue (Get-FactoryNestedValue $Configuration.direct 'browserProjection') 'enabled' $false)
+    return (Test-FactoryRockCoordinatorPublication $Configuration) -or [bool](Get-FactoryNestedValue (Get-FactoryNestedValue $Configuration.direct 'browserProjection') 'enabled' $false)
 }
 
 function Get-FactoryRockBrowserItems {
@@ -44,8 +44,13 @@ function Add-FactoryRockBrowserItem {
                 Write-FactoryRockJson (Join-Path $paths.outbox "$($previous.id).json") $previous
             }
         }
-        Write-FactoryRockJson $path ([ordered]@{ version = 1; id = $id; rockId = $EpicGid; kind = $kind; targetGid = $target; url = $url; marker = $marker; text = $(if ($kind -eq 'comment') { "$body`n`n$marker" } else { '' }); factoryState = $FactoryState; nativeIdentity = $NativeIdentity; sourceRunId = $SourceRunId; sourceAttempts = $SourceAttempts; sourceCommit = $SourceCommit; sourceQuestionId = $SourceQuestionId; status = 'pending'; claimId = ''; leaseUntil = ''; needsVerification = $false; attempts = 0; createdAt = Get-FactoryUtcTimestamp; publishedAt = ''; receipt = $null; error = '' })
+        $item = [pscustomobject][ordered]@{ version = 1; id = $id; rockId = $EpicGid; kind = $kind; targetGid = $target; url = $url; marker = $marker; text = $(if ($kind -eq 'comment') { "$body`n`n$marker" } else { '' }); factoryState = $FactoryState; nativeIdentity = $NativeIdentity; sourceRunId = $SourceRunId; sourceAttempts = $SourceAttempts; sourceCommit = $SourceCommit; sourceQuestionId = $SourceQuestionId; status = 'pending'; claimId = ''; leaseUntil = ''; needsVerification = $false; attempts = 0; createdAt = Get-FactoryUtcTimestamp; publishedAt = ''; receipt = $null; error = '' }
+        if (Test-FactoryRockCoordinatorPublication $Configuration) { Set-FactoryRockPublicationProposal $Configuration $item }
+        Write-FactoryRockJson $path $item
     } finally { Exit-FactoryMutex $mutex }
+    if ((Test-FactoryRockCoordinatorPublication $Configuration) -and $kind -eq 'status' -and $null -ne $item -and (Test-FactoryRockPublicationApproved $Configuration $item)) {
+        $null=Add-FactoryRockEvent $Configuration $EpicGid "publication-ready/$id/$($item.publication.revision)" @{kind='publication-ready';owner=$false;itemId=$id;revision=[int]$item.publication.revision}
+    }
     return $id
 }
 
@@ -100,11 +105,14 @@ function Invoke-FactoryRockBrowserControl {
     try {
         if ($Action -eq 'list') { return @(Get-FactoryRockBrowserItems $Configuration | Where-Object { (-not $EpicGid -or $_.rockId -ceq $EpicGid) -and $_.status -in @('pending', 'claimed', 'blocked') }) }
         if ($Action -eq 'claim') {
+            if ((Test-FactoryRockCoordinatorPublication $Configuration) -and [bool](Read-FactoryRockCoordinatorMemory $Configuration).paused) { return $null }
             $candidates = @(Get-FactoryRockBrowserItems $Configuration | Where-Object {
                 (-not $EpicGid -or $_.rockId -ceq $EpicGid) -and ($_.status -eq 'pending' -or ($_.status -eq 'claimed' -and (ConvertTo-FactoryRockDateTimeOffset $_.leaseUntil) -lt [DateTimeOffset]::UtcNow))
             })
             $item = $null
             foreach ($candidate in $candidates) {
+                if ((Test-FactoryRockCoordinatorPublication $Configuration) -and [bool](Read-FactoryRockMemory $Configuration ([string]$candidate.rockId)).paused) { continue }
+                if ((Test-FactoryRockCoordinatorPublication $Configuration) -and -not (Test-FactoryRockPublicationApproved $Configuration $candidate)) { continue }
                 if ($candidate.kind -eq 'status' -and -not (Test-FactoryRockBrowserStatusCurrent $Configuration $candidate)) {
                     $candidate.status = 'superseded'
                     Write-FactoryRockJson (Join-Path $paths.outbox "$($candidate.id).json") $candidate
@@ -126,13 +134,14 @@ function Invoke-FactoryRockBrowserControl {
         if ($id -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid browser receipt identity.' }
         $path = Join-Path $paths.outbox "$id.json"
         $item = Read-FactoryJson $path
+        if ($item.status -eq 'published' -and $Action -eq 'confirm' -and [string]$receipt.claimId -ceq [string]$item.claimId) { return $item }
+        if ($Action -eq 'confirm' -and (Test-FactoryRockCoordinatorPublication $Configuration) -and -not (Test-FactoryRockPublicationApproved $Configuration $item)) { throw 'Factory publication approvals are missing or stale.' }
         if ($Action -eq 'retry') {
             if ($item.status -ne 'blocked' -or [string]$receipt.claimId -cne [string]$item.claimId) { throw 'Only the exact blocked browser item can be retried.' }
             $item.status = 'pending'; $item.needsVerification = $true; $item.error = ''
             Write-FactoryRockJson $path $item
             return $item
         }
-        if ($item.status -eq 'published' -and $Action -eq 'confirm' -and [string]$receipt.claimId -ceq [string]$item.claimId) { return $item }
         if ($item.status -cne 'claimed' -or [string]$receipt.claimId -cne [string]$item.claimId) { throw 'Browser receipt has a stale or missing claim.' }
         if ((ConvertTo-FactoryRockDateTimeOffset $item.leaseUntil) -lt [DateTimeOffset]::UtcNow) { throw 'Browser claim expired; inspect and reclaim before acknowledging.' }
         if ($Action -eq 'discard') {

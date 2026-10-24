@@ -33,8 +33,10 @@ function Initialize-FactoryRockCoordinatorConfiguration {
     }
     foreach ($id in @($nodes.Keys)) { Visit-FactoryRockPrerequisite $id }
     $projection = Get-FactoryNestedValue $Configuration.direct 'browserProjection'
+    $publication = Get-FactoryNestedValue $Configuration.direct 'publication'
+    if ([string](Get-FactoryNestedValue $publication 'transport' 'disabled') -cnotin @('disabled','existing-rock')) { throw 'Publication transport must be disabled or existing-rock.' }
     if ([string](Get-FactoryNestedValue $projection 'consumerMode' 'orchestrator') -cnotin @('orchestrator','external')) { throw 'Browser consumerMode must be orchestrator or external.' }
-    if ([bool](Get-FactoryNestedValue $projection 'enabled' $false)) {
+    if ([bool](Get-FactoryNestedValue $projection 'enabled' $false) -and -not [bool](Get-FactoryNestedValue $publication 'enabled' $false)) {
         $consumer = [string](Get-FactoryNestedValue $projection 'consumerRepository')
         $repositories = @($Configuration.orchestrators | ForEach-Object { @((Get-FactoryNestedValue $_ 'ownedTasks' @())) } | ForEach-Object { [string]$_.repository } | Select-Object -Unique)
         if (-not $consumer -and $repositories.Count) { $consumer = $repositories[0] }
@@ -178,7 +180,7 @@ function Get-FactoryRockJointContext {
 }
 
 function Invoke-FactoryRockCoordinatorCycle {
-    param($Configuration, [string]$Epic = '', [string]$Reason = '', [scriptblock]$ModelInvoker)
+    param($Configuration, [string]$Epic = '', [string]$Reason = '', [scriptblock]$ModelInvoker, [scriptblock]$PublisherInvoker)
     $paths = Get-FactoryRockCoordinatorPaths $Configuration
     $mutex = New-Object Threading.Mutex($false, $paths.mutexName)
     $owns = $false
@@ -208,13 +210,21 @@ function Invoke-FactoryRockCoordinatorCycle {
         }
         foreach ($work in @($pending | Sort-Object createdAt, id | Select-Object -First 20)) {
             if ([bool](Read-FactoryRockCoordinatorMemory $Configuration).paused) { break }
-            Invoke-FactoryRockEvent $Configuration $work.goal $work.path -ModelInvoker $ModelInvoker
+            $inputEvent=Read-FactoryJson $work.path
+            if([string]$inputEvent.payload.kind -ceq 'publication-ready'){
+                # This is a native delivery signal, not another planning turn.
+                $inputEvent.status='completed';$inputEvent.error=$null;$inputEvent.retryAt=$null
+                Write-FactoryRockJson $work.path $inputEvent
+            }else{Invoke-FactoryRockEvent $Configuration $work.goal $work.path -ModelInvoker $ModelInvoker}
             $record = Read-FactoryJson $work.path
             $processed++
             if ($record.status -eq 'completed') { $completed++ }
             if ($record.status -eq 'failed') { $failed++ }
         }
-        return [pscustomobject]@{ coordinatorId = [string]$Configuration.direct.coordinatorId; processed = $processed; completed = $completed; failed = $failed; browserPending = @(Get-FactoryRockBrowserItems $Configuration | Where-Object { $_.status -in @('pending', 'claimed', 'blocked') }).Count }
+        $publicationEpic = if ($Epic) { [string](@($Configuration.orchestrators | Where-Object { $Epic -ceq [string]$_.name -or $Epic -ceq [string]$_.epicGid })[0].epicGid) } else { '' }
+        $publication=Invoke-FactoryRockPublication $Configuration -EpicGid $publicationEpic -PublisherInvoker $PublisherInvoker -CoordinatorLockHeld
+        Sync-FactoryRockParticipantAttention $Configuration
+        return [pscustomobject]@{ coordinatorId = [string]$Configuration.direct.coordinatorId; processed = $processed; completed = $completed; failed = $failed; publication=$publication; browserPending = @(Get-FactoryRockBrowserItems $Configuration | Where-Object { $_.status -in @('pending', 'claimed', 'blocked') }).Count }
     } finally { if ($owns) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
 }
 

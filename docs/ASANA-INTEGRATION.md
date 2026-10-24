@@ -2,8 +2,17 @@
 
 The optional integration uses the [RAD] Central Ticket Intake
 [board](https://app.asana.com/1/14748072439266/project/1215506997644941/board/1215507205009630).
-The factory and rock launcher use a personal access token through the Asana API.
-ChatGPT access to Asana is not required.
+The legacy automatic board poller and rock launcher use a personal access token
+through the Asana API. The direct ROCK mode instead uses local events and the
+coordinator's existing authorized Asana capability; see
+[Direct ROCK orchestration](dev/ROCK-DIRECT-ORCHESTRATION.md).
+
+Ordinary `factory add` sources do not enter the legacy worker-comment protocol.
+After native successful completion, `source-completion` wakes the existing
+factory orchestrator. It completes the original card through its authorized
+Asana access and records actual readback with `factory source confirm`.
+No extra publisher, chat timer or machine comment is required. ROCK-owned task
+completion stays with the shared coordinator.
 
 ## Factory setup
 

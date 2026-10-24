@@ -11,4 +11,12 @@ if ($DryRun) {
     }
     return
 }
-Invoke-FactoryRockCoordinatorCycle $configuration -Epic $Epic -Reason $Reason | ConvertTo-Json -Depth 8
+# Drain event-produced deliveries in this bounded native job. There is no idle
+# model loop or timer: stop as soon as no publication was delivered. The normal
+# factory reconciliation can pick up a larger remaining batch after the cap.
+for ($deliveryPass = 0; $deliveryPass -lt 5; $deliveryPass++) {
+    $cycle = Invoke-FactoryRockCoordinatorCycle $configuration -Epic $Epic -Reason $Reason
+    $cycle | ConvertTo-Json -Depth 8
+    if ([int](Get-FactoryNestedValue (Get-FactoryNestedValue $cycle 'publication') 'published' 0) -eq 0) { break }
+    $Reason = ''
+}

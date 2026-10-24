@@ -1,9 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [ValidateSet('status', 'questions', 'answer', 'withdraw', 'pause', 'resume', 'import', 'retry', 'configure', 'cycle', 'browser', 'dependencies')][string]$Action = 'status',
+    [ValidateSet('status', 'questions', 'answer', 'withdraw', 'pause', 'resume', 'import', 'retry', 'configure', 'cycle', 'browser', 'publication', 'dependencies')][string]$Action = 'status',
     [string]$EpicGid = '', [string]$QuestionId = '', [string]$Text = '', [string]$File = '', [string]$EventId = '',
-    [ValidateSet('list', 'claim', 'confirm', 'defer', 'absent', 'retry', 'discard')][string]$BrowserAction = 'list'
+    [ValidateSet('list', 'claim', 'confirm', 'defer', 'absent', 'retry', 'discard')][string]$BrowserAction = 'list',
+    [ValidateSet('list','pending','review')][string]$PublicationAction = 'list'
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rock-common.ps1')
@@ -39,6 +40,20 @@ if ($Action -in @('pause', 'resume') -and (-not $EpicGid -or $EpicGid -ceq 'all'
     return
 }
 if ($EpicGid) { $null = Get-FactoryRockOrchestrator $rock $EpicGid }
+if ($Action -eq 'publication') {
+    if (-not (Test-FactoryRockCoordinatorPublication $rock)) { throw 'Coordinator-owned publication is not enabled.' }
+    if ($PublicationAction -eq 'review') {
+        if (-not $File) { throw 'Publication review requires a receipt file.' }
+        Submit-FactoryRockPublicationReview $rock $context $File | ConvertTo-Json -Depth 15
+        Start-FactoryRockService -Context $context -Config $config
+    } elseif ($PublicationAction -eq 'pending') {
+        Sync-FactoryRockPublicationProposals $rock
+        @(Get-FactoryRockBrowserItems $rock | Where-Object { $_.status -in @('pending','claimed','blocked') -and (-not $EpicGid -or $_.rockId -ceq $EpicGid) }) | ConvertTo-Json -Depth 30
+    } else {
+        @(Get-FactoryRockPublicationReviews $rock ([string]$context.repositoryRoot) | Where-Object { -not $EpicGid -or $_.rockId -ceq $EpicGid }) | ConvertTo-Json -Depth 25
+    }
+    return
+}
 if ($Action -eq 'cycle') {
     . (Join-Path $PSScriptRoot 'rock-actions.ps1')
     Invoke-FactoryRockCoordinatorCycle $rock -Epic $EpicGid | ConvertTo-Json -Depth 8

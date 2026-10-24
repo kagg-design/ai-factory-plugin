@@ -1,6 +1,6 @@
 # Direct ROCK orchestration and private memory
 
-Date: 2026-10-23. Implementation branch: `codex/rock-direct-memory`.
+Updated: 2026-10-24. Implementation branch: `codex/rock-direct-memory`.
 
 ## Purpose and current boundary
 
@@ -23,9 +23,11 @@ a phone. Machine receipts remain local. See
 `docs/tasks/TASK-rock-direct-memory-questions.md` for the agreed rollout decisions.
 One shared coordinator now serializes events across both goals. Every model
 request contains both goals, their task states and shared decision history.
-Native prerequisite enforcement and a durable browser publication queue are
-implemented. The browser consumer must have actual browser tools; PowerShell
-does not create a browser session or fall back to a token transport.
+Native prerequisite enforcement and a durable publication queue are implemented.
+The shared ROCK coordinator owns publication after the affected factories review
+its proposal. Its publication phase uses the existing authorized Claude ROCK
+Asana connection. The planner remains read-only. No separate Codex publisher,
+chat heartbeat, new connector, REST client or token path is required.
 
 ## Storage and identity
 
@@ -115,12 +117,12 @@ Trusted ownership bindings default to `requiresMergeGate:true`. Native intake
 appends the gate even if the generated spec omits it. An explicitly reviewed
 binding can set false for a task that does not change live behavior.
 
-## Browser sources
+## Sources and existing access
 
-The operator explicitly requires browser access to Asana, without an Asana app
-connector. A proposed new API/token read path was rejected by automatic approval
-review and was not applied. The direct implementation uses local UTF-8 snapshots
-read through the existing browser. No new Asana API read path is introduced.
+This Codex chat reads Asana through the browser. Igor explicitly authorized the
+already-connected Claude ROCK Asana tools on 2026-10-24; that does not authorize
+adding an Asana connector to this chat or introducing a new REST/token path.
+Existing UTF-8 source snapshots and decision history remain in private memory.
 
 Bootstrap requires the epic description, binding historical decisions, outstanding
 questions, owned task requirements, watchers, and relevant external reports.
@@ -167,17 +169,20 @@ Before enabling, import source snapshots and review all ownership bindings. A
 project must have its existing Factory runtime initialized. Starting this feature
 does not create a project runtime or resume an explicitly paused factory.
 Updating the board is a separate durable projection and never blocks native
-completion. Set `direct.browserProjection.enabled:true` and nominate its
-`consumerRepository`. That main orchestrator receives browser-work attention.
-It must have browser tools; otherwise it defers with a concrete reason.
-For a separate authorized Codex browser chat, set `consumerMode:"external"`;
-the native Factory consumer then receives no duplicate browser-work attention.
+completion. Set `direct.publication.enabled:true` and initially use
+`transport:"disabled"` to inspect factory review proposals. The existing ROCK
+adapter is enabled with `transport:"existing-rock"` after capability verification.
+The legacy `direct.browserProjection` and browser receipts remain available for
+recovery; they do not require a permanent external publisher.
 
 ```text
 factory rock status
 factory rock configure --file C:\private\rock-cycle.direct.json
 factory rock cycle ROCK_GID
 factory rock dependencies ROCK_GID
+factory rock publication list
+factory rock publication pending
+factory rock publication review --file C:\private\factory-review.json
 factory rock browser list
 factory rock browser claim ROCK_GID
 factory rock browser confirm --file C:\private\observed-receipt.json
@@ -332,9 +337,66 @@ next-task dispatch remain outside this completed-task verification pilot: no
 eligible Ready Access task was visible. Read all binding historical decisions
 and configure exact new owner/prerequisite bindings before that next phase.
 
-On 2026-10-24 the authorized current-chat heartbeat `rock` was enabled at a
-one-minute cadence with `consumerMode:"external"`. It checks the local queue
-first and stays silent when unchanged. The older `rock-cycle-5` monitor in a
-different chat remains paused. Next live check is due 2026-10-24 13:05 UTC.
+On 2026-10-24 Igor stopped the external current-chat heartbeat `rock` and chose
+coordinator-owned publication. Both it and the older `rock-cycle-5` monitor remain
+paused. The previously requested live report check is due 2026-10-24 13:05 UTC;
+the paused heartbeat will not perform it automatically.
 Final coordinator regressions also cover PowerShell 7 / ru-RU receipt dates and
 refuse failed/rejected/held blockers even when old publication audits remain.
+
+## Factory agreement and coordinator publication, 2026-10-24
+
+A report proposal captures the participating factories' task/run/attempt/commit,
+publication and pause evidence. Each existing factory orchestrator receives a
+durable `rock-publication-review` attention event, reads `publication list`, and
+submits an exact revision/factsHash review. It may approve, correct or reject.
+Changed evidence or corrected text invalidates earlier approvals. A joint digest
+requires all participating factories. Native status projection can be attested
+deterministically. A paused factory cannot release publication.
+
+Approval emits `publication-ready`; the native job handles it without calling
+the planning model. The job drains a bounded batch, without an idle model loop
+or chat timer. The coordinator publishes using only its existing Asana tools.
+Claude 2.1.295+ fail-closed PreToolUse hooks constrain target, text, fields,
+pagination and one mutation attempt per claim. Actual PostToolUse readback,
+not model narration, provides the receipt. Native evidence is checked again
+before writing and confirming. Uncertain writes remain blocked for inspection;
+they are not automatically repeated. Blockages enter the same attention journal.
+
+The existing adapter is Claude-specific. The local queue, review and receipt
+interfaces are independent of that adapter. A supported Codex-only planner and
+Asana adapter still require separate implementation and acceptance; shipping
+this adapter does not make both products a runtime requirement.
+
+`tests/rock-publication.tests.ps1` covers two factory reviews, corrections,
+stale runs/commits, paused publication, actual tool schema, full pagination,
+wrong tools/targets/text/fields, newer human instructions, write-attempt reuse,
+native readback and no-change cycles. Remote Asana responses are fixtures in
+this suite. A separate read-only live probe confirmed the existing ROCK tools
+and fail-closed hooks. At 10:29 UTC on 2026-10-24 the guarded adapter read back
+the already-published Access marker and real story GID 1219824846551038 with
+zero external writes. Large epic responses require bounded 20-story pages,
+explicit evidence fields and consistent newest-first pagination. Hook context
+supplies progress even when Claude's display truncates a large tool response.
+No new live worker cycle or new production write is claimed from these tests.
+
+The current focused checks passed for publication/source completion, direct ROCK,
+shared coordinator, Asana integration, local intake, live status, worker attention
+and guarded amend, and quality gates. Manifest paths and PowerShell syntax passed.
+This is targeted validation of the changed paths, not a new full runtime-suite run.
+
+## Ordinary Asana add completion
+
+An ordinary Asana `factory add` keeps its local worker transport. Native `done`
+with a matching published commit and closed session creates a `source-completion`
+edge for the existing factory orchestrator. It checks the exact source through
+its authorized Asana capability, respects human holds, completes the card and
+records actual readback with `factory source confirm TASK_ID --file RECEIPT`.
+Already completed sources need no external write. No machine comment or custom
+field change is necessary. ROCK-owned sources stay coordinator-owned.
+
+The receipt binds source identity, run, attempt and commit. Failed, held, queued,
+unpublished, foreign and stale results cannot close a source. Native confirmation
+is idempotent and preserves factory activity/pause and worker mode. On 2026-10-24
+the real rehire task 1219789513918047 was observed already completed in the browser;
+its native completion receipt was saved without changing Asana.

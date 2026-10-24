@@ -10,6 +10,7 @@
     "enabled": false,
     "coordinatorId": "q4-2026",
     "browserProjection": { "enabled": false },
+    "publication": { "enabled": false, "transport": "disabled" },
     "timeoutSeconds": 900,
     "memoryDir": "%LOCALAPPDATA%\\ClaudeFactory\\rocks"
   },

@@ -186,8 +186,20 @@ function Get-FactoryRockAttentionEvents {
     param($Context, $Config)
     $rock = Get-FactoryRockConfiguration -Config $Config
     if ($null -eq $rock) { return }
+    if (Test-FactoryRockCoordinatorPublication $rock) {
+        foreach ($review in @(Get-FactoryRockPublicationReviews $rock ([string]$Context.repositoryRoot))) {
+            [pscustomobject]@{ kind = 'rock-publication-review'; taskId = $null; title = 'ROCK proposed Asana update'; status = 'awaiting-factory-review'; identity = "$($review.id)/$($review.revision)/$($review.factsHash)"; audience = 'orchestrator'; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true; reason = 'Review only this factory facts and the proposed human digest. Approve, correct or reject using factory rock publication review. This is not a merge/GO approval and the factory must not post to Asana.'; occurredAt = ''; command = 'factory rock publication list' }
+        }
+        foreach ($blocked in @(Get-FactoryRockBrowserItems $rock | Where-Object status -eq 'blocked')) {
+            $goal = Get-FactoryRockOrchestrator $rock ([string]$blocked.rockId)
+            $relevant = @(@($goal.ownedTasks) + @($goal.watchedTasks) | Where-Object { Test-FactorySamePath ([string]$_.repository) ([string]$Context.repositoryRoot) }).Count -gt 0
+            if ($relevant) {
+                [pscustomobject]@{kind='rock-publication-blocked';taskId=$null;title='ROCK publication needs inspection';status='blocked';identity="$($blocked.id)/$($blocked.claimId)";audience='orchestrator';aiActionable=$true;humanDecision=$false;includeInDefaultWait=$true;reason="Inspect the coordinator's retained publication evidence: $($blocked.error). Preserve uncertainty; a failed/lost write must not be repeated before exact readback/absence verification. Do not publish a replacement from this factory.";occurredAt='';command='factory rock publication pending'}
+            }
+        }
+    }
     $browserWork = @(Get-FactoryRockBrowserItems $rock | Where-Object { $_.status -in @('pending', 'claimed', 'blocked') })
-    if ($browserWork.Count -and [string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerMode' 'orchestrator') -eq 'orchestrator' -and (Test-FactorySamePath ([string]$Context.repositoryRoot) ([string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerRepository')))) {
+    if (-not (Test-FactoryRockCoordinatorPublication $rock) -and $browserWork.Count -and [string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerMode' 'orchestrator') -eq 'orchestrator' -and (Test-FactorySamePath ([string]$Context.repositoryRoot) ([string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerRepository')))) {
         $browserIdentity = Get-FactoryTextSha256 (($browserWork | ForEach-Object { "$($_.id)/$($_.status)/$($_.claimId)" }) -join ',')
         [pscustomobject]@{ kind = 'rock-browser-work'; taskId = $null; title = 'ROCK board updates'; status = 'pending'; identity = $browserIdentity; audience = 'orchestrator'; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true; reason = 'Claim the durable browser outbox. Read the exact Asana task through the browser, check markers and human holds, apply the requested update, then record freshly observed evidence. Never use an Asana connector or token.'; occurredAt = ''; command = 'factory rock browser claim' }
     }
@@ -200,7 +212,8 @@ function Get-FactoryRockAttentionEvents {
         if (-not $relevant) { continue }
         $memory = Read-FactoryRockMemory $rock ([string]$item.epicGid)
         if ([bool](Get-FactoryNestedValue $memory 'sourceRefreshRequired' $false)) {
-            [pscustomobject]@{ kind = 'rock-source-refresh'; taskId = $null; title = "ROCK $($item.name)"; status = 'blocked'; identity = "sources-$($item.epicGid)"; audience = 'orchestrator'; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true; reason = 'Read the ROCK epic, decisions and relevant task requirements through the open browser. Save a UTF-8 source snapshot and import it with factory rock import. Do not use an Asana connector or token.'; occurredAt = ''; command = "factory rock import $($item.epicGid) --file SNAPSHOT" }
+            $refreshReason = if (Test-FactoryRockCoordinatorPublication $rock) { 'Refresh the exact ROCK epic, decisions and relevant requirements through existing authorized Asana access: Claude may use the existing ROCK connection; this Codex chat uses its browser. Save actual source material as UTF-8 and import it with factory rock import. Do not add a new connector or REST/token path, and do not publish a ROCK update from the factory.' } else { 'Read the ROCK epic, decisions and relevant task requirements through the open browser. Save a UTF-8 source snapshot and import it with factory rock import. Do not use an Asana connector or token.' }
+            [pscustomobject]@{ kind = 'rock-source-refresh'; taskId = $null; title = "ROCK $($item.name)"; status = 'blocked'; identity = "sources-$($item.epicGid)"; audience = 'orchestrator'; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true; reason = $refreshReason; occurredAt = ''; command = "factory rock import $($item.epicGid) --file SNAPSHOT" }
         }
         foreach ($question in @($memory.questions | Where-Object { $_.status -eq 'open' })) {
             [pscustomobject]@{ kind = 'rock-question'; taskId = $null; title = "ROCK $($item.name)"; status = 'awaiting-input'; identity = [string]$question.id; audience = 'human'; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true; reason = [string]$question.text; occurredAt = [string]$question.createdAt; command = "factory rock questions" }
@@ -213,8 +226,10 @@ function Start-FactoryRockService {
     $rock = Get-FactoryRockConfiguration -Config $Config
     if ($null -eq $rock) { return }
     if (-not [bool](Get-FactoryNestedValue (Get-FactoryNestedValue $Config 'nativeScheduler') 'enabled' $true)) { return }
+    if ([bool](Read-FactoryRockCoordinatorMemory $rock).paused) { return }
     $pending = $false
     foreach ($item in @($rock.orchestrators)) {
+        if ([bool](Read-FactoryRockMemory $rock ([string]$item.epicGid)).paused) { continue }
         $paths = Get-FactoryRockPaths $rock ([string]$item.epicGid)
         if (Test-Path -LiteralPath $paths.events) {
             foreach ($file in @(Get-ChildItem -LiteralPath $paths.events -Filter '*.json' -File)) {
@@ -222,6 +237,10 @@ function Start-FactoryRockService {
                 if ($event.status -eq 'pending' -and (-not $event.retryAt -or (ConvertTo-FactoryRockDateTimeOffset $event.retryAt) -le [DateTimeOffset]::UtcNow)) { $pending = $true; break }
             }
         }
+    }
+    if (-not $pending -and (Test-FactoryRockCoordinatorPublication $rock) -and [string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'publication') 'transport' 'disabled') -ne 'disabled') {
+        Sync-FactoryRockPublicationProposals $rock
+        foreach($item in @(Get-FactoryRockBrowserItems $rock|Where-Object status -eq 'pending')){if(-not [bool](Read-FactoryRockMemory $rock ([string]$item.rockId)).paused -and (Test-FactoryRockPublicationApproved $rock $item)){$pending=$true;break}}
     }
     if (-not $pending) { return }
     $receiptPath = Join-Path ([string]$Context.projectData) 'rock-service.json'
@@ -291,3 +310,5 @@ function ConvertFrom-FactoryRockResult {
 
 . (Join-Path $PSScriptRoot 'rock-coordinator.ps1')
 . (Join-Path $PSScriptRoot 'rock-browser.ps1')
+. (Join-Path $PSScriptRoot 'rock-publication.ps1')
+. (Join-Path $PSScriptRoot 'rock-asana-publisher.ps1')

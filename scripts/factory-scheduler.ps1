@@ -673,6 +673,7 @@ function Invoke-SchedulerTick {
         # A pending ROCK exchange is unfinished work. Keep an already-active
         # factory active; never reactivate an inactive factory or clear pause.
         if ([bool]$state.active -and $runnableCount -eq 0) {
+            if (@($state.tasks | Where-Object { $null -ne (Get-FactoryPendingSourceCompletion $_ $asanaConfig) }).Count) { $runnableCount++ }
             try { if (Test-FactoryRockHasPendingWork -Config $asanaConfig) { $runnableCount++ } }
             catch { $runnableCount++; $errors.Add("Direct ROCK pending-work check: $($_.Exception.Message)") }
         }

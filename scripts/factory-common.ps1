@@ -595,6 +595,30 @@ function Test-FactoryTaskMergeGatePending {
         -not (Get-FactoryNestedValue $gate 'confirmedAt') -and [string](Get-FactoryNestedValue $Task 'status') -eq 'approved'
 }
 
+function Get-FactoryPendingSourceCompletion {
+    param($Task, $Config)
+    if ([string](Get-FactoryNestedValue $Task 'status') -cne 'done' -or [bool](Get-FactoryNestedValue $Task 'asanaMode' $false) -or [string](Get-FactoryNestedValue $Task 'rockId') -or (Test-FactoryTaskHasLiveSession $Task)) { return $null }
+    $source = Get-FactoryNestedValue $Task 'source'
+    $id = [string](Get-FactoryNestedValue $Task 'id')
+    if ([string](Get-FactoryNestedValue $source 'adapter') -cne 'asana' -or $id -cnotmatch '^\d+$' -or [string](Get-FactoryNestedValue $source 'id') -cne $id) { return $null }
+    try { $resolved = Resolve-FactoryAsanaTaskUrl -Url ([string](Get-FactoryNestedValue $Task 'url' (Get-FactoryNestedValue $source 'url'))); if ([string]$resolved.taskId -cne $id) { return $null } } catch { return $null }
+    $commit = [string](Get-FactoryNestedValue $Task 'commit')
+    $integration = Get-FactoryNestedValue $Task 'integration'
+    if ($commit -cnotmatch '^[0-9a-f]{40}$' -or [string](Get-FactoryNestedValue $integration 'status') -cne 'published' -or [string](Get-FactoryNestedValue $integration 'taskCommit') -cne $commit) { return $null }
+    if ([bool](Get-FactoryNestedValue (Get-FactoryNestedValue $Config 'rocks') 'enabled' $false)) {
+        . (Join-Path $PSScriptRoot 'rock-common.ps1')
+        $rock = Get-FactoryRockConfiguration -Config $Config
+        if ($null -ne $rock) { foreach ($goal in @($rock.orchestrators)) { if (@((Get-FactoryNestedValue $goal 'ownedTasks' @()) | Where-Object { [string]$_.taskId -ceq $id }).Count) { return $null } } }
+    }
+    $runId = [string](Get-FactoryNestedValue $Task 'runId')
+    $attempts = [int](Get-FactoryNestedValue $Task 'attempts' 0)
+    $fingerprint = Get-FactoryTextSha256 "$id/$runId/$attempts/$commit/$($resolved.canonicalUrl)"
+    $receipt = Get-FactoryNestedValue $Task 'sourceCompletion'
+    if ([string](Get-FactoryNestedValue $receipt 'fingerprint') -ceq $fingerprint) { return $null }
+    if ($null -eq $receipt -and [string](Get-FactoryNestedValue $Task 'asanaSyncedState') -ieq 'Done') { return $null }
+    return [pscustomobject]@{ taskId=$id; title=[string](Get-FactoryNestedValue $Task 'title'); url=[string]$resolved.canonicalUrl; commit=$commit; runId=$runId; attempts=$attempts; fingerprint=$fingerprint }
+}
+
 function Get-FactoryOperatorActionEvents {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -604,6 +628,14 @@ function Get-FactoryOperatorActionEvents {
     )
 
     $events = New-Object Collections.Generic.List[object]
+    if (-not [bool](Get-FactoryNestedValue $State 'paused' $false)) {
+        foreach ($sourceTask in @($State.tasks)) {
+            $completion = Get-FactoryPendingSourceCompletion $sourceTask $Config
+            if ($null -ne $completion) {
+                $events.Add([pscustomobject]@{kind='source-completion';taskId=$completion.taskId;title=$completion.title;status='awaiting-source-completion';identity=$completion.fingerprint;audience='orchestrator';aiActionable=$true;humanDecision=$false;includeInDefaultWait=$true;reason='Native work is successfully done. Use this orchestrator existing authorized Asana access to complete the exact source, then record freshly observed completion with factory source confirm. Codex uses the browser; do not add a connector or API/token fallback. Do not enable Asana worker mode. No machine comment is required.';occurredAt=[string](Get-FactoryNestedValue $sourceTask 'updatedAt');command='factory source list'})
+            }
+        }
+    }
     $launchTimeout = [Math]::Max(1, [int](Get-FactoryNestedValue -Target $Config -Name "workerLaunchTimeoutSeconds" -Default 300))
     foreach ($task in @($State.tasks)) {
         $status = [string](Get-FactoryNestedValue -Target $task -Name "status" -Default "")

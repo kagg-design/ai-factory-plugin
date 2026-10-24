@@ -1150,7 +1150,38 @@ For a worker question whose native channel is `rock`, `factory answer TASK_ID
 ROCK replies are agent decisions and cannot authorize GO, a merge gate, security
 exceptions or new access. Existing native publication and human gates still apply.
 
-#### Browser publication of ROCK results
+#### Coordinator-owned publication of ROCK results
+
+For `direct.publication.enabled:true`, the ONE shared ROCK coordinator is the
+only Asana writer for its configured goals and tasks. It uses its existing
+authorized Asana connection. No external Codex publisher or chat heartbeat is
+required. Factories attest native facts and may improve the text; they do not
+publish a ROCK digest themselves. `transport:"disabled"` permits local review
+without external writes; `transport:"existing-rock"` enables the existing ROCK
+adapter after setup verification.
+
+`rock-publication-review` is an AI-actionable request to the existing factory
+orchestrator. Run `factory rock publication list` to read exact proposals and
+this factory's facts. Review only the facts relevant to this repository. Use
+`factory rock publication review --file REVIEW` with JSON fields `id`, `revision`,
+`factsHash`, `decision` (`approve`, `revise`, `reject`), and optional `reason`.
+A revision requires `text`; rejection requires `reason`. Approval is permission
+to publish that exact digest, never human approval for GO, merge or new access.
+Another factory's correction or changed run/commit invalidates prior reviews.
+Cross-factory digests require all affected factory attestations. Native status
+projections can be attested deterministically without another model call.
+
+Approval emits a native `publication-ready` event. It wakes the ROCK service,
+not a chat poller, and is not another planning request. The coordinator adapter
+checks task state and full story pagination before a write. Fail-closed hooks
+limit tool calls to the approved target/text/fields and check current factory
+evidence again. One attempted write consumes the claim's mutation opportunity.
+Only actual tool readback confirms publication; model text is not proof.
+
+The following browser procedure remains for legacy projection configurations
+and explicit recovery. It does not establish an external publisher requirement.
+
+#### Legacy browser projection and recovery
 
 The read-only planner proposes reports; native code queues them and task status
 projections. The configured `direct.browserProjection.consumerRepository` selects
@@ -1187,6 +1218,29 @@ accepts a fresh claim plus `reason` to retain a rejected intent locally; uncerta
 prior posts require verification first. `factory rock withdraw GID QUESTION_ID
 --text REASON` records withdrawal of an erroneous, unposted agent question.
 It creates no human answer or approval. Published questions need a visible correction.
+
+### Automatic completion of ordinary Asana add sources
+
+An ordinary `factory add` from Asana retains local worker communication. Once it
+is native `done`, the published task commit matches and its session is closed,
+`source-completion` wakes its existing Factory orchestrator. This is ordinary
+authorized bookkeeping; do not ask Igor again solely to mark the source complete.
+Run `factory source list`, verify the exact card through existing authorized
+Asana access, respect new human holds/instructions, and mark it completed. If it
+is already completed, make no extra write. Codex uses its browser, without a new
+Asana connector or token/API fallback. No Factory custom field, section move or
+machine comment is required. Do not enable `asanaMode` to close the source.
+An Asana approval task retains its human approval workflow; do not decide that
+approval by marking it complete.
+
+Read back the actual completed state. Save receipt JSON with `fingerprint` from
+the native list, exact observed `url`, boolean `completed:true`, and concise
+`observedText` from the actual task read. Then run `factory source confirm TASK_ID
+--file RECEIPT`. Repeated receipts are idempotent; changed native evidence rejects
+stale receipts. Preserve Factory activity/pause, approvals and the worker mode.
+If this orchestrator lacks its configured Asana capability, report that blockage
+once and retain the pending completion. Never claim the card was closed from a
+successful code result alone. ROCK-owned sources are completed by the coordinator.
 
 ### `runtime [status|migrate]`
 

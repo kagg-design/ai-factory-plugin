@@ -1886,6 +1886,9 @@ function Write-CliHelp {
                 "Reconciliation updates session-derived state first unless -NoReconcile is supplied."
             ) | Write-Output
         }
+        'source' {
+            @('factory source list','factory source confirm TASK_ID --file READBACK_RECEIPT','Native done Asana add tasks emit a source-completion edge. Complete the exact card through existing authorized access, read back completed=true and confirm its fingerprint. ROCK sources remain coordinator-owned; local worker communication stays unchanged.') | Write-Output
+        }
         "inspect" {
             @(
                 "factory inspect <task-id> [-NoReconcile]",
@@ -2039,6 +2042,8 @@ function Write-CliHelp {
                 'factory rock cycle [ROCK_GID]',
                 'factory rock dependencies [ROCK_GID]',
                 'factory rock browser list|claim [ROCK_GID]',
+                'factory rock publication list|pending [ROCK_GID]',
+                'factory rock publication review --file REVIEW',
                 'factory rock browser confirm|defer|absent|retry|discard --file RECEIPT',
                 'factory rock withdraw ROCK_GID QUESTION_ID --text "supervisor review reason"',
                 'factory rock import ROCK_GID --file UTF8_SNAPSHOT',
@@ -2212,6 +2217,20 @@ if ($normalizedCommand -eq "status") {
 }
 
 $context = Get-CliContext
+if ($normalizedCommand -eq 'source') {
+    if ($anyDestructiveOptionsUsed -or $startOptionsUsed) { throw 'Use: factory source list|confirm' }
+    $sourceAction = if ($Target) { $Target.ToLowerInvariant() } else { 'list' }
+    $sourceArgs = @{Repository=[string]$context.repositoryRoot;Action=$sourceAction}
+    $sourceValues = @($remainingValues)
+    if ($sourceAction -eq 'list') { if ($sourceValues.Count -or $File) { throw 'Use: factory source list' } }
+    elseif ($sourceAction -eq 'confirm') {
+        if ($sourceValues.Count -eq 1 -and $File) { $sourceArgs.TaskId=$sourceValues[0];$sourceArgs.File=$File }
+        elseif ($sourceValues.Count -eq 3 -and $sourceValues[1] -ceq '--file' -and -not $File) { $sourceArgs.TaskId=$sourceValues[0];$sourceArgs.File=$sourceValues[2] }
+        else { throw 'Use: factory source confirm TASK_ID --file BROWSER_RECEIPT' }
+    } else { throw 'Unknown source completion action.' }
+    & (Join-Path $PSScriptRoot 'source-completion.ps1') @sourceArgs
+    exit 0
+}
 if ($normalizedCommand -eq 'ci') {
     if ($anyDestructiveOptionsUsed -or $startOptionsUsed -or $fileOptionUsed) { throw 'ci does not accept these options. Use: factory help ci' }
     $action = if ($Target) { $Target.ToLowerInvariant() } else { 'status' }
@@ -2322,6 +2341,18 @@ if ($normalizedCommand -eq 'rock') {
                 elseif ($values.Count -eq 3 -and $values[1] -ceq '--file' -and -not $File) { $argsMap.File = $values[2] }
                 else { throw 'Use: factory rock browser confirm|defer|absent|retry --file RECEIPT' }
             } else { throw 'Unknown ROCK browser action.' }
+        }
+        'publication' {
+            $argsMap.Remove('EpicGid')
+            $argsMap.PublicationAction = if ($values.Count) { $values[0] } else { 'list' }
+            if ($argsMap.PublicationAction -in @('list','pending')) {
+                if ($values.Count -gt 2 -or $File) { throw 'Use: factory rock publication list|pending [ROCK_GID]' }
+                if ($values.Count -eq 2) { $argsMap.EpicGid = $values[1] }
+            } elseif ($argsMap.PublicationAction -eq 'review') {
+                if ($values.Count -eq 1 -and $File) { $argsMap.File = $File }
+                elseif ($values.Count -eq 3 -and $values[1] -ceq '--file' -and -not $File) { $argsMap.File = $values[2] }
+                else { throw 'Use: factory rock publication review --file REVIEW' }
+            } else { throw 'Unknown ROCK publication action.' }
         }
         { $_ -in @('status', 'questions', 'pause', 'resume') } { if ($values.Count -gt 1 -or $File) { throw 'Unexpected ROCK arguments.' } }
         { $_ -in @('answer', 'withdraw') } { if ($values.Count -ne 4 -or $values[2] -cne '--text' -or $File) { throw 'Use: factory rock answer|withdraw ROCK_GID QUESTION_ID --text "answer or review reason"' }; $argsMap.QuestionId = $values[1]; $argsMap.Text = $values[3] }
