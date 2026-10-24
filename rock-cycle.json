@@ -8,6 +8,8 @@
   "dailyHourLocal": 9,
   "direct": {
     "enabled": false,
+    "coordinatorId": "q4-2026",
+    "browserProjection": { "enabled": false },
     "timeoutSeconds": 900,
     "memoryDir": "%LOCALAPPDATA%\\ClaudeFactory\\rocks"
   },

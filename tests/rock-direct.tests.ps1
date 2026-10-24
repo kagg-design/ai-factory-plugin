@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 function Assert-Rock { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-RockThrows { param([scriptblock]$Code, [string]$Pattern) $caught = ''; try { & $Code | Out-Null } catch { $caught = $_.Exception.Message }; Assert-Rock ($caught -match $Pattern) "Expected '$Pattern', got '$caught'." }
 $manifest = Read-FactoryJson (Join-Path $PluginRoot 'MANIFEST.json')
-foreach ($required in @('scripts/rock-common.ps1', 'scripts/rock-actions.ps1', 'scripts/rock-control.ps1', 'scripts/rock-direct-cycle.ps1',
+foreach ($required in @('scripts/rock-common.ps1', 'scripts/rock-actions.ps1', 'scripts/rock-control.ps1', 'scripts/rock-direct-cycle.ps1', 'scripts/rock-coordinator.ps1', 'scripts/rock-browser.ps1',
     'resources/rock-direct-instructions.md', 'resources/rock-result.schema.json',
     'tests/rock-direct.tests.ps1', 'tests/rock-scheduler-compat.tests.ps1', 'tests/codex-slot-fill.helpers.ps1')) {
     Assert-Rock ($required -in @($manifest.files) -and (Test-Path -LiteralPath (Join-Path $PluginRoot $required) -PathType Leaf)) "Bundle omits a required ROCK file: $required"
@@ -80,9 +80,14 @@ try {
 
     $payload = @{ kind = 'done'; taskId = '123'; repository = $repository; owner = $true }
     $head = (& git -C $repository rev-parse HEAD).Trim()
+    $probe = Join-Path $testRoot 'child-scope.ps1'
+    [IO.File]::WriteAllText($probe, '. (Join-Path $args[0] "scripts\rock-common.ps1"); Invoke-FactoryNativeProcess -Command git -Arguments @("--version") | ConvertTo-Json')
+    $nativeProbe = & $probe $PluginRoot | ConvertFrom-Json
+    Assert-Rock ($nativeProbe.exitCode -eq 0 -and $nativeProbe.stdout -match 'git version') 'Public child scope lost native-process UTF-8 configuration.'
     $codePath = Write-FactoryRockCodeEvidence -Orchestrator $owner -Event ([pscustomobject]@{payload=[pscustomobject]@{commit=$head;taskId='123';repository=$repository}}) -Path (Join-Path $testRoot 'code-evidence.json')
     $codeEvidence = Read-FactoryJson $codePath
     Assert-Rock ($codeEvidence.available -and $codeEvidence.commit -ceq $head -and $codeEvidence.diff -match 'fixture') 'Exact local commit evidence was not captured.'
+    Assert-Rock (@($codeEvidence.files | Where-Object { $_.path -eq 'README.txt' -and $_.content -eq 'fixture' }).Count -eq 1) 'Exact full-file evidence was not captured from the task commit.'
     Assert-RockThrows { Write-FactoryRockCodeEvidence -Orchestrator $watcher -Event ([pscustomobject]@{payload=[pscustomobject]@{commit=$head;taskId='124';repository=$repository}}) -Path (Join-Path $testRoot 'forbidden-code.json') } 'configured ROCK task'
     $eventPath = Add-FactoryRockEvent $rock '100' 'completed-123' $payload
     $again = Add-FactoryRockEvent $rock '100' 'completed-123' @{ kind = 'tampered' }

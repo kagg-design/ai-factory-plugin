@@ -46,6 +46,8 @@ try {
         if ($null -eq $rockConfig -or -not $RockActionId -or -not $RockQuestionId) { throw 'Direct ROCK answer requires enabled configuration and correlation IDs.' }
         $owner = Get-FactoryRockOrchestrator $rockConfig $RockId
         if (-not (Test-FactoryRockBinding $owner $TaskId ([string]$context.repositoryRoot))) { throw 'ROCK does not own this question.' }
+        $binding = Get-FactoryRockOwnedBinding $rockConfig $TaskId ([string]$context.repositoryRoot)
+        if ([string](Get-FactoryNestedValue $binding 'mode' 'execute') -ceq 'observe') { throw 'Observation-only ROCK binding cannot answer workers.' }
         if ($RockActionId -cin @((Get-FactoryNestedValue $task 'rockAppliedActions' @()))) {
             @{ taskId = $TaskId; status = $task.status; idempotent = $true } | ConvertTo-Json
             return

@@ -2,6 +2,18 @@
 if ($null -eq (Get-Command Read-FactoryJson -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'factory-common.ps1')
 }
+# Public CLI children can inherit the native-process function from their parent
+# while its script-scoped encoding is absent in the child script scope.
+$script:FactoryUtf8NoBom = New-Object Text.UTF8Encoding($false)
+
+function ConvertTo-FactoryRockDateTimeOffset {
+    param($Value)
+    # JSON dates are DateTime on newer PowerShell and strings on Windows PS.
+    # Casting DateTime to string first loses its kind and uses the current culture.
+    if ($Value -is [DateTimeOffset]) { return $Value }
+    if ($Value -is [DateTime]) { return [DateTimeOffset]$Value }
+    return [DateTimeOffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture)
+}
 
 function Get-FactoryRockConfiguration {
     param($Config, [string]$ConfigPath = '')
@@ -50,6 +62,7 @@ function Get-FactoryRockConfiguration {
             $owners[$key] = $gid
         }
     }
+    Initialize-FactoryRockCoordinatorConfiguration $rock
     return $rock
 }
 
@@ -140,6 +153,7 @@ function Sync-FactoryRockTaskEvents {
     param($Context, $Config, $State)
     $rock = Get-FactoryRockConfiguration -Config $Config
     if ($null -eq $rock) { return }
+    Sync-FactoryRockBrowserStatuses $rock $Context $State
     foreach ($task in @($State.tasks)) {
         $answer = Get-FactoryNestedValue $task 'rockAnswer'
         if ($null -ne $answer -and [string]$answer.actor -ceq 'operator') {
@@ -172,6 +186,11 @@ function Get-FactoryRockAttentionEvents {
     param($Context, $Config)
     $rock = Get-FactoryRockConfiguration -Config $Config
     if ($null -eq $rock) { return }
+    $browserWork = @(Get-FactoryRockBrowserItems $rock | Where-Object { $_.status -in @('pending', 'claimed', 'blocked') })
+    if ($browserWork.Count -and [string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerMode' 'orchestrator') -eq 'orchestrator' -and (Test-FactorySamePath ([string]$Context.repositoryRoot) ([string](Get-FactoryNestedValue (Get-FactoryNestedValue $rock.direct 'browserProjection') 'consumerRepository')))) {
+        $browserIdentity = Get-FactoryTextSha256 (($browserWork | ForEach-Object { "$($_.id)/$($_.status)/$($_.claimId)" }) -join ',')
+        [pscustomobject]@{ kind = 'rock-browser-work'; taskId = $null; title = 'ROCK board updates'; status = 'pending'; identity = $browserIdentity; audience = 'orchestrator'; aiActionable = $true; humanDecision = $false; includeInDefaultWait = $true; reason = 'Claim the durable browser outbox. Read the exact Asana task through the browser, check markers and human holds, apply the requested update, then record freshly observed evidence. Never use an Asana connector or token.'; occurredAt = ''; command = 'factory rock browser claim' }
+    }
     $state = Read-FactoryJson -Path ([string]$Context.statePath)
     if (-not [bool]$state.active -and (Test-FactoryRockHasPendingWork -Config $Config)) {
         [pscustomobject]@{ kind = 'rock-factory-inactive'; taskId = $null; title = 'ROCK waits for Factory'; status = 'inactive'; identity = [string]$Context.projectKey; audience = 'human'; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true; reason = 'Direct ROCK has pending work; the inactive Factory requires an explicit operator resume.'; occurredAt = ''; command = 'factory resume' }
@@ -200,7 +219,7 @@ function Start-FactoryRockService {
         if (Test-Path -LiteralPath $paths.events) {
             foreach ($file in @(Get-ChildItem -LiteralPath $paths.events -Filter '*.json' -File)) {
                 $event = Read-FactoryJson -Path $file.FullName
-                if ($event.status -eq 'pending' -and (-not $event.retryAt -or [DateTimeOffset]::Parse([string]$event.retryAt) -le [DateTimeOffset]::UtcNow)) { $pending = $true; break }
+                if ($event.status -eq 'pending' -and (-not $event.retryAt -or (ConvertTo-FactoryRockDateTimeOffset $event.retryAt) -le [DateTimeOffset]::UtcNow)) { $pending = $true; break }
             }
         }
     }
@@ -226,6 +245,7 @@ function Test-FactoryRockHasPendingWork {
     param($Config)
     $rock = Get-FactoryRockConfiguration -Config $Config
     if ($null -eq $rock) { return $false }
+    if (@(Get-FactoryRockBrowserItems $rock | Where-Object { $_.status -in @('pending', 'claimed', 'blocked') }).Count) { return $true }
     foreach ($item in @($rock.orchestrators)) {
         $memory = Read-FactoryRockMemory $rock ([string]$item.epicGid)
         if (@($memory.questions | Where-Object status -eq 'open').Count -gt 0 -or [bool](Get-FactoryNestedValue $memory 'sourceRefreshRequired' $false)) { return $true }
@@ -261,10 +281,13 @@ function ConvertFrom-FactoryRockResult {
         foreach ($name in @($action.PSObject.Properties.Name)) { if ($name -cnotin @('id', 'type', 'taskId', 'repository', 'questionId', 'text', 'title', 'brief', 'acceptanceCriteria')) { throw "Unknown ROCK action field '$name'." } }
         if ([string]$action.id -notmatch '^[a-zA-Z0-9_-]{1,64}$' -or $ids.ContainsKey([string]$action.id)) { throw 'ROCK action IDs must be unique and safe.' }
         $ids[[string]$action.id] = $true
-        if ([string]$action.type -cnotin @('answer', 'dispatch', 'escalate')) { throw 'Unsupported ROCK action; approvals and shell commands are forbidden.' }
+        if ([string]$action.type -cnotin @('answer', 'dispatch', 'escalate', 'report', 'refresh')) { throw 'Unsupported ROCK action; approvals and shell commands are forbidden.' }
         if ($action.type -eq 'dispatch') {
             if (-not [string]$action.title -or ([string]$action.title).Length -gt 500 -or -not [string]$action.brief -or ([string]$action.brief).Length -gt 50000) { throw 'Dispatch needs bounded title and brief.' }
         } elseif (-not [string]$action.text -or ([string]$action.text).Length -gt 16000) { throw 'Action needs bounded text.' }
     }
     return $result
 }
+
+. (Join-Path $PSScriptRoot 'rock-coordinator.ps1')
+. (Join-Path $PSScriptRoot 'rock-browser.ps1')

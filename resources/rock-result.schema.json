@@ -16,7 +16,7 @@
         "required": ["id", "type"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
-          "type": {"enum": ["answer", "dispatch", "escalate"]},
+          "type": {"enum": ["answer", "dispatch", "escalate", "report", "refresh"]},
           "taskId": {"type": "string", "pattern": "^[0-9]+$"},
           "repository": {"type": "string", "minLength": 1},
           "questionId": {"type": "string", "minLength": 1},
@@ -28,7 +28,7 @@
         "allOf": [
           {"if": {"properties": {"type": {"const": "answer"}}}, "then": {"required": ["taskId", "repository", "questionId", "text"]}},
           {"if": {"properties": {"type": {"const": "dispatch"}}}, "then": {"required": ["taskId", "repository", "title", "brief"]}},
-          {"if": {"properties": {"type": {"const": "escalate"}}}, "then": {"required": ["text"]}}
+          {"if": {"properties": {"type": {"enum": ["escalate", "report", "refresh"]}}}, "then": {"required": ["text"]}}
         ]
       }
     }

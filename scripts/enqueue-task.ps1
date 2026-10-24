@@ -281,6 +281,12 @@ if ($RockId) {
     if ($null -eq $rockConfig -or -not $RockActionId -or [string]$identity.adapter -cne 'asana') { throw 'Direct ROCK intake requires enabled configuration and a native Asana identity.' }
     $owner = Get-FactoryRockOrchestrator $rockConfig $RockId
     if (-not (Test-FactoryRockBinding $owner ([string]$identity.stateId) ([string]$context.repositoryRoot))) { throw 'ROCK does not own this task/repository.' }
+    if ([bool](Read-FactoryRockMemory $rockConfig $RockId).paused -or [bool](Read-FactoryRockCoordinatorMemory $rockConfig).paused) { throw 'Deferred: ROCK coordinator or goal is paused.' }
+    $binding = Get-FactoryRockOwnedBinding $rockConfig ([string]$identity.stateId) ([string]$context.repositoryRoot)
+    if ([string](Get-FactoryNestedValue $binding 'mode' 'execute') -ceq 'observe') { throw 'Observation-only ROCK binding cannot enqueue tasks.' }
+    if ([bool](Get-FactoryNestedValue $binding 'requiresMergeGate' $true) -and $brief -notmatch '(?im)^\s*Merge gate:\s*ask Igor before merging\s*$') { $brief += "`n`nMerge gate: ask Igor before merging" }
+    $dependencyCheck = Test-FactoryRockPrerequisites $rockConfig ([string]$identity.stateId) ([string]$context.repositoryRoot)
+    if (-not $dependencyCheck.ready) { throw "Deferred: prerequisites: $($dependencyCheck.blockers -join '; ')" }
 }
 try {
     $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)

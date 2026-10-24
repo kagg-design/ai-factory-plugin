@@ -2034,7 +2034,13 @@ function Write-CliHelp {
             @(
                 'factory rock [status|questions] [ROCK_GID]',
                 'factory rock answer ROCK_GID QUESTION_ID --text "operator answer"',
-                'factory rock pause|resume ROCK_GID',
+                'factory rock pause|resume [ROCK_GID|all]',
+                'factory rock configure --file REVIEWED_CONFIG',
+                'factory rock cycle [ROCK_GID]',
+                'factory rock dependencies [ROCK_GID]',
+                'factory rock browser list|claim [ROCK_GID]',
+                'factory rock browser confirm|defer|absent|retry|discard --file RECEIPT',
+                'factory rock withdraw ROCK_GID QUESTION_ID --text "supervisor review reason"',
                 'factory rock import ROCK_GID --file UTF8_SNAPSHOT',
                 'factory rock retry ROCK_GID EVENT_ID',
                 'Private ROCK memory and direct decisions. Answers do not approve GO or merge gates.'
@@ -2298,8 +2304,27 @@ if ($normalizedCommand -eq 'rock') {
     $values = @($remainingValues)
     if ($values.Count -gt 0) { $argsMap.EpicGid = $values[0] }
     switch ($action) {
+        'configure' {
+            $argsMap.Remove('EpicGid')
+            if ($File -and $values.Count -eq 0) { $argsMap.File = $File }
+            elseif ($values.Count -eq 2 -and $values[0] -ceq '--file' -and -not $File) { $argsMap.File = $values[1] }
+            else { throw 'Use: factory rock configure --file REVIEWED_CONFIG' }
+        }
+        { $_ -in @('cycle', 'dependencies') } { if ($values.Count -gt 1 -or $File) { throw 'Unexpected ROCK arguments.' } }
+        'browser' {
+            $argsMap.Remove('EpicGid')
+            $argsMap.BrowserAction = if ($values.Count) { $values[0] } else { 'list' }
+            if ($argsMap.BrowserAction -in @('list', 'claim')) {
+                if ($values.Count -gt 2 -or $File) { throw 'Use: factory rock browser list|claim [ROCK_GID]' }
+                if ($values.Count -eq 2) { $argsMap.EpicGid = $values[1] }
+            } elseif ($argsMap.BrowserAction -in @('confirm', 'defer', 'absent', 'retry', 'discard')) {
+                if ($values.Count -eq 1 -and $File) { $argsMap.File = $File }
+                elseif ($values.Count -eq 3 -and $values[1] -ceq '--file' -and -not $File) { $argsMap.File = $values[2] }
+                else { throw 'Use: factory rock browser confirm|defer|absent|retry --file RECEIPT' }
+            } else { throw 'Unknown ROCK browser action.' }
+        }
         { $_ -in @('status', 'questions', 'pause', 'resume') } { if ($values.Count -gt 1 -or $File) { throw 'Unexpected ROCK arguments.' } }
-        'answer' { if ($values.Count -ne 4 -or $values[2] -cne '--text' -or $File) { throw 'Use: factory rock answer ROCK_GID QUESTION_ID --text "answer"' }; $argsMap.QuestionId = $values[1]; $argsMap.Text = $values[3] }
+        { $_ -in @('answer', 'withdraw') } { if ($values.Count -ne 4 -or $values[2] -cne '--text' -or $File) { throw 'Use: factory rock answer|withdraw ROCK_GID QUESTION_ID --text "answer or review reason"' }; $argsMap.QuestionId = $values[1]; $argsMap.Text = $values[3] }
         'import' {
             if ($values.Count -eq 3 -and $values[1] -ceq '--file' -and -not $File) { $argsMap.File = $values[2] }
             elseif ($values.Count -eq 1 -and $File) { $argsMap.File = $File }

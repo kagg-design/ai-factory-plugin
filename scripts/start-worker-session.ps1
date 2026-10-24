@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "codex-runtime.ps1")
 . (Join-Path $PSScriptRoot "asana-common.ps1")
 . (Join-Path $PSScriptRoot 'quality-gates.ps1')
+. (Join-Path $PSScriptRoot 'rock-common.ps1')
 
 if (-not $ClaudeCommand) {
     $ClaudeCommand = if ($env:CLAUDE_FACTORY_CLAUDE_COMMAND) {
@@ -53,6 +54,11 @@ try {
     $mutex = Enter-FactoryMutex -ProjectKey $context.projectKey
     $state = Read-FactoryJson -Path $context.statePath
     $task = Get-FactoryTask -State $state -TaskId $TaskId
+    $dependencyCheck = Test-FactoryRockTaskLaunchPrerequisites $context $config $task
+    if (-not $dependencyCheck.ready) {
+        [ordered]@{ taskId = $TaskId; deferred = $true; status = [string]$task.status; reason = $dependencyCheck.blockers -join '; ' } | ConvertTo-Json
+        return
+    }
 $pendingInstructions = [string](Get-FactoryNestedValue -Target $task -Name "pendingInstructions" -Default "")
 $reworkRequestedAt = [string](Get-FactoryNestedValue -Target $task -Name "reworkRequestedAt" -Default "")
 $existingCommit = [string](Get-FactoryNestedValue -Target $task -Name "commit" -Default "")

@@ -1,17 +1,88 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
-    [ValidateSet('status', 'questions', 'answer', 'pause', 'resume', 'import', 'retry')][string]$Action = 'status',
-    [string]$EpicGid = '', [string]$QuestionId = '', [string]$Text = '', [string]$File = '', [string]$EventId = ''
+    [ValidateSet('status', 'questions', 'answer', 'withdraw', 'pause', 'resume', 'import', 'retry', 'configure', 'cycle', 'browser', 'dependencies')][string]$Action = 'status',
+    [string]$EpicGid = '', [string]$QuestionId = '', [string]$Text = '', [string]$File = '', [string]$EventId = '',
+    [ValidateSet('list', 'claim', 'confirm', 'defer', 'absent', 'retry', 'discard')][string]$BrowserAction = 'list'
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rock-common.ps1')
 $context = & (Join-Path $PSScriptRoot 'project-context.ps1') -Repository $Repository | ConvertFrom-Json
 $config = Read-FactoryJson -Path $context.configPath
+if ($Action -eq 'configure') {
+    if (-not $File) { throw 'Configure requires a reviewed direct ROCK JSON file.' }
+    $reviewed = Get-FactoryRockConfiguration -ConfigPath ([IO.Path]::GetFullPath($File))
+    if ($null -eq $reviewed) { throw 'The reviewed direct configuration must be enabled.' }
+    $bindings = @($reviewed.orchestrators | ForEach-Object { @($_.ownedTasks) + @($_.watchedTasks) })
+    if (-not @($bindings | Where-Object { Test-FactorySamePath ([string]$_.repository) ([string]$context.repositoryRoot) }).Count) { throw 'This project has no reviewed ownership/watch binding.' }
+    $destination = Join-Path (Get-FactoryRockCoordinatorPaths $reviewed).root 'config.json'
+    $raw = Read-FactoryJson ([IO.Path]::GetFullPath($File))
+    $mutex = Enter-FactoryMutex -ProjectKey ([string]$context.projectKey)
+    try {
+        Write-FactoryJsonAtomic $destination $raw
+        $settings = Get-FactoryNestedValue $config 'rocks'
+        if ($null -eq $settings) { $settings = [pscustomobject]@{}; Set-FactoryProperty $config 'rocks' $settings }
+        Set-FactoryProperty $settings 'enabled' $true
+        Set-FactoryProperty $settings 'configPath' $destination
+        Write-FactoryJsonAtomic $context.configPath $config
+    } finally { Exit-FactoryMutex $mutex }
+    [pscustomobject]@{ configured = $true; configurationPath = $destination; repository = [string]$context.repositoryRoot; factoryPauseAndActivityPreserved = $true } | ConvertTo-Json
+    return
+}
 $rock = Get-FactoryRockConfiguration -Config $config
 if ($null -eq $rock) { throw 'Direct ROCK is disabled for this project. Configure rocks.enabled and rocks.configPath.' }
-if ($Action -in @('answer', 'pause', 'resume', 'import', 'retry') -and -not $EpicGid) { throw 'This action requires a ROCK epic GID.' }
+if ($Action -in @('answer', 'withdraw', 'import', 'retry') -and -not $EpicGid) { throw 'This action requires a ROCK epic GID.' }
+if ($Action -in @('pause', 'resume') -and (-not $EpicGid -or $EpicGid -ceq 'all')) {
+    $null = Update-FactoryRockCoordinatorMemory $rock { param($record) $record.paused = $Action -eq 'pause' }
+    if ($Action -eq 'resume') { Start-FactoryRockService -Context $context -Config $config }
+    Write-Output "Shared ROCK coordinator: $Action. Factory activity and pause flags are preserved."
+    return
+}
 if ($EpicGid) { $null = Get-FactoryRockOrchestrator $rock $EpicGid }
+if ($Action -eq 'cycle') {
+    . (Join-Path $PSScriptRoot 'rock-actions.ps1')
+    Invoke-FactoryRockCoordinatorCycle $rock -Epic $EpicGid | ConvertTo-Json -Depth 8
+    return
+}
+if ($Action -eq 'browser') {
+    Invoke-FactoryRockBrowserControl $rock -Action $BrowserAction -EpicGid $EpicGid -ReceiptFile $File | ConvertTo-Json -Depth 30
+    return
+}
+if ($Action -eq 'dependencies') {
+    foreach ($goal in @($rock.orchestrators)) {
+        if ($EpicGid -and [string]$goal.epicGid -cne $EpicGid) { continue }
+        foreach ($binding in @($goal.ownedTasks)) { [pscustomobject]@{ rockId = [string]$goal.epicGid; taskId = [string]$binding.taskId; repository = [string]$binding.repository; prerequisites = Test-FactoryRockPrerequisites $rock ([string]$binding.taskId) ([string]$binding.repository) } | ConvertTo-Json -Depth 20 -Compress }
+    }
+    return
+}
+if ($Action -eq 'withdraw') {
+    if (-not $QuestionId -or -not $Text.Trim() -or $Text.Length -gt 16000) { throw 'Withdraw requires an agent question ID and a review reason.' }
+    # A supervisor may withdraw an erroneous agent question, never manufacture
+    # an operator answer or approval. An already published question needs a visible correction.
+    $paths = Get-FactoryRockCoordinatorPaths $rock
+    $browserId = Get-FactoryTextSha256 "browser/$EpicGid/comment/$QuestionId"
+    $browserPath = Join-Path $paths.outbox "$browserId.json"
+    $browserMutex = Enter-FactoryMutex -ProjectKey "rock-browser-$((Get-FactoryTextSha256 $paths.root).Substring(0,16))"
+    try {
+        $item = if (Test-Path -LiteralPath $browserPath) { Read-FactoryJson $browserPath } else { $null }
+        if ($null -ne $item -and ($item.status -notin @('pending', 'superseded') -or [bool]$item.needsVerification)) { throw 'Inspect uncertain/published browser work before withdrawing this question.' }
+        $null = Update-FactoryRockMemory $rock $EpicGid {
+            param($memory)
+            $question = @($memory.questions | Where-Object { [string]$_.id -ceq $QuestionId })
+            if ($question.Count -ne 1 -or $question[0].status -notin @('open', 'withdrawn')) { throw 'Only an open agent question can be withdrawn.' }
+            $question[0].status = 'withdrawn'
+            Set-FactoryProperty $question[0] 'reviewReason' $Text
+            Set-FactoryProperty $question[0] 'reviewedAt' (Get-FactoryUtcTimestamp)
+            $reviewKey = "withdraw/$QuestionId"
+            if (-not @($memory.decisions | Where-Object { [string](Get-FactoryNestedValue $_ 'reviewId') -ceq $reviewKey }).Count) {
+                $memory.decisions = @($memory.decisions) + @([pscustomobject]@{actor='factory-supervisor';reviewId=$reviewKey;questionId=$QuestionId;text="Agent question withdrawn: $Text No operator answer or approval was recorded.";createdAt=Get-FactoryUtcTimestamp})
+            }
+        }
+        if ($null -ne $item) { $item.status = 'superseded'; $item.error = $Text; Write-FactoryRockJson $browserPath $item }
+    } finally { Exit-FactoryMutex $browserMutex }
+    Write-Output 'Agent question withdrawn with review reason. No operator answer or approval was recorded.'
+    return
+}
 if ($Action -eq 'answer') {
     if (-not $QuestionId -or -not $Text.Trim() -or $Text.Length -gt 16000) { throw 'Answer requires question ID and 1-16000 characters.' }
     $null = Update-FactoryRockMemory $rock $EpicGid {
@@ -51,6 +122,7 @@ if ($Action -eq 'import') {
         Set-FactoryProperty $memory 'sourceRefreshRequired' $false
         Set-FactoryProperty $memory 'sourcesUpdatedAt' (Get-FactoryUtcTimestamp)
     }
+    $null = Add-FactoryRockEvent $rock $EpicGid "source-import/$id" @{ kind = 'source-import'; taskId = ''; repository = ''; owner = $false; snapshot = $destination }
     Write-Output "Saved source snapshot: $destination. Imported text does not grant operator authority."
     return
 }
@@ -58,7 +130,7 @@ if ($Action -eq 'retry') {
     if ($EventId -notmatch '^[0-9a-f]{64}$') { throw 'Retry requires a full native event ID.' }
     $paths = Get-FactoryRockPaths $rock $EpicGid
     $path = Join-Path $paths.events "$EventId.json"
-    $mutex = New-Object Threading.Mutex($false, "Local\ClaudeFactory-RockRunner-$EpicGid")
+    $mutex = New-Object Threading.Mutex($false, (Get-FactoryRockCoordinatorPaths $rock).mutexName)
     $owns = $false
     try {
         try { $owns = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owns = $true }
@@ -79,6 +151,8 @@ foreach ($item in @($rock.orchestrators)) {
     Write-Output "Memory: $($paths.root)"
     if ([bool](Get-FactoryNestedValue $memory 'sourceRefreshRequired' $false)) { Write-Output "Browser source refresh required: factory rock import $($item.epicGid) --file SNAPSHOT" }
     if ($Action -eq 'status') {
+        $coordinator = Read-FactoryRockCoordinatorMemory $rock
+        Write-Output "Shared coordinator: $($coordinator.coordinatorId), revision $($coordinator.revision)"
         Write-Output ([string]$memory.summary)
         $events = if (Test-Path -LiteralPath $paths.events) { @(Get-ChildItem -LiteralPath $paths.events -Filter '*.json' -File | ForEach-Object { Read-FactoryJson $_.FullName }) } else { @() }
         Write-Output "Events: pending $(@($events | Where-Object status -eq 'pending').Count), failed $(@($events | Where-Object status -eq 'failed').Count), completed $(@($events | Where-Object status -eq 'completed').Count)"

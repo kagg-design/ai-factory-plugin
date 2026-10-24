@@ -639,7 +639,9 @@ function Invoke-SchedulerTick {
             if ($capacity -le 0) { break }
             $queued = @($state.tasks | Where-Object { [string]$_.status -eq "queued" } | Sort-Object createdAt, id)
             if ($queued.Count -eq 0) { break }
-            $task = $queued[0]
+            $eligible = @($queued | Where-Object { (Test-FactoryRockTaskLaunchPrerequisites $context $configNow $_).ready })
+            if ($eligible.Count -eq 0) { break }
+            $task = $eligible[0]
             if ($Action -eq "run") {
                 Set-SchedulerActivity `
                     -Activity launching `
@@ -653,7 +655,7 @@ function Invoke-SchedulerTick {
                     "-Mode", [string]$task.startMode,
                     "-ClaudeCommand", $ClaudeCommand
                 )
-                $launched.Add($launch)
+                if (-not [bool](Get-CliSafeProperty $launch 'deferred' $false)) { $launched.Add($launch) }
             } catch {
                 $errors.Add($_.Exception.Message)
                 break

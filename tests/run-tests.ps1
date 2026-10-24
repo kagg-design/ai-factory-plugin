@@ -47,6 +47,7 @@ if (-not $RuntimeOnly) {
     & (Join-Path $PSScriptRoot 'local-file-intake.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'asana-integration.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'rock-direct.tests.ps1') -PluginRoot $pluginRoot
+    & (Join-Path $PSScriptRoot 'rock-coordinator.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'quality-gates.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'parallel-safety.tests.ps1') -PluginRoot $pluginRoot
     & (Join-Path $PSScriptRoot 'worker-environment-guard.tests.ps1') -PluginRoot $pluginRoot
