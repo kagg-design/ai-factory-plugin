@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["version","status","summary","tests"],"properties":{"version":{"type":"integer","enum":[1]},"status":{"type":"string","enum":["candidate","not-a-factory-defect","needs-human"]},"summary":{"type":"string"},"tests":{"type":"array","items":{"type":"string"}}}}

@@ -1889,6 +1889,9 @@ function Write-CliHelp {
         'source' {
             @('factory source list','factory source confirm TASK_ID --file READBACK_RECEIPT','Native done Asana add tasks emit a source-completion edge. Complete the exact card through existing authorized access, read back completed=true and confirm its fingerprint. ROCK sources remain coordinator-owned; local worker communication stays unchanged.') | Write-Output
         }
+        'incident' {
+            @('factory incident configure --file REVIEWED_POLICY','factory incident report --file EVIDENCE','factory incident list|status [ID]','factory incident run [ID]','factory incident retry ID','Event-driven Factory-only Codex repair. The native queue deduplicates reports, bounds attempts, runs tests independently and retains a candidate for review. No automatic install, application worker or chat watcher.')|Write-Output
+        }
         "inspect" {
             @(
                 "factory inspect <task-id> [-NoReconcile]",
@@ -2217,6 +2220,22 @@ if ($normalizedCommand -eq "status") {
 }
 
 $context = Get-CliContext
+if($normalizedCommand -eq 'incident'){
+    if($anyDestructiveOptionsUsed -or $startOptionsUsed){throw 'Use: factory help incident'}
+    $incidentAction=if($Target){$Target.ToLowerInvariant()}else{'list'}
+    $incidentArgs=@{Repository=[string]$context.repositoryRoot;Action=$incidentAction}
+    $incidentValues=@($remainingValues)
+    if($incidentAction -in @('report','configure')){
+        if($File -and -not $incidentValues.Count){$incidentArgs.File=$File}
+        elseif(-not $File -and $incidentValues.Count -eq 2 -and $incidentValues[0] -ceq '--file'){$incidentArgs.File=$incidentValues[1]}
+        else{throw 'Incident report/configure requires --file FILE.'}
+    }else{
+        if($File -or $incidentValues.Count -gt 1){throw 'Unexpected incident arguments.'}
+        if($incidentValues.Count){$incidentArgs.Id=$incidentValues[0]}
+    }
+    & (Join-Path $PSScriptRoot 'incident-control.ps1') @incidentArgs
+    exit 0
+}
 if ($normalizedCommand -eq 'source') {
     if ($anyDestructiveOptionsUsed -or $startOptionsUsed) { throw 'Use: factory source list|confirm' }
     $sourceAction = if ($Target) { $Target.ToLowerInvariant() } else { 'list' }

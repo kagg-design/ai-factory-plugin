@@ -48,7 +48,11 @@ integration, and output. Apply these Codex adaptations:
 - Every discovered Factory malfunction requires a report under `docs/tasks`
   in the resolved Factory source checkout, following the canonical defect
   workflow. Never save it in the target application or private runtime.
-  Explicitly ask Igor to authorize the repair in the Factory development chat
+  If `factory incident status` confirms an enabled operator-configured policy
+  for this source repository, hand off the structured evidence with `factory
+  incident report --file FILE` under that standing authorization. Codex prepares
+  a bounded, independently tested candidate in isolation; it cannot install it
+  or change application state. Otherwise explicitly ask Igor to authorize the repair in the Factory development chat
   and provide `do <absolute task path>` to send there. Writing the report does
   not authorize a repair or a `factory new`/`add` handoff.
 - A user prompt beginning with `factory ` is equivalent to the canonical

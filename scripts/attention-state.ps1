@@ -70,7 +70,12 @@ function Sync-FactoryAttentionState {
         catch {
             $rockEvents = @([pscustomobject]@{ kind = 'rock-runtime-error'; taskId = $null; title = 'ROCK private state'; status = 'blocked'; identity = [string]$_.Exception.Message; audience = 'human'; aiActionable = $false; humanDecision = $true; includeInDefaultWait = $true; reason = "ROCK state needs inspection: $($_.Exception.Message)"; occurredAt = ''; command = 'factory rock status' })
         }
-        $currentEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + $ciEvents + $rockEvents
+        $incidentEvents=@()
+        if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'factory-incidents.ps1')){
+            . (Join-Path $PSScriptRoot 'factory-incidents.ps1')
+            $incidentEvents=@(Get-FactoryIncidentAttentionEvents $Context)
+        }
+        $currentEvents = @(Get-FactoryOperatorActionEvents -State $State -Config $Config) + $ciEvents + $rockEvents + $incidentEvents
         $previousActive = @((Get-FactoryNestedValue -Target $attention -Name "activeKeys" -Default @()) | ForEach-Object { [string]$_ })
         $currentKeys = New-Object Collections.Generic.List[string]
         $ciKeys = New-Object 'Collections.Generic.HashSet[string]'

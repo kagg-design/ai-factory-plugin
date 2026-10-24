@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Hand Factory defects directly to a shared event-driven Codex repair queue.
+  Deduplicate cross-project reports, bound attempts, preserve isolated evidence,
+  independently run tests and return an immutable candidate for development
+  review without installing it or changing application factories.
+
 - Let the shared ROCK coordinator publish through its existing Asana access
   after affected factories approve or correct the exact proposal. Native events
   replace an external chat publisher; fail-closed tool guards and actual readback

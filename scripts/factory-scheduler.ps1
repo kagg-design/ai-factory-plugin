@@ -15,6 +15,7 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 $schedulerScriptPath = $MyInvocation.MyCommand.Path
 . (Join-Path $PSScriptRoot "factory-common.ps1")
 . (Join-Path $PSScriptRoot 'rock-common.ps1')
+if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'factory-incidents.ps1')){. (Join-Path $PSScriptRoot 'factory-incidents.ps1')}
 
 if ($RuntimeHome) {
     $env:CLAUDE_FACTORY_HOME = [IO.Path]::GetFullPath($RuntimeHome)
@@ -994,6 +995,7 @@ switch ($Action) {
                     $failureAt = Get-FactoryUtcTimestamp
                     $failureCount++
                     Write-SchedulerLog -Stream stderr -Event "loop-error" -Values @{ pid = $PID; error = $lastError; failureCount = $failureCount }
+                    if(Get-Command Report-FactoryNativeIncident -ErrorAction SilentlyContinue){Report-FactoryNativeIncident $context scheduler 'unhandled-loop-error' $_.Exception.GetType().FullName (Join-Path $context.projectData 'scheduler.stderr.log')}
                 }
                 if ($failureAt) { $pendingFailureAt = $failureAt }
                 $schedulerValues = @{
@@ -1036,6 +1038,7 @@ switch ($Action) {
         } catch {
             $fatalError = $_.Exception.Message
             $exitReason = "fatal scheduler error"
+            if(Get-Command Report-FactoryNativeIncident -ErrorAction SilentlyContinue){Report-FactoryNativeIncident $context scheduler 'fatal-process-error' $_.Exception.GetType().FullName (Join-Path $context.projectData 'scheduler.stderr.log')}
             if ($ownsScheduler) {
                 try {
                     Update-SchedulerState -Values @{

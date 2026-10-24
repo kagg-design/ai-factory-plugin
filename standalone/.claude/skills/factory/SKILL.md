@@ -51,7 +51,22 @@ behavior, relevant timestamps and source/log references, impact, and concrete
 acceptance checks. Distinguish confirmed facts from hypotheses. Keep secrets
 out of the report and leave live runtime state intact.
 
-After saving, explicitly ask Igor to confirm starting this task in the Factory
+When `factory incident status` reports an enabled operator-configured repair
+policy for this Factory source repository, use `factory incident report --file
+EVIDENCE` to hand the defect to Codex under that standing authorization. The
+evidence JSON contains version 1, component, stable errorCode, summary, observed,
+expected, reproduction, evidenceReferences and optional existingReport (the
+relative docs/tasks/TASK file). Never include secret values or raw runtime dumps.
+Native code deduplicates the report, starts one bounded repair in an isolated
+Factory checkout, independently validates it, and returns a candidate for review.
+This does not authorize application changes, production operations, access,
+merge approvals, editing live runtime or automatic installation. Do not ask the
+operator to repeat authorization already supplied by the matching enabled policy.
+Application defects and expected worker failures do not belong in this queue.
+If Codex or the policy is unavailable, retain the report and explain the blockage
+once; do not create a timer, another supervisor or a new cloud chat.
+
+Without that configured authorization, after saving, explicitly ask Igor to confirm starting this task in the Factory
 development chat. State that his confirmation is required, link the absolute
 task path, and supply the exact message to send there: `do <absolute task path>`.
 Make this a clear action request, not an optional offer to fix it later. Do not
